@@ -12,7 +12,7 @@
   PERPLEXITY_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY,
   DEEPSEEK_API_KEY, GIGACHAT_API_KEY, YANDEX_API_KEY, YANDEX_FOLDER_ID
 """
-import os, re, json, time, hashlib, datetime, urllib.request, urllib.error
+import os, re, json, time, hashlib, datetime, urllib.request, urllib.error, ssl, uuid
 
 RUNS = 2  # прогонов на каждый запрос
 
@@ -27,10 +27,57 @@ ENGINES = [
 ]
 
 # ───────────────────────── генерация запросов ─────────────────────────
+# ведущие глаголы-сказуемые: «Внедряю ...», «Продаём ...» снимаем, оставляем ядро
+_NICHE_VERBS = {
+    "внедряю","внедряем","делаю","делаем","продаю","продаём","продаем","произвожу","производим",
+    "оказываю","оказываем","предоставляю","предоставляем","занимаюсь","занимаемся","разрабатываю",
+    "разрабатываем","создаю","создаём","создаем","строю","строим","шью","шьём","шьем","изготавливаю",
+    "изготавливаем","ремонтирую","ремонтируем","устанавливаю","устанавливаем","настраиваю","настраиваем",
+    "веду","ведём","ведем","организую","организуем","провожу","проводим","помогаю","помогаем",
+}
+_NICHE_CUTS = [",", ";", " чтобы", " который", " которые", " которая", " которое",
+               " для того", " так чтобы", " с тем", " под ключ"]
+_NICHE_TRAIL = {"и","по","для","с","на","в","под","от","до","или","а","о","об","со","из"}
+
+def _prep_city(city):
+    """Лёгкое склонение города в предложный падеж: Москва->Москве, Россия->России."""
+    c = (city or "").strip()
+    if not c: return ""
+    cl = c.lower()
+    if cl.endswith("ия"): return c[:-2] + "ии"               # Россия->России
+    if cl.endswith(("а","я")): return c[:-1] + "е"           # Москва->Москве, Тула->Туле
+    if " " not in c and "-" not in c and cl[-1] in "бвгджзклмнпрстфхцчшщ":
+        return c + "е"                                        # Екатеринбург->Екатеринбурге
+    return c                                                  # Сочи, многословные оставляем как есть
+
+def _decap(w):
+    # короткие и аббревиатуры (AI, ИП, 3D) не трогаем, остальное со строчной
+    return w if (len(w) <= 3 or w.isupper()) else w[:1].lower() + w[1:]
+
+def clean_niche(niche):
+    """Из произвольной фразы (даже целого предложения) делает короткое ядро ниши."""
+    n = (niche or "").strip()
+    if not n:
+        return "услугу"
+    low = n.lower()
+    cut = min((low.find(s) for s in _NICHE_CUTS if low.find(s) > 0), default=-1)
+    if cut > 0:
+        n = n[:cut]
+    words = n.strip().rstrip(".").split()
+    if words and words[0].lower() in _NICHE_VERBS:
+        words = words[1:]
+    words = words[:6]
+    while len(words) > 1 and words[-1].lower() in _NICHE_TRAIL:
+        words.pop()
+    if not words:
+        return "услугу"
+    words[0] = _decap(words[0])
+    return " ".join(words).strip()
+
 def generate_queries(niche, city):
-    n = (niche or "услугу").strip().rstrip(".")
+    n = clean_niche(niche)
     N = n[:1].upper() + n[1:]
-    inc = f" в {city}" if city else ""
+    inc = f" в {_prep_city(city)}" if city else ""
     items = [
         (f"Где заказать {n}{inc}?",                        "Поиск исполнителя"),
         (f"Лучшие компании: {n}{inc}",                     "Поиск исполнителя"),
@@ -121,12 +168,42 @@ def ask_gemini(prompt):
                    {"contents": [{"parts": [{"text": prompt}]}]})
     return j["candidates"][0]["content"]["parts"][0]["text"]
 
+# GigaChat: ключ из кабинета (Authorization Key, Basic) меняется на access token на 30 минут.
+# Сертификаты Минцифры в контейнере не ставим -> отключаем проверку TLS для доменов Сбера.
+_GIGA_TOKEN = {"val": "", "exp": 0.0}
+def _giga_ctx():
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+def _giga_token():
+    now = time.time()
+    if _GIGA_TOKEN["val"] and now < _GIGA_TOKEN["exp"]:
+        return _GIGA_TOKEN["val"]
+    auth = os.environ["GIGACHAT_API_KEY"]                       # Authorization Key из кабинета
+    scope = os.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")  # PERS=физлицо, B2B/CORP=юрлицо
+    req = urllib.request.Request(
+        "https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
+        data=f"scope={scope}".encode(), method="POST",
+        headers={"Authorization": "Basic " + auth, "RqUID": str(uuid.uuid4()),
+                 "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=30, context=_giga_ctx()) as r:
+        j = json.loads(r.read().decode())
+    _GIGA_TOKEN["val"] = j["access_token"]
+    _GIGA_TOKEN["exp"] = now + 25 * 60                          # с запасом до истечения (30 мин)
+    return _GIGA_TOKEN["val"]
+
 def ask_gigachat(prompt):
-    # GigaChat: OAuth + self-signed cert РФ. Здесь упрощённый каркас (токен в env).
-    key = os.environ["GIGACHAT_API_KEY"]
-    j = _post_json("https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
-                   {"Authorization": "Bearer "+key, "Content-Type": "application/json"},
-                   {"model": "GigaChat", "messages": [{"role": "user", "content": prompt}]})
+    tok = _giga_token()
+    req = urllib.request.Request(
+        "https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
+        data=json.dumps({"model": os.environ.get("GIGACHAT_MODEL", "GigaChat"),
+                         "messages": [{"role": "user", "content": prompt}]}).encode(),
+        method="POST",
+        headers={"Authorization": "Bearer " + tok, "Content-Type": "application/json", "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=40, context=_giga_ctx()) as r:
+        j = json.loads(r.read().decode())
     return j["choices"][0]["message"]["content"]
 
 def ask_yandex(prompt):
@@ -146,6 +223,13 @@ KEY_ENV = {"perplexity": "PERPLEXITY_API_KEY", "chatgpt": "OPENAI_API_KEY", "cla
 def has_key(engine_id):
     return bool(os.environ.get(KEY_ENV[engine_id]))
 
+def active_engines():
+    """В бою опрашиваем только нейросети с ключом. Без ключей вовсе — мок-демо по всем 7."""
+    if os.environ.get("TEST_MODE") == "1":
+        return ENGINES
+    keyed = [e for e in ENGINES if has_key(e["id"])]
+    return keyed if keyed else ENGINES
+
 # мок-движок: детерминированный «ответ», где бренд то есть, то нет
 _MOCK_COMP = ["Мебель-Сити", "ЛорентМебель", "Гранд-Мебель"]
 def ask_mock(prompt, engine_id, run, brand):
@@ -161,11 +245,12 @@ def ask_mock(prompt, engine_id, run, brand):
 def analyze(brand, brand_short, site, niche, city, on_progress=None):
     queries = generate_queries(niche, city)
     test = os.environ.get("TEST_MODE") == "1"
+    engines = active_engines()
     all_answers = []
     for q in queries:
         q["hits"] = {}
         prompt = q["q"]
-        for e in ENGINES:
+        for e in engines:
             eid = e["id"]; mentions = 0
             for run in range(RUNS):
                 try:
@@ -186,26 +271,27 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None):
 # ───────────────────────── сборка данных отчёта ───────────────────────
 def _rates(queries):
     rates = {}
-    for e in ENGINES:
+    for e in active_engines():
         m = sum(q["hits"].get(e["id"], 0) for q in queries)
         rates[e["id"]] = round(m / (len(queries)*RUNS) * 100)
     return rates
 
 def _groups(queries):
     g = {}
+    ne = len(active_engines())
     for q in queries:
         gg = g.setdefault(q["group"], {"m":0,"mx":0})
-        gg["m"] += sum(q["hits"].values()); gg["mx"] += len(ENGINES)*RUNS
+        gg["m"] += sum(q["hits"].values()); gg["mx"] += ne*RUNS
     return sorted(([k, round(v["m"]/v["mx"]*100)] for k,v in g.items()), key=lambda x:-x[1])
 
 def build_data(brand, brand_short, site, niche, city, queries, competitors):
+    eng = active_engines()
     rates = _rates(queries)
     groups = _groups(queries)
-    total_m = sum(rates[e["id"]] for e in ENGINES)  # не используется напрямую
-    overall = round(sum(q["hits"][e["id"]] for q in queries for e in ENGINES) / (len(queries)*len(ENGINES)*RUNS) * 100)
+    overall = round(sum(q["hits"][e["id"]] for q in queries for e in eng) / (len(queries)*len(eng)*RUNS) * 100)
     strong = [g[0] for g in groups if g[1] >= 45][:2]
     weak   = [g[0] for g in groups if g[1] <= 15]
-    best = max(ENGINES, key=lambda e: rates[e["id"]]); worst = min(ENGINES, key=lambda e: rates[e["id"]])
+    best = max(eng, key=lambda e: rates[e["id"]]); worst = min(eng, key=lambda e: rates[e["id"]])
     weak_txt = ", ".join(weak).lower() if weak else "нишевые и премиальные запросы"
     strong_txt = ", ".join(strong).lower() if strong else "общие коммерческие запросы"
     # примеры из реальной матрицы: один 2/2, один 0/2, один 1/2
@@ -215,7 +301,7 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors):
         "brand": brand, "brand_short": brand_short, "site": _host(site),
         "niche": niche, "city": city, "date": datetime.datetime.now().strftime("%d.%m.%Y"),
         "cover_sub": f"Основные потери: {weak_txt}. Сильная зона: {strong_txt}.",
-        "engines": [dict(e) for e in ENGINES],
+        "engines": [dict(e) for e in eng],
         "queries": queries,
         "result_meaning": {
             "headline": "средняя видимость" if overall>=25 else "низкая видимость",
@@ -240,7 +326,7 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors):
             {"week":"Неделя 3 · доказательства","items":["Разместить 3-5 кейсов с фото, сроками и материалами","Начать сбор отзывов на выбранных площадках"]},
             {"week":"Неделя 4 · внешнее присутствие и замер","items":["Добавить упоминания в отраслевых подборках и каталогах","Провести повторный замер видимости и сравнить с этим отчётом"]},
         ],
-        "method_note": f"Каждой из {len(ENGINES)} нейросетей задано {len(queries)} коммерческих запросов ниши по {RUNS} прогона (всего {len(queries)*len(ENGINES)*RUNS} проверок). В ответах искали упоминание бренда, домена и конкурентов. Где движок умеет искать в интернете, использовался режим веб-поиска. Видимость считается как доля ответов с упоминанием. Выводы основаны на наблюдаемых ответах на дату проверки; результаты нейросетей могут меняться, поэтому замер стоит повторять. Где данные нельзя подтвердить автоматически, используется статус «не удалось определить».",
+        "method_note": f"Каждой из {len(eng)} нейросетей задано {len(queries)} коммерческих запросов ниши по {RUNS} прогона (всего {len(queries)*len(eng)*RUNS} проверок). В ответах искали упоминание бренда, домена и конкурентов. Где движок умеет искать в интернете, использовался режим веб-поиска. Видимость считается как доля ответов с упоминанием. Выводы основаны на наблюдаемых ответах на дату проверки; результаты нейросетей могут меняться, поэтому замер стоит повторять. Где данные нельзя подтвердить автоматически, используется статус «не удалось определить».",
     }
     return data
 
@@ -278,7 +364,7 @@ def _positives(rates, best):
     pos = ["Сайт проверен на доступность для поисковых ИИ-ботов",
            f"Бренд уже появляется в {best['name']} ({rates[best['id']]}% проверок)",
            "Указаны город и специализация, нейросети относят вас к нише"]
-    strong = [e for e in ENGINES if rates[e["id"]] >= 40]
+    strong = [e for e in active_engines() if rates[e["id"]] >= 40]
     if len(strong) >= 2:
         pos.append(f"Заметное присутствие в {strong[0]['name']} и {strong[1]['name']}")
     pos.append("Часть коммерческих запросов уже даёт базовую узнаваемость")
@@ -342,6 +428,6 @@ if __name__ == "__main__":
     d = run(a.brand, a.site, a.niche, a.city, brand_short=a.short, out=a.out)
     rates = _rates(d["queries"])
     print("TEST_MODE:", os.environ.get("TEST_MODE") == "1")
-    print("движки:", [(e["short"], rates[e["id"]]) for e in ENGINES])
+    print("движки:", [(e["short"], rates[e["id"]]) for e in active_engines()])
     print("конкуренты:", [c["name"] for c in d["competitors"]])
     print("JSON:", a.out)

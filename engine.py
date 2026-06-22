@@ -76,13 +76,18 @@ def clean_niche(niche):
     words[0] = _decap(words[0])
     return " ".join(words).strip()
 
-def generate_queries(niche, city, site_info=None):
+def generate_queries(niche, city, site_info=None, aliases=None):
     # боевой режим: запросы под нишу формирует сама нейросеть (с учётом сайта); иначе/при сбое — шаблоны
-    if os.environ.get("TEST_MODE") != "1":
-        q = generate_queries_llm(niche, city, site_info)
-        if q:
-            return q
-    return generate_queries_tpl(niche, city)
+    qs = generate_queries_llm(niche, city, site_info) if os.environ.get("TEST_MODE") != "1" else None
+    if not qs:
+        qs = generate_queries_tpl(niche, city)
+    # выкидываем БРЕНДОВЫЕ запросы (где клиент уже знает компанию): основной % меряет небрендовую видимость
+    al = [a for a in (aliases or ()) if len(a) >= 5]
+    if al:
+        filtered = [q for q in qs if not any(a in q["q"].lower() for a in al)]
+        if len(filtered) >= 5:
+            qs = filtered
+    return qs
 
 def generate_queries_tpl(niche, city):
     n = clean_niche(niche)
@@ -192,9 +197,6 @@ def brand_aliases(site, site_info=None, brand="", brand_short=""):
     for x in (brand, brand_short, host):
         x = (x or "").strip().strip("«»\"'").lower()
         if len(x) >= 3: al.add(x)
-    for nm in ((site_info or {}).get("names") or []):
-        n = nm.strip().strip("«»\"'").lower()
-        if 3 <= len(n) <= 50 and n not in _COMMON: al.add(n)
     base = re.sub(r"\.[a-zа-я]{2,6}$", "", host)              # домен без зоны: vazuza-club.ru -> vazuza-club
     if "-" in base:                                          # многословный домен, единичное слово не берём (геориск)
         al.add(base); al.add(base.replace("-", " "))
@@ -313,6 +315,40 @@ def _schema_phrase(types):
     if found: parts.append("есть разметка: " + ", ".join(found))
     if miss: parts.append("не найдена: " + ", ".join(miss))
     return "; ".join(parts) if parts else "значимая разметка не найдена"
+
+def brand_card(site, site_info, fallback=""):
+    """Каноническое имя бренда + алиасы через нейросеть. Имя компании, НЕ товар и НЕ общая фраза.
+    Возвращает (canonical, aliases:set)."""
+    host = _host(site)
+    base = brand_aliases(site, site_info, fallback or host, fallback or host)
+    ask = _first_keyed_adapter()
+    if not (ask and site_info and site_info.get("ok")):
+        return (fallback or host), base
+    bits = " | ".join(filter(None, [
+        "Домен: " + host,
+        "Заголовок: " + (site_info.get("title") or ""),
+        "Описание: " + (site_info.get("description") or ""),
+        "Названия из разметки: " + ", ".join(site_info.get("names") or []),
+        "Фрагмент: " + (site_info.get("text_excerpt") or "")[:400]]))
+    prompt = ("Определи ОФИЦИАЛЬНОЕ НАЗВАНИЕ КОМПАНИИ или БРЕНДА по данным сайта. "
+              "Это имя организации, а НЕ описание товара/услуги и НЕ общая фраза "
+              "(например «пальто из кашемира» — это товар, не бренд). "
+              'Ответь строго в JSON без пояснений: {"brand":"каноническое имя","aliases":["вариант латиницей","вариант кириллицей","с доменом"]}. '
+              "В aliases — только реальные варианты написания ЭТОГО ЖЕ бренда. Не включай товары, услуги, города, общие слова.\n\n" + bits)
+    try:
+        raw = ask(prompt) or ""
+        obj = json.loads(re.search(r'\{.*\}', raw, re.S).group(0))
+        canonical = (obj.get("brand") or "").strip().strip("«»\"'")
+        if not (2 < len(canonical) <= 50):
+            return (fallback or host), base
+        al = set(base)
+        for a in [canonical] + list(obj.get("aliases") or []):
+            a = (a or "").strip().strip("«»\"'").lower()
+            if 2 < len(a) <= 50 and a not in _COMMON and not any(v == a.split()[0] for v in _NICHE_VERBS):
+                al.add(a)
+        return canonical, {a for a in al if len(a) >= 3}
+    except Exception:
+        return (fallback or host), base
 
 def refine_niche(niche, site_info):
     """По данным сайта уточняет нишу до реальной бизнес-модели (проектное оснащение, опт, премиум и т.п.)."""
@@ -589,9 +625,9 @@ def _ask_one(prompt, eid, run, brand, test):
         return ""   # сеть недоступна -> считаем как не упомянут
 
 def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=None, aliases=None):
-    queries = generate_queries(niche, city, site_info)
     test = os.environ.get("TEST_MODE") == "1"
     aliases = aliases or brand_aliases(site, site_info, brand, brand_short)
+    queries = generate_queries(niche, city, site_info, aliases)
     engines = active_engines()
     for q in queries:
         q["hits"] = {e["id"]: 0 for e in engines}
@@ -681,7 +717,8 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
     zero_engines = [e["name"] for e in eng if rates[e["id"]] == 0]
     groups_pos = [g[0] for g in groups if g[1] > 0]
     groups_zero = [g[0] for g in groups if g[1] == 0]
-    pos_txt = ", ".join(groups_pos); zero_grp_txt = ", ".join(groups_zero)
+    rep_groups = sorted({q["group"] for q in queries if any(v == 2 for v in q["hits"].values())})   # 2/2 хотя бы в одной ячейке
+    pos_txt = ", ".join(groups_pos); zero_grp_txt = ", ".join(groups_zero); rep_txt = ", ".join(rep_groups)
     total = len(queries)*len(eng)*RUNS
     comp_conf = [(n, c) for n, c in competitors if c >= 2]   # подтверждён: упомянут минимум в 2 ответах
     if len(comp_conf) < 2:                                   # по аудиту: блок только при >=2 подтверждённых
@@ -694,7 +731,8 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
         "niche": niche, "city": city, "date": datetime.datetime.now().strftime("%d.%m.%Y"),
         "cover_sub": ("Бренд пока не появляется ни по одному направлению ниши. Первые задачи: усилить страницы услуг, кейсы и внешние упоминания."
                       if zero else
-                      (f"Бренд появляется в части ответов, чаще всего по группам: {pos_txt}."
+                      ((f"Бренд появляется в части ответов. Повторяемые упоминания (2/2) по группам: {rep_txt}." if rep_groups
+                        else f"Бренд появляется в части ответов, пока единичными упоминаниями по группам: {pos_txt}.")
                        + (f" По группам {zero_grp_txt} упоминаний пока нет." if zero_grp_txt else ""))),
         "engines": [dict(e) for e in eng],
         "queries": queries,
@@ -710,7 +748,8 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
                      if zero else (f"Упоминаний пока нет по группам: {zero_grp_txt}." if zero_grp_txt else "Упоминания распределены неравномерно по запросам.")),
             "strong": ("Опорной зоны по данным проверки пока нет. Точку входа обычно дают внешние упоминания, "
                        "на которые опираются нейросети: отзывы, карты, каталоги, плюс понятные страницы услуг на сайте."
-                       if zero else (f"Повторяемые упоминания есть по группам: {pos_txt}. На них можно опереться, но видимость всё ещё низкая." if pos_txt else "Опорных групп с повторяемым упоминанием пока мало.")),
+                       if zero else (f"Повторяемые упоминания (2/2) есть по группам: {rep_txt}. На них можно опереться, но видимость всё ещё низкая." if rep_groups
+                                     else (f"Пока только единичные упоминания (1/2) по группам: {pos_txt}." if pos_txt else "Опорных групп с повторяемым упоминанием пока нет."))),
             "goal": "Поднять не только общий процент, но и число запросов с повторяемым появлением: чтобы бренд возникал в обоих ответах из двух.",
         },
         "examples": examples,
@@ -723,7 +762,7 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
         "site_info": site_info,
         "mentioned_engines": mentioned_engines, "zero_engines": zero_engines,
         "groups_pos": groups_pos, "groups_zero": groups_zero,
-        "positives": _positives(rates, best, zero, site_info, groups_pos),
+        "positives": _positives(rates, best, zero, site_info, rep_groups),
         "blockers": _blockers(groups, zero, site_info, mentioned_engines, zero_engines, groups_zero),
         "recommendations": _recommendations(queries, groups, total, site_info),
         "plan30": _plan30(site_info),
@@ -763,12 +802,12 @@ def _competitor_objs(comp_conf, total):
                      "focus":"коммерческие запросы ниши", "sources":"ответы нейросетей"})
     return objs
 
-def _positives(rates, best, zero, site_info=None, groups_pos=None):
+def _positives(rates, best, zero, site_info=None, rep_groups=None):
     pos = []
     if not zero:
         pos.append(f"Бренд появляется в {best['name']} ({rates[best['id']]}% ответов)")
-        if groups_pos:
-            pos.append("Повторяемые упоминания по группам: " + ", ".join(groups_pos))
+        if rep_groups:
+            pos.append("Повторяемые упоминания (2/2) по группам: " + ", ".join(rep_groups))
     s = site_info or {}
     if s.get("ok"):                                     # реальные активы сайта (проверено)
         sm = _schema_summary(s.get("schema"))
@@ -870,13 +909,9 @@ def _recommendations(queries, groups, total, site_info=None):
 def run(brand, site, niche, city, brand_short=None, out=None):
     site_info = None if os.environ.get("TEST_MODE") == "1" else analyze_site(site)
     niche = refine_niche(niche, site_info)              # уточняем нишу до реальной бизнес-модели по сайту
-    names = (site_info or {}).get("names") or []
-    official = next((n for n in names if 3 <= len(n) <= 45), "")   # официальное имя с сайта (og/schema/title)
-    if official:
-        brand = official; brand_short = official
-    else:
-        brand_short = brand_short or re.sub(r"[«»\"']", "", brand).split("(")[0].strip().split(",")[0].split(" ")[-1]
-    aliases = brand_aliases(site, site_info, brand, brand_short)
+    fallback = (brand_short or re.sub(r"[«»\"']", "", brand or "").split("(")[0].strip().split(",")[0]).strip()
+    canonical, aliases = brand_card(site, site_info, fallback)      # каноническое имя бренда + все алиасы
+    brand = canonical; brand_short = canonical
     queries, competitors = analyze(brand, brand_short, site, niche, city, site_info=site_info, aliases=aliases)
     data = build_data(brand, brand_short, site, niche, city, queries, competitors, site_info=site_info)
     if out:

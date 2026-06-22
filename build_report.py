@@ -262,7 +262,11 @@ def p_summary(d):
     if d.get('zero'):
         stat3_n="0%"; stat3_l="разницы между каналами нет: упоминаний не найдено нигде"
     else:
-        stat3_n=esc(d['best']['name']); stat3_l=f"лучший канал ({d['best']['rate']}%) · слабее всего {esc(d['worst']['name'])} ({d['worst']['rate']}%)"
+        eng=d['engines']; maxr=max(e['rate'] for e in eng); minr=min(e['rate'] for e in eng)
+        best_names=[e['name'] for e in eng if e['rate']==maxr]; worst_names=[e['name'] for e in eng if e['rate']==minr]
+        stat3_n=esc(_join(best_names))
+        stat3_l=(f"результат одинаковый во всех каналах ({maxr}%)" if maxr==minr
+                 else f"лучший канал ({maxr}%) · минимум у {esc(_join(worst_names))} ({minr}%)")
     return f'''<div class="page"><h2><span class="num">01</span>Что означает результат</h2>
       <div class="sec-intro">Короткий вывод по итогам {d['total_answers']} ответов: где бренд уже виден, где теряется и какая ближайшая цель.</div>
       <div class="card"><div style="font-size:13pt;font-weight:700;margin-bottom:2mm">{d['overall']}%: {esc(rm['headline'])}</div>

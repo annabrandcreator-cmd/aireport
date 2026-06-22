@@ -30,8 +30,8 @@ TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO")
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").rstrip("/")
 TBANK_INIT = "https://securepay.tinkoff.ru/v2/Init"
-TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")     # @BotFather
-TG_BOT = os.environ.get("TELEGRAM_BOT_USERNAME", "").lstrip("@")  # имя бота без @
+def tg_token(): return os.environ.get("TELEGRAM_BOT_TOKEN", "")            # читаем live при каждом вызове
+def tg_bot():   return os.environ.get("TELEGRAM_BOT_USERNAME", "").lstrip("@")
 
 app = Flask(__name__)
 
@@ -111,7 +111,7 @@ def send_report_email(to, pdf_path, brand):
 
 # ───────────────────────── Telegram-доставка ─────────────────────────
 def _tg(method, data=None, files=None):
-    url = f"https://api.telegram.org/bot{TG_TOKEN}/{method}"
+    url = f"https://api.telegram.org/bot{tg_token()}/{method}"
     if files:
         b = "----tg" + uuid.uuid4().hex; body = b""
         for k, v in (data or {}).items():
@@ -127,7 +127,7 @@ def _tg(method, data=None, files=None):
         return json.loads(r.read().decode())
 
 def tg_send_message(chat_id, text):
-    if TG_TOKEN: _tg("sendMessage", {"chat_id": chat_id, "text": text})
+    if tg_token(): _tg("sendMessage", {"chat_id": chat_id, "text": text})
 
 def tg_send_document(chat_id, pdf_path, caption=""):
     with open(pdf_path, "rb") as f: content = f.read()
@@ -137,7 +137,7 @@ def tg_send_document(chat_id, pdf_path, caption=""):
 def deliver(o, pdf):
     """Доставка отчёта: основной канал — Telegram, почта — опциональный резерв."""
     sent = False
-    if o["tg_chat_id"] and TG_TOKEN:
+    if o["tg_chat_id"] and tg_token():
         try:
             tg_send_document(o["tg_chat_id"], pdf, f"Готов отчёт о видимости «{o['brand']}» в нейросетях.")
             sent = True
@@ -226,7 +226,7 @@ def tbank_notify():
 @app.get("/thanks")
 def thanks():
     oid = request.args.get("order", "")
-    link = f"https://t.me/{TG_BOT}?start={oid}" if TG_BOT else "#"
+    link = f"https://t.me/{tg_bot()}?start={oid}" if tg_bot() else "#"
     return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
     <div style="font-family:system-ui,Arial;max-width:520px;margin:12vh auto;padding:0 20px;text-align:center;color:#1c1813">
       <h2 style="font-size:24px">Оплата прошла, спасибо!</h2>
@@ -289,7 +289,7 @@ def report(oid):
 def health():
     keys = {k: bool(os.environ.get(v)) for k, v in engine.KEY_ENV.items()}
     return jsonify(ok=True, terminal=TERMINAL, price=PRICE, test_mode=os.environ.get("TEST_MODE") == "1",
-                   telegram=bool(TG_TOKEN), bot=TG_BOT, keys=keys)
+                   telegram=bool(tg_token()), bot=tg_bot(), keys=keys)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8000")))

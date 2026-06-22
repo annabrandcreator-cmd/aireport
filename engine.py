@@ -15,7 +15,7 @@
 import os, re, json, time, hashlib, datetime, urllib.request, urllib.error, ssl, uuid
 from concurrent.futures import ThreadPoolExecutor
 
-RUNS = 2  # прогонов на каждый запрос
+RUNS = max(2, int(os.environ.get("RUNS", "2") or 2))  # прогонов на каждый запрос (для стабильности можно 3-5)
 
 ENGINES = [
     {"id":"perplexity","name":"Perplexity","short":"Pp","note":"ищет в интернете, цитирует источники"},
@@ -156,7 +156,8 @@ def generate_queries_llm(niche, city, site_info=None):
         "Интент коммерческий: человек выбирает, куда потратить деньги (а не «выбор подрядчика» дословно — подбери формулировки под тип бизнеса: "
         "для отеля это выбор места отдыха, для магазина — где купить, для услуг — кому заказать).\n"
         "НЕ добавляй чисто информационные запросы (что такое, как сделать самому, определения). "
-        "Используй регион из данных, не выдумывай произвольные города. Не упоминай конкретные бренды и названия компаний.\n"
+        "Не разбрасывай запросы по разным городам. Если регион не задан явно, или компания работает по всей стране, удалённо или оптом — "
+        "НЕ привязывай запросы к конкретным городам (можно «в России» или вообще без географии). Не упоминай конкретные бренды и названия компаний.\n"
         "Формулируй как ЕСТЕСТВЕННЫЕ вопросы человека к ИИ-ассистенту, а не SEO-ключи. "
         "Плохо: «фабрика мебели металлокаркас Москва адреса». Хорошо: «Какие компании делают офисную мебель на металлокаркасе в Москве?».\n"
         "Верни только сами запросы, каждый с новой строки, без нумерации, кавычек и пояснений."
@@ -316,6 +317,14 @@ def _schema_phrase(types):
     if miss: parts.append("не найдена: " + ", ".join(miss))
     return "; ".join(parts) if parts else "значимая разметка не найдена"
 
+def _clean_brand(s):
+    """Чистит имя бренда: убирает крайние прямые кавычки и балансирует «»."""
+    s = (s or "").strip().strip('"\'').strip()
+    o, c = s.count("«"), s.count("»")
+    if o > c: s += "»" * (o - c)
+    elif c > o: s = "«" * (c - o) + s
+    return s.strip()
+
 def brand_card(site, site_info, fallback=""):
     """Каноническое имя бренда + алиасы через нейросеть. Имя компании, НЕ товар и НЕ общая фраза.
     Возвращает (canonical, aliases:set)."""
@@ -338,7 +347,7 @@ def brand_card(site, site_info, fallback=""):
     try:
         raw = ask(prompt) or ""
         obj = json.loads(re.search(r'\{.*\}', raw, re.S).group(0))
-        canonical = (obj.get("brand") or "").strip().strip("«»\"'")
+        canonical = _clean_brand(obj.get("brand") or "")
         if not (2 < len(canonical) <= 50):
             return (fallback or host), base
         al = set(base)
@@ -615,6 +624,29 @@ def ask_mock(prompt, engine_id, run, brand):
     lst = ([brand] if mentioned else []) + named
     return "По запросу можно рассмотреть: " + ", ".join(lst) + "."
 
+# ── кэш набора запросов на домен (воспроизводимость замера) ───────────
+def _queries_cache_path(site):
+    host = _host(site)
+    d = os.environ.get("QUERIES_DIR") or os.environ.get("REPORTS_DIR") or "/tmp"
+    return os.path.join(d, "qset_" + re.sub(r"[^a-z0-9.]", "_", host) + ".json")
+
+def _load_query_set(site):
+    try:
+        with open(_queries_cache_path(site), encoding="utf-8") as f:
+            obj = json.load(f)
+        qs = obj.get("queries")
+        return [{"q": x["q"], "group": x["group"]} for x in qs] if qs else None
+    except Exception:
+        return None
+
+def _save_query_set(site, queries):
+    try:
+        with open(_queries_cache_path(site), "w", encoding="utf-8") as f:
+            json.dump({"queries": [{"q": x["q"], "group": x["group"]} for x in queries],
+                       "version": datetime.datetime.now().strftime("%Y-%m-%d")}, f, ensure_ascii=False)
+    except Exception:
+        pass
+
 # ───────────────────────── оркестрация ───────────────────────
 def _ask_one(prompt, eid, run, brand, test):
     try:
@@ -627,7 +659,11 @@ def _ask_one(prompt, eid, run, brand, test):
 def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=None, aliases=None):
     test = os.environ.get("TEST_MODE") == "1"
     aliases = aliases or brand_aliases(site, site_info, brand, brand_short)
-    queries = generate_queries(niche, city, site_info, aliases)
+    queries = None if test else _load_query_set(site)        # переиспользуем сохранённый набор -> воспроизводимость
+    if not queries:
+        queries = generate_queries(niche, city, site_info, aliases)
+        if not test:
+            _save_query_set(site, queries)
     engines = active_engines()
     for q in queries:
         q["hits"] = {e["id"]: 0 for e in engines}

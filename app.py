@@ -28,7 +28,9 @@ os.makedirs(REPORTS, exist_ok=True)
 
 TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO")
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
-BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").rstrip("/")
+BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
+if BASE_URL and not BASE_URL.startswith("http"):
+    BASE_URL = "https://" + BASE_URL      # подстраховка: добавим схему, если её забыли
 TBANK_INIT = "https://securepay.tinkoff.ru/v2/Init"
 def tg_token(): return os.environ.get("TELEGRAM_BOT_TOKEN", "")            # читаем live при каждом вызове
 def tg_bot():   return os.environ.get("TELEGRAM_BOT_USERNAME", "").lstrip("@")
@@ -139,12 +141,24 @@ def tg_send_payment_button(chat_id, pay_url, brand):
         "text": f"Заказ на отчёт о видимости «{brand}» в нейросетях принят.\n\nНажмите кнопку, чтобы оплатить 1290 ₽. Сразу после оплаты я пришлю готовый отчёт сюда, в этот чат.",
         "reply_markup": {"inline_keyboard": [[{"text": "Оплатить 1290 ₽", "url": pay_url}]]}})
 
+def report_ready_text(o):
+    """Сообщение, которое идёт ОТДЕЛЬНО после PDF (поэтому «PDF выше»)."""
+    host = engine._host(o["site"]) if o["site"] else (o["brand"] or "ваш сайт")
+    return (f"Готово! Отчёт по сайту «{host}» уже в чате.\n\n"
+            "Скачайте PDF выше: внутри результаты анализа и рекомендации "
+            "по улучшению видимости сайта в нейросетях.")
+
+def tg_send_report(chat_id, pdf_path, o):
+    """Сначала файл (без подписи), затем текстовое сообщение под ним."""
+    tg_send_document(chat_id, pdf_path)            # файл без подписи
+    tg_send_message(chat_id, report_ready_text(o)) # текст идёт ниже PDF
+
 def deliver(o, pdf):
-    """Доставка отчёта: основной канал — Telegram, почта — опциональный резерв."""
+    """Доставка отчёта: основной канал Telegram, почта опциональный резерв."""
     sent = False
     if o["tg_chat_id"] and tg_token():
         try:
-            tg_send_document(o["tg_chat_id"], pdf, f"Готов отчёт о видимости «{o['brand']}» в нейросетях.")
+            tg_send_report(o["tg_chat_id"], pdf, o)
             sent = True
         except Exception as e:
             print("[tg] ошибка отправки:", e)
@@ -220,6 +234,114 @@ button{width:100%;margin-top:22px;padding:15px;border:0;border-radius:30px;backg
 <p class=note>После оплаты вы перейдёте в Telegram-бот, нажмёте «Старт», и отчёт придёт в чат за несколько минут.</p>
 </div></body></html>"""
 
+SITE = "https://annakurbatova.ru"
+THANKS_PAGE = """<!doctype html><html lang=ru><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>Оплата прошла · Анна Курбатова</title>
+<meta name=robots content="noindex">
+<link rel="icon" href="__SITE__/favicons/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="__SITE__/css/site.css">
+<style>
+  body{background:var(--bg,#fff);color:var(--ink,#141210);overflow-x:hidden;}
+  .ty-main{min-height:100vh;min-height:100svh;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;text-align:center;
+    padding:clamp(120px,18vh,180px) 22px clamp(70px,10vh,110px);}
+  .ty-card{max-width:560px;margin:0 auto;position:relative;z-index:2;}
+  .ty-emoji{font-size:clamp(58px,11vw,84px);line-height:1;display:inline-block;
+    animation:pop .7s cubic-bezier(.18,1.4,.4,1) both, floaty 3.4s ease-in-out 1s infinite;}
+  .ty-eyebrow{display:inline-flex;align-items:center;gap:.7em;font-size:12px;font-weight:600;
+    letter-spacing:.2em;text-transform:uppercase;color:var(--muted,#857F74);margin:22px 0 14px;}
+  .ty-eyebrow::before{content:"";width:30px;height:2px;background:var(--coral,#DE4A2C);display:inline-block;}
+  .ty-title{font-weight:500;font-size:clamp(34px,5.4vw,60px);line-height:1.04;
+    letter-spacing:-.026em;margin:0;}
+  .ty-sub{font-size:clamp(16px,1.5vw,20px);line-height:1.55;color:var(--ink-soft,#403B34);
+    max-width:46ch;margin:18px auto 0;}
+  .ty-btn{display:inline-flex;align-items:center;gap:.6em;margin-top:32px;border:0;cursor:pointer;
+    font-family:inherit;font-size:16.5px;font-weight:600;text-decoration:none;border-radius:30px;
+    padding:16px 30px;color:#fff;background:var(--coral,#DE4A2C);
+    box-shadow:0 16px 34px -14px rgba(222,74,44,.7);
+    transition:background .25s ease,transform .2s ease;}
+  .ty-btn:hover{background:var(--coral-deep,#BE3A20);transform:translateY(-2px);}
+  .ty-note{margin-top:18px;font-size:13.5px;color:var(--muted,#857F74);}
+  .confetti{position:fixed;top:-14vh;z-index:1;pointer-events:none;will-change:transform;
+    animation-name:cfall;animation-timing-function:cubic-bezier(.25,.6,.5,1);animation-fill-mode:forwards;}
+  @keyframes cfall{0%{transform:translateY(0) rotateZ(0);opacity:1;}
+    100%{transform:translateY(122vh) rotateZ(720deg);opacity:.95;}}
+  @keyframes pop{0%{transform:scale(0) rotate(-18deg);opacity:0;}
+    100%{transform:scale(1) rotate(0);opacity:1;}}
+  @keyframes floaty{0%,100%{transform:translateY(0);}50%{transform:translateY(-9px);}}
+  @media(max-width:760px){.nav .nav-links{display:none;}}
+  @media(prefers-reduced-motion:reduce){.ty-emoji,.confetti{animation:none;}.confetti{display:none;}}
+</style></head><body>
+
+<nav class="nav solid" aria-label="Навигация">
+  <a class="wordmark" href="__SITE__/">
+    <img class="brand-logo" src="__SITE__/favicons/favicon.svg" alt="Анна Курбатова" width="42" height="42">
+    <span class="wm-text"><span class="wm-name">Анна&nbsp;Курбатова<span class="dot">°</span></span>
+    <span class="wm-desc">AI для бизнеса</span></span>
+  </a>
+  <div class="nav-links">
+    <a href="__SITE__/#vozmojnosti">Возможности</a>
+    <a href="__SITE__/#test">Бесплатный тест</a>
+    <a href="__SITE__/#delayu">Как строится работа</a>
+    <a href="__SITE__/#faq">Вопросы</a>
+    <a href="__SITE__/blog/">Блог</a>
+  </div>
+  <a class="nav-cta" href="https://t.me/anna_kurbatova" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="18" height="18"><path d="M21 3 10.5 13.5M21 3l-6.5 18-4-8-8-4z"/></svg><span>Обсудить задачу</span></a>
+</nav>
+
+<main class="ty-main">
+  <div class="ty-card">
+    <div class="ty-emoji">🎉</div>
+    <div class="ty-eyebrow">Оплата · успешно</div>
+    <h1 class="ty-title">Оплата прошла</h1>
+    <p class="ty-sub">Отчёт уже формируется. Готовый PDF появится в Telegram в течение 10 минут. Эту страницу можно закрыть.</p>
+    <a class="ty-btn" href="__TGLINK__">Вернуться в Telegram &rarr;</a>
+    <div class="ty-note">Письмо не придёт на почту: отчёт приходит прямо в чат бота.</div>
+  </div>
+</main>
+
+<footer class="footer">
+  <div class="wrap">
+    <div class="footer-top">
+      <div class="fw">Анна<br>Курбатова<span class="dot">°</span></div>
+      <div class="fmeta">
+        <a href="__SITE__/ai-audit.html">AI-аудит сайта</a>
+        <a href="__SITE__/blog/">Блог</a>
+        <a href="https://t.me/anna_kurbatova" target="_blank" rel="noopener">Telegram · @anna_kurbatova</a>
+        <a href="https://wa.me/79851944826" target="_blank" rel="noopener">WhatsApp · +7 985 194-48-26</a>
+      </div>
+    </div>
+    <hr>
+    <div class="footer-bot">
+      <span>Внешний руководитель цифрового развития и AI-внедрения</span>
+      <span>ИНН 504508244657</span>
+      <span>© 2026 Анна Курбатова</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+(function(){
+  if(matchMedia('(prefers-reduced-motion:reduce)').matches) return;
+  var colors=['#DE4A2C','#E8B33D','#2FA37C','#BE3A20','#141210','#F0C674'];
+  var n = innerWidth < 600 ? 70 : 120;
+  for(var i=0;i<n;i++){
+    var c=document.createElement('div'); c.className='confetti';
+    var s=6+Math.random()*8;
+    c.style.left=(Math.random()*100)+'vw';
+    c.style.width=s+'px'; c.style.height=(s*0.42)+'px';
+    c.style.background=colors[i%colors.length];
+    c.style.animationDelay=(Math.random()*0.7)+'s';
+    c.style.animationDuration=(2.6+Math.random()*2.4)+'s';
+    if(Math.random()>0.5) c.style.borderRadius='50%';
+    document.body.appendChild(c);
+  }
+  setTimeout(function(){document.querySelectorAll('.confetti').forEach(function(e){e.remove();});},8000);
+})();
+</script>
+</body></html>"""
+
 def err_page(msg, code=502):
     return ("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
             "<div style='font-family:system-ui,Arial;max-width:460px;margin:14vh auto;text-align:center;color:#1c1813;padding:0 20px'>"
@@ -277,15 +399,8 @@ def tbank_notify():
 @app.get("/thanks")
 def thanks():
     oid = request.args.get("order", "")
-    link = f"https://t.me/{tg_bot()}?start={oid}" if tg_bot() else "#"
-    return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-    <div style="font-family:system-ui,Arial;max-width:520px;margin:12vh auto;padding:0 20px;text-align:center;color:#1c1813">
-      <h2 style="font-size:24px">Оплата прошла, спасибо!</h2>
-      <p style="font-size:16px;color:#5e564a;line-height:1.55">Ваш отчёт о видимости уже формируется и придёт
-      в Telegram в течение 10 минут. Можно вернуться в чат и подождать, я пришлю готовый PDF сам.</p>
-      <a href="{link}" style="display:inline-block;margin-top:14px;background:#DE4A2C;color:#fff;font-weight:700;
-      text-decoration:none;padding:14px 26px;border-radius:30px;font-size:16px">Вернуться в Telegram</a>
-    </div>"""
+    link = f"https://t.me/{tg_bot()}?start={oid}" if tg_bot() else SITE
+    return THANKS_PAGE.replace("__TGLINK__", link).replace("__SITE__", SITE)
 
 @app.post("/telegram/webhook")
 def tg_webhook():
@@ -304,7 +419,7 @@ def tg_webhook():
                     c.execute("UPDATE orders SET tg_chat_id=? WHERE id=?", (str(chat), oid))
                 st = o["status"]
                 if st == "done" and o["pdf"] and os.path.exists(o["pdf"]):
-                    try: tg_send_document(chat, o["pdf"], f"Готов отчёт о видимости «{o['brand']}» в нейросетях.")
+                    try: tg_send_report(chat, o["pdf"], o)
                     except Exception as e: print("[tg] ошибка:", e)
                 elif st == "paid":      # оплачено -> запускаем движок именно сейчас
                     tg_send_message(chat, "Оплата подтверждена. Формирую отчёт по 7 нейросетям, пришлю сюда через несколько минут.")

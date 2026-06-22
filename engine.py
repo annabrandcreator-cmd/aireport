@@ -76,10 +76,10 @@ def clean_niche(niche):
     words[0] = _decap(words[0])
     return " ".join(words).strip()
 
-def generate_queries(niche, city, site=""):
-    # боевой режим: запросы под нишу формирует сама нейросеть; при сбое или в тесте — шаблоны
+def generate_queries(niche, city, site_info=None):
+    # боевой режим: запросы под нишу формирует сама нейросеть (с учётом сайта); иначе/при сбое — шаблоны
     if os.environ.get("TEST_MODE") != "1":
-        q = generate_queries_llm(niche, city)
+        q = generate_queries_llm(niche, city, site_info)
         if q:
             return q
     return generate_queries_tpl(niche, city)
@@ -119,20 +119,31 @@ def _classify_query(q):
     return "Услуги ниши"
 
 def _first_keyed_adapter():
-    for e in ENGINES:
-        if has_key(e["id"]):
-            return REAL_ADAPTERS[e["id"]]
+    # вспомогательные задачи (генерация запросов, извлечение конкурентов) — на дешёвом движке,
+    # дорогой веб-поиск GPT бережём для реальных ответов
+    for eid in ("gigachat", "yandex", "deepseek", "gemini", "chatgpt", "claude", "perplexity"):
+        if has_key(eid):
+            return REAL_ADAPTERS[eid]
     return None
 
-def generate_queries_llm(niche, city):
+def generate_queries_llm(niche, city, site_info=None):
     """10 коммерческих запросов под нишу руками нейросети. None -> откат на шаблоны."""
     ask = _first_keyed_adapter()
     if not ask:
         return None
     loc = f" Регион: {city}." if city else ""
+    ctx = ""
+    if site_info and site_info.get("ok"):
+        bits = []
+        if site_info.get("title"): bits.append("Заголовок сайта: " + site_info["title"])
+        if site_info.get("description"): bits.append("Описание: " + site_info["description"])
+        if site_info.get("text_excerpt"): bits.append("Фрагмент сайта: " + site_info["text_excerpt"][:600])
+        if bits:
+            ctx = ("\nДанные с сайта компании (учитывай реальную бизнес-модель: проектная работа, опт, премиум, нишевые услуги, "
+                   "а не только общую формулировку ниши):\n" + "\n".join(bits) + "\n")
     prompt = (
         "Помоги проверить, в каких запросах нейросети рекомендуют ИСПОЛНИТЕЛЯ услуги. "
-        f"Составь 10 коротких поисковых запросов на русском, которые задаёт КЛИЕНТ, выбирающий, КОМУ ЗАКАЗАТЬ услугу в нише: «{niche}».{loc}\n"
+        f"Составь 10 коротких поисковых запросов на русском, которые задаёт КЛИЕНТ, выбирающий, КОМУ ЗАКАЗАТЬ услугу в нише: «{niche}».{loc}{ctx}\n"
         "Только коммерческий интент «выбор исполнителя»: найти компанию или специалиста, сравнить и выбрать лучших, цена и сроки, "
         "надёжность и как выбрать, конкретные подуслуги ниши под заказ.\n"
         "НЕ добавляй информационные запросы (что такое, как сделать самому, статьи, определения) и запросы ради чтения кейсов. "
@@ -176,6 +187,79 @@ def detect_mention(answer, brand, brand_short, site):
         if b and b in a: return True
     h = _host(site)
     return bool(h and h in a)
+
+# ───────────────────────── разбор сайта (доказательная база) ──────────
+def _fetch_text(url, timeout=12, limit=400000):
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (compatible; AIVisibilityBot/1.0)",
+        "Accept": "text/html,application/xhtml+xml,application/xml"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.geturl(), r.read(limit).decode("utf-8", "replace")
+    except urllib.error.HTTPError:
+        raise
+    except Exception:
+        ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+            return r.geturl(), r.read(limit).decode("utf-8", "replace")
+
+def analyze_site(site):
+    """Реально открывает сайт: заголовок, описание, текст, Schema, страницы услуг/кейсов, robots для ИИ-ботов."""
+    host = _host(site)
+    out = {"ok": False, "host": host}
+    if not host:
+        return out
+    html = None
+    for base in ("https://" + host, "http://" + host):
+        try:
+            final, html = _fetch_text(base + "/"); out["url"] = final; break
+        except Exception as e:
+            out["error"] = type(e).__name__
+    if html is None:
+        return out
+    out["ok"] = True
+    m = re.search(r"(?is)<title[^>]*>(.*?)</title>", html)
+    out["title"] = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", m.group(1))).strip()[:160] if m else ""
+    m = re.search(r'(?is)<meta[^>]+name=["\']description["\'][^>]+content=["\'](.*?)["\']', html)
+    out["description"] = re.sub(r"\s+", " ", m.group(1)).strip()[:300] if m else ""
+    txt = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html)
+    out["text_excerpt"] = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", txt)).strip()[:1200]
+    types = set()
+    for blk in re.findall(r'(?is)<script[^>]+ld\+json[^>]*>(.*?)</script>', html):
+        for t in re.findall(r'"@type"\s*:\s*"([^"]+)"', blk):
+            types.add(t)
+    out["schema"] = sorted(types)
+    links = set()
+    for href in re.findall(r'href=["\']([^"\']+)["\']', html):
+        h = href.lower()
+        if h.startswith(("#", "mailto:", "tel:", "javascript:")): continue
+        if h.startswith("http") and host not in h: continue
+        links.add(h)
+    def _cnt(words): return sum(1 for l in links if any(w in l for w in words))
+    out["service_pages"] = _cnt(["услуг", "uslug", "service", "catalog", "продукт", "produkt", "product", "решени", "resheni"])
+    out["case_pages"] = _cnt(["кейс", "kejs", "keys", "case", "портфолио", "portfolio", "проект", "proekt", "project",
+                              "works", "работы", "rabot", "объект", "obekt", "obyekt", "realizov", "примеры", "primery"])
+    out["links_count"] = len(links)
+    out["robots_found"] = False; out["robots_blocks_ai"] = []
+    try:
+        _, robots = _fetch_text("https://" + host + "/robots.txt", timeout=8, limit=60000)
+        out["robots_found"] = True
+        bots = ["gptbot", "oai-searchbot", "perplexitybot", "yandexbot", "google-extended", "claudebot", "ccbot"]
+        blocked = []
+        for seg in re.split(r'(?im)^user-agent:', robots.lower()):
+            who = seg.strip().split("\n")[0].strip()
+            if who in bots and re.search(r'(?m)^\s*disallow:\s*/\s*$', seg):
+                blocked.append(who)
+        out["robots_blocks_ai"] = sorted(set(blocked))
+    except Exception:
+        pass
+    out["sitemap_urls"] = None
+    try:
+        _, sm = _fetch_text("https://" + host + "/sitemap.xml", timeout=8, limit=300000)
+        n = len(re.findall(r"<loc>", sm)); out["sitemap_urls"] = n or None
+    except Exception:
+        pass
+    return out
 
 # гео-основы и платформы/слова, которые НИКОГДА не конкуренты
 _GEO_STEMS = ("росси", "москв", "петербург", "санкт", "рунет", "рф")
@@ -299,10 +383,12 @@ def ask_perplexity(prompt):
 
 def ask_openai(prompt):
     key = os.environ["OPENAI_API_KEY"]
-    # для проверки AI-поиска нужен веб-поиск; модель/режим сверять с актуальной докой
+    # модель с встроенным веб-поиском (chat/completions): реально ищет в интернете и называет компании
+    model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini-search-preview")
     j = _post_json("https://api.openai.com/v1/chat/completions",
                    {"Authorization": "Bearer "+key, "Content-Type": "application/json"},
-                   {"model": "gpt-4o-mini", "messages": [{"role": "user", "content": prompt}]})
+                   {"model": model, "messages": [{"role": "user", "content": prompt}]},
+                   timeout=60)   # веб-поиск дольше обычного
     return j["choices"][0]["message"]["content"]
 
 def ask_claude(prompt):
@@ -412,8 +498,8 @@ def _ask_one(prompt, eid, run, brand, test):
     except Exception:
         return ""   # сеть недоступна -> считаем как не упомянут
 
-def analyze(brand, brand_short, site, niche, city, on_progress=None):
-    queries = generate_queries(niche, city)
+def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=None):
+    queries = generate_queries(niche, city, site_info)
     test = os.environ.get("TEST_MODE") == "1"
     engines = active_engines()
     for q in queries:
@@ -448,7 +534,7 @@ def _groups(queries):
         gg["m"] += sum(q["hits"].values()); gg["mx"] += ne*RUNS
     return sorted(([k, round(v["m"]/v["mx"]*100)] for k,v in g.items()), key=lambda x:-x[1])
 
-def build_data(brand, brand_short, site, niche, city, queries, competitors):
+def build_data(brand, brand_short, site, niche, city, queries, competitors, site_info=None):
     eng = active_engines()
     rates = _rates(queries)
     groups = _groups(queries)
@@ -495,9 +581,10 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors):
             {"name":"Официальный сайт","share":22},{"name":"Каталоги и подборки","share":14},
             {"name":"СМИ и блоги","share":9},{"name":"Соцсети","share":5},
         ],
-        "positives": _positives(rates, best, zero),
-        "blockers": _blockers(groups, zero),
-        "recommendations": _recommendations(queries, groups, total),
+        "site_info": site_info,
+        "positives": _positives(rates, best, zero, site_info),
+        "blockers": _blockers(groups, zero, site_info),
+        "recommendations": _recommendations(queries, groups, total, site_info),
         "plan30": [
             {"week":"Неделя 1 · фундамент","items":["Открыть доступ ИИ-ботам и проверить robots.txt","Чётко описать на сайте, чем занимается компания и для кого","Добавить разметку Organization"]},
             {"week":"Неделя 2 · ключевые услуги","items":["Сделать отдельные страницы под ключевые услуги ниши","Добавить блок вопросов и ответов и разметку Service/FAQPage"]},
@@ -540,60 +627,90 @@ def _competitor_objs(comp_conf, total):
                      "focus":"коммерческие запросы ниши", "sources":"ответы нейросетей"})
     return objs
 
-def _positives(rates, best, zero):
-    # только подтверждённое данными; про сам сайт ничего не утверждаем (его проверка — отдельный механизм)
-    if zero:
-        return ["По результатам этой проверки пока не найдено факторов, которые уже обеспечивают заметную AI-видимость. Для старта это нормально и поправимо."]
-    pos = [f"Бренд появляется в {best['name']} ({rates[best['id']]}% ответов)"]
-    strong = [e for e in active_engines() if rates[e["id"]] >= 40]
-    if len(strong) >= 2:
-        pos.append(f"Заметное присутствие в {strong[0]['name']} и {strong[1]['name']}")
-    pos.append("Часть коммерческих запросов уже даёт упоминания бренда")
+def _positives(rates, best, zero, site_info=None):
+    pos = []
+    if not zero:
+        pos.append(f"Бренд появляется в {best['name']} ({rates[best['id']]}% ответов)")
+        strong = [e for e in active_engines() if rates[e["id"]] >= 40]
+        if len(strong) >= 2:
+            pos.append(f"Заметное присутствие в {strong[0]['name']} и {strong[1]['name']}")
+    s = site_info or {}
+    if s.get("ok"):                                     # реальные активы сайта (проверено)
+        if s.get("schema"):
+            pos.append("На сайте есть разметка Schema.org: " + ", ".join(s["schema"][:4]))
+        if s.get("service_pages"):
+            pos.append(f"Найдены отдельные страницы услуг ({s['service_pages']})")
+        if s.get("case_pages"):
+            pos.append(f"Найдены страницы кейсов или проектов ({s['case_pages']})")
+        if s.get("robots_found") and not s.get("robots_blocks_ai"):
+            pos.append("robots.txt не закрывает доступ ИИ-ботам")
+    if not pos:
+        pos = ["По результатам этой проверки пока не найдено факторов, которые уже обеспечивают заметную AI-видимость. Для старта это нормально и поправимо."]
     return pos[:5]
 
-def _blockers(groups, zero):
-    # формулируем как наблюдения по ответам, а не как непроверенные факты о сайте
-    if zero:
-        return ["Бренд не упомянут ни по одному запросу проверки",
-                "По этим запросам нейросети не называют ваш сайт как источник",
-                "Вероятная причина: мало внешних упоминаний и материалов, на которые опираются нейросети (требует отдельной проверки сайта и источников)"]
-    weak = [g[0].lower() for g in groups if g[1] <= 20]
+def _blockers(groups, zero, site_info=None):
     blk = []
-    if weak: blk.append(f"Слабая видимость по направлениям: {', '.join(weak)}")
-    blk += ["Бренд появляется не в каждом ответе по части запросов",
-            "Мало внешних упоминаний относительно тех, кого называют нейросети",
-            "По части запросов вместо вас называют другие источники"]
+    if zero:
+        blk += ["Бренд не упомянут ни по одному запросу проверки",
+                "По этим запросам нейросети не называют ваш сайт как источник"]
+    else:
+        weak = [g[0].lower() for g in groups if g[1] <= 20]
+        if weak: blk.append(f"Слабая видимость по направлениям: {', '.join(weak)}")
+        blk.append("Бренд появляется не в каждом ответе по части запросов")
+    s = site_info or {}
+    if s.get("ok"):                                     # реальные пробелы сайта (проверено)
+        if s.get("robots_blocks_ai"):
+            blk.append("robots.txt закрывает доступ ИИ-ботам: " + ", ".join(s["robots_blocks_ai"]))
+        if not s.get("schema"):
+            blk.append("Не найдена разметка Schema.org (Organization, Service, FAQPage)")
+        if not s.get("service_pages"):
+            blk.append("Не удалось обнаружить отдельные страницы услуг (если есть, дайте на них прямые ссылки в меню)")
+        if not s.get("case_pages"):
+            blk.append("Не удалось обнаружить страницы кейсов или проектов (если они есть, дайте на них прямые ссылки в меню)")
+    elif s and not s.get("ok"):
+        blk.append("Сайт не удалось открыть для проверки: проверьте адрес и доступность")
+    else:
+        blk.append("Мало внешних упоминаний относительно тех, кого называют нейросети")
     return blk[:5]
 
-def _recommendations(queries, groups, total):
+def _recommendations(queries, groups, total, site_info=None):
     miss = total - sum(v for q in queries for v in q["hits"].values())   # ответов без бренда (из total)
-    return [
-        {"title":"Сделать отдельные страницы под ключевые услуги","status":"не обнаружено",
-         "found":"Не обнаружено отдельных страниц под конкретные услуги ниши: на сайте в основном общая информация.",
-         "why":f"По коммерческим запросам бренд не появился в {miss} из {total} ответов. Отдельные страницы дают нейросетям конкретные факты, которые можно процитировать.",
-         "steps":["Создать страницу под каждую ключевую услугу с понятным заголовком","Описать задачу, решение и измеримый результат","Добавить ответы на 7-10 частых вопросов клиентов","Указать форматы работы, сроки и условия"],
-         "effect":"Высокий","difficulty":"Средняя","term":"1-2 недели"},
-        {"title":"Показать кейсы и доказательства результата","status":"не обнаружено",
-         "found":"Не обнаружено публичных кейсов с конкретикой по реализованным проектам.",
-         "why":"Нейросети охотнее называют тех, у кого есть проверяемые примеры и результаты. Без кейсов сложно попасть в рекомендацию.",
-         "steps":["Опубликовать 3-5 кейсов: задача, что сделано, результат","Добавить отзывы клиентов с именем и компанией","Показать понятные цифры эффекта, где это уместно"],
-         "effect":"Высокий","difficulty":"Средняя","term":"2-3 недели"},
-        {"title":"Нарастить внешние подтверждения о компании","status":"обнаружено",
-         "found":"Найдено ограниченное число внешних упоминаний и отзывов о компании.",
+    s = site_info or {}
+    recs = []
+    if s.get("ok") and s.get("robots_blocks_ai"):       # критично и подтверждено проверкой
+        recs.append({"title":"Открыть сайт для ИИ-поисковиков в robots.txt","status":"","found":"",
+            "why":"robots.txt закрывает доступ ботам: " + ", ".join(s["robots_blocks_ai"]) + ". Пока доступ закрыт, нейросети не могут использовать сайт как источник, и шанс попасть в ответ резко падает.",
+            "steps":["Убрать Disallow для GPTBot, OAI-SearchBot, PerplexityBot, YandexBot, Google-Extended","Проверить, что страницы услуг открыты для индексации"],
+            "effect":"Высокий","difficulty":"Низкая","term":"1 день"})
+    svc_seen = bool(s.get("service_pages")); case_seen = bool(s.get("case_pages"))
+    recs.append({"title":("Усилить страницы ключевых услуг" if svc_seen else "Сделать отдельные страницы под ключевые услуги"),"status":"","found":"",
+         "why":f"По коммерческим запросам бренд не появился в {miss} из {total} ответов. Отдельные понятные страницы услуг дают нейросетям конкретные факты, которые можно процитировать.",
+         "steps":["Под каждую ключевую услугу — отдельная страница с понятным заголовком","Описать задачу, решение и измеримый результат","Добавить ответы на 7-10 частых вопросов клиентов","Указать форматы работы, сроки и условия"],
+         "effect":"Высокий","difficulty":"Средняя","term":"1-2 недели"})
+    recs.append({"title":("Вынести кейсы так, чтобы их видели нейросети" if case_seen else "Показать кейсы и доказательства результата"),"status":"","found":"",
+         "why":("Кейсы на сайте есть, но важно, чтобы они были текстом и с прямыми ссылками: нейросети охотнее называют тех, у кого есть проверяемые примеры." if case_seen
+                else "Нейросети охотнее называют тех, у кого есть проверяемые примеры и результаты. Без кейсов сложно попасть в рекомендацию."),
+         "steps":["Каждый кейс отдельной страницей: задача, что сделано, результат","Добавить отзывы клиентов с именем и компанией","Показать понятные цифры эффекта, где это уместно"],
+         "effect":"Высокий","difficulty":"Средняя","term":"2-3 недели"})
+    recs.append({"title":"Нарастить внешние подтверждения о компании","status":"","found":"",
          "why":"Нейросети собирают ответ из внешних источников: отзывы, карты, тематические подборки и каталоги. Чем больше согласованных упоминаний, тем выше шанс попасть в ответ.",
          "steps":["Собрать отзывы на профильных площадках и картах","Попасть в тематические подборки и каталоги ниши","Привести название и описание компании к единому виду везде"],
-         "effect":"Высокий","difficulty":"Низкая","term":"3-4 недели"},
-        {"title":"Подготовить сайт к AI-поиску технически","status":"частично",
-         "found":"Часть данных о компании не структурирована для машинного чтения.",
-         "why":"Если данные не размечены и доступ для ИИ-ботов ограничен, нейросетям сложнее использовать сайт как прямой источник.",
-         "steps":["Открыть доступ ИИ-ботам в robots.txt (OAI-SearchBot, PerplexityBot, YandexBot, GPTBot)","Добавить разметку Organization, Service и FAQPage","Чётко указать на главной, чем занимается компания и для кого"],
-         "effect":"Средний","difficulty":"Низкая","term":"3-5 дней"},
-    ]
+         "effect":"Высокий","difficulty":"Низкая","term":"3-4 недели"})
+    if not (s.get("ok") and s.get("robots_blocks_ai")):  # если доступ не закрыт — общий технический пункт
+        why_tech = "Разметка и понятная структура помогают нейросетям использовать сайт как источник."
+        if s.get("ok") and not s.get("schema"):
+            why_tech = "На сайте не найдена разметка Schema.org. Без неё нейросетям сложнее считывать факты о компании и услугах."
+        recs.append({"title":"Подготовить сайт к AI-поиску технически","status":"","found":"",
+             "why":why_tech,
+             "steps":["Добавить разметку Organization, Service и FAQPage","Чётко указать на главной, чем занимается компания и для кого","Проверить доступ ИИ-ботам в robots.txt"],
+             "effect":"Средний","difficulty":"Низкая","term":"3-5 дней"})
+    return recs[:5]
 
 def run(brand, site, niche, city, brand_short=None, out=None):
     brand_short = brand_short or re.sub(r"[«»\"']", "", brand).split("(")[0].strip().split(",")[0].split(" ")[-1]
-    queries, competitors = analyze(brand, brand_short, site, niche, city)
-    data = build_data(brand, brand_short, site, niche, city, queries, competitors)
+    site_info = None if os.environ.get("TEST_MODE") == "1" else analyze_site(site)
+    queries, competitors = analyze(brand, brand_short, site, niche, city, site_info=site_info)
+    data = build_data(brand, brand_short, site, niche, city, queries, competitors, site_info=site_info)
     if out:
         with open(out, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=1)
     return data

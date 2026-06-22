@@ -378,11 +378,28 @@ def p_sources(d):
       </div>
       {footer(d)}</div>'''
 
+def _site_evidence(d):
+    s=d.get('site_info') or {}
+    if not s.get('ok'):
+        if s and s.get('host') and not s.get('ok'):
+            return '<div class="box"><h4>Проверка сайта</h4><p>Сайт не удалось открыть автоматически для проверки. Проверьте адрес и доступность для ботов.</p></div>'
+        return ''
+    parts=[]
+    if s.get('sitemap_urls'): parts.append(f"страниц в sitemap: {s['sitemap_urls']}")
+    parts.append(f"ссылок на главной: {s.get('links_count',0)}")
+    parts.append(f"страниц услуг найдено: {s.get('service_pages',0)}")
+    parts.append(f"страниц кейсов/проектов: {s.get('case_pages',0)}")
+    parts.append("Schema.org: "+(", ".join(s['schema'][:4]) if s.get('schema') else "не найдена"))
+    if s.get('robots_found'):
+        parts.append("robots.txt: "+("закрывает ИИ-ботов ("+", ".join(s['robots_blocks_ai'])+")" if s.get('robots_blocks_ai') else "доступ ИИ-ботам открыт"))
+    return f'<div class="box"><h4>Проверка сайта (факты автопроверки)</h4><p>{" · ".join(esc(p) for p in parts)}</p></div>'
+
 def p_works(d):
     pos="".join(f'<li><span class="m mk-y">✓</span><span>{esc(x)}</span></li>' for x in d['positives'])
     blk="".join(f'<li><span class="m mk-n">!</span><span>{esc(x)}</span></li>' for x in d['blockers'])
     return f'''<div class="page"><h2><span class="num">08</span>Что уже работает и что мешает росту</h2>
       <div class="sec-intro">На что можно опереться и что ограничивает видимость прямо сейчас.</div>
+      {_site_evidence(d)}
       <div class="box"><h4 style="color:{GREEN}">Что уже помогает вашей видимости</h4><ul class="ck">{pos}</ul></div>
       <div class="box"><h4 style="color:{RED}">Что мешает росту</h4><ul class="ck">{blk}</ul></div>
       {footer(d)}</div>'''

@@ -128,8 +128,12 @@ def extract_competitors(answers, brand, brand_short, top=3):
 def _post_json(url, headers, payload, timeout=40):
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as ex:
+        body = ex.read().decode("utf-8", "replace")[:500]   # тело ошибки -> видно точную причину
+        raise RuntimeError(f"HTTP {ex.code}: {body}")
 
 def ask_perplexity(prompt):
     key = os.environ["PERPLEXITY_API_KEY"]
@@ -207,11 +211,14 @@ def ask_gigachat(prompt):
     return j["choices"][0]["message"]["content"]
 
 def ask_yandex(prompt):
-    key = os.environ["YANDEX_API_KEY"]; folder = os.environ.get("YANDEX_FOLDER_ID", "")
+    key = os.environ["YANDEX_API_KEY"]; folder = os.environ.get("YANDEX_FOLDER_ID", "").strip()
+    if not folder:
+        raise RuntimeError("YANDEX_FOLDER_ID не задан")
+    model = os.environ.get("YANDEX_MODEL", "yandexgpt-lite")     # можно сменить на yandexgpt
     j = _post_json("https://llm.api.cloud.yandex.net/foundationModels/v1/completion",
-                   {"Authorization": "Api-Key "+key, "Content-Type": "application/json"},
-                   {"modelUri": f"gpt://{folder}/yandexgpt-lite",
-                    "completionOptions": {"temperature": 0.3, "maxTokens": 800},
+                   {"Authorization": "Api-Key "+key, "Content-Type": "application/json", "x-folder-id": folder},
+                   {"modelUri": f"gpt://{folder}/{model}/latest",
+                    "completionOptions": {"stream": False, "temperature": 0.3, "maxTokens": 800},
                     "messages": [{"role": "user", "text": prompt}]})
     return j["result"]["alternatives"][0]["message"]["text"]
 

@@ -70,6 +70,8 @@ def tbank_token(params, password):
 
 def tbank_init(order_id, email):
     password = os.environ["TBANK_PASSWORD"]  # из секрета, не из кода
+    bot = tg_bot()
+    back = f"https://t.me/{bot}?start={order_id}" if bot else f"{BASE_URL}/thanks?order={order_id}"
     payload = {
         "TerminalKey": TERMINAL,
         "Amount": PRICE * 100,                 # в копейках
@@ -77,8 +79,8 @@ def tbank_init(order_id, email):
         "Description": "Отчёт о видимости бренда в нейросетях",
         "PayType": "O",                        # одностадийная оплата (списание сразу)
         "NotificationURL": f"{BASE_URL}/tbank/notify",
-        "SuccessURL": f"{BASE_URL}/thanks?order={order_id}",
-        "FailURL": f"{BASE_URL}/fail?order={order_id}",
+        "SuccessURL": back,                    # возврат в бот, там придёт отчёт
+        "FailURL": back,
     }
     payload["Token"] = tbank_token(payload, password)
     req = urllib.request.Request(TBANK_INIT, data=json.dumps(payload).encode(),
@@ -133,6 +135,11 @@ def tg_send_document(chat_id, pdf_path, caption=""):
     with open(pdf_path, "rb") as f: content = f.read()
     return _tg("sendDocument", {"chat_id": str(chat_id), "caption": caption},
                {"document": ("Отчёт-AI-видимость.pdf", content, "application/pdf")})
+
+def tg_send_payment_button(chat_id, pay_url, brand):
+    _tg("sendMessage", {"chat_id": chat_id,
+        "text": f"Заказ на отчёт о видимости «{brand}» в нейросетях принят.\n\nНажмите кнопку, чтобы оплатить 1290 ₽. Сразу после оплаты я пришлю готовый отчёт сюда, в этот чат.",
+        "reply_markup": {"inline_keyboard": [[{"text": "Оплатить 1290 ₽", "url": pay_url}]]}})
 
 def deliver(o, pdf):
     """Доставка отчёта: основной канал — Telegram, почта — опциональный резерв."""
@@ -232,17 +239,14 @@ def create_payment():
     with db() as c:
         c.execute("INSERT INTO orders(id,created,status,brand,brand_short,site,niche,city,email) VALUES(?,?,?,?,?,?,?,?,?)",
                   (order_id, time.time(), "new", brand, short, site, niche, (f.get("city") or "").strip(), email))
-    try:
-        res = tbank_init(order_id, email)
-    except Exception as e:
-        return err_page("Платёж временно недоступен, попробуйте позже.", 502)
-    if not res.get("Success"):
-        return err_page("Оплата недоступна: " + str(res.get("Message", "ошибка")), 502)
-    with db() as c:
-        c.execute("UPDATE orders SET status='pending', payment_id=? WHERE id=?", (res.get("PaymentId"), order_id))
+    bot = tg_bot()
+    if not bot:
+        return err_page("Сервис временно недоступен, напишите нам в Telegram.", 503)
+    # Ведём клиента в бот: там он жмёт Старт, получает кнопку оплаты, а после оплаты отчёт приходит в чат сам.
+    link = f"https://t.me/{bot}?start={order_id}"
     if request.is_json:
-        return jsonify(paymentUrl=res["PaymentURL"], orderId=order_id)
-    return redirect(res["PaymentURL"], code=302)   # обычная форма -> сразу на оплату
+        return jsonify(redirect=link, orderId=order_id)
+    return redirect(link, code=302)
 
 @app.post("/tbank/notify")
 def tbank_notify():
@@ -299,8 +303,20 @@ def tg_webhook():
                     maybe_start_generation(oid)
                 elif st == "processing":
                     tg_send_message(chat, "Отчёт уже формируется, пришлю его сюда через пару минут.")
-                else:                   # new / pending: оплата ещё не подтверждена
-                    tg_send_message(chat, "Спасибо! Как только оплата подтвердится, я сразу пришлю сюда готовый отчёт.")
+                elif st == "new":       # создаём платёж и шлём кнопку оплаты прямо в чат
+                    try:
+                        res = tbank_init(oid, o["email"])
+                        if res.get("Success"):
+                            with db() as c:
+                                c.execute("UPDATE orders SET status='pending', payment_id=? WHERE id=?", (res.get("PaymentId"), oid))
+                            tg_send_payment_button(chat, res["PaymentURL"], o["brand"])
+                        else:
+                            tg_send_message(chat, "Не удалось создать оплату. Напишите нам, поможем оформить.")
+                    except Exception as e:
+                        print("[pay] ошибка:", e)
+                        tg_send_message(chat, "Оплата временно недоступна, попробуйте чуть позже.")
+                else:                   # pending: платёж уже создан
+                    tg_send_message(chat, "Кнопка оплаты выше. После оплаты отчёт придёт сюда автоматически.")
                 return "OK"
         tg_send_message(chat, "Здравствуйте! Чтобы получить отчёт, перейдите по кнопке после оплаты на сайте.")
     return "OK"

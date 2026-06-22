@@ -160,6 +160,7 @@ def generate(order_id):
     with db() as c:
         o = c.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
     if not o: return
+    print(f"[generate] старт order={order_id} site={o['site']}", flush=True)
     try:
         cached = cache_hit(o["site"])
         if cached:
@@ -171,19 +172,25 @@ def generate(order_id):
         with db() as c:
             c.execute("UPDATE orders SET status='done', pdf=? WHERE id=?", (pdf, order_id))
             o = c.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
-        deliver(o, pdf)   # Telegram (если клиент уже нажал Старт) + опционально почта
+        sent = deliver(o, pdf)   # Telegram (если клиент уже нажал Старт) + опционально почта
+        print(f"[generate] готово order={order_id} pdf_ok={os.path.exists(pdf)} отправлен_в_tg={sent}", flush=True)
     except Exception as e:
-        print("[generate] ошибка:", e)
+        print("[generate] ошибка:", e, flush=True)
         with db() as c:
             c.execute("UPDATE orders SET status='error' WHERE id=?", (order_id,))
 
 def maybe_start_generation(oid):
     """Запускает движок только если заказ оплачен (status='paid'). Защита от двойного старта."""
     with db() as c:
-        o = c.execute("SELECT status FROM orders WHERE id=?", (oid,)).fetchone()
+        o = c.execute("SELECT status, tg_chat_id FROM orders WHERE id=?", (oid,)).fetchone()
         if not o or o["status"] != "paid":
             return False
         c.execute("UPDATE orders SET status='processing' WHERE id=?", (oid,))
+    if o["tg_chat_id"]:
+        tg_send_message(o["tg_chat_id"],
+            "Спасибо за оплату! Ваш отчёт о видимости в нейросетях уже формируется. "
+            "Я пришлю его сюда, в чат, в течение 10 минут. Можно закрыть страницу оплаты, "
+            "я сообщу, как только всё будет готово.")
     threading.Thread(target=generate, args=(oid,), daemon=True).start()
     return True
 
@@ -253,12 +260,15 @@ def tbank_notify():
     data = request.get_json(force=True, silent=True) or {}
     password = os.environ.get("TBANK_PASSWORD", "")
     got = data.get("Token", "")
-    if tbank_token(data, password) != got:
+    ok = tbank_token(data, password) == got
+    print(f"[notify] order={data.get('OrderId')} status={data.get('Status')} success={data.get('Success')} token_ok={ok}", flush=True)
+    if not ok:
         abort(403)                              # подпись не сошлась
     if data.get("Status") in ("CONFIRMED", "AUTHORIZED") and data.get("Success"):
         oid = data.get("OrderId")
         with db() as c:
             o = c.execute("SELECT status, tg_chat_id FROM orders WHERE id=?", (oid,)).fetchone()
+        print(f"[notify] найден={bool(o)} статус={o['status'] if o else None} чат={o['tg_chat_id'] if o else None}", flush=True)
         if o and o["status"] in ("new", "pending"):
             with db() as c:
                 c.execute("UPDATE orders SET status='paid' WHERE id=?", (oid,))   # фиксируем оплату, движок пока НЕ запускаем

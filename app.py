@@ -351,8 +351,18 @@ def report(oid):
 @app.get("/health")
 def health():
     keys = {k: bool(os.environ.get(v)) for k, v in engine.KEY_ENV.items()}
-    return jsonify(ok=True, terminal=TERMINAL, price=PRICE, test_mode=os.environ.get("TEST_MODE") == "1",
-                   telegram=bool(tg_token()), bot=tg_bot(), keys=keys)
+    try:
+        with db() as c:
+            rows = c.execute("SELECT status, COUNT(*) FROM orders GROUP BY status").fetchall()
+            last = c.execute("SELECT id, status, site, tg_chat_id FROM orders ORDER BY created DESC LIMIT 1").fetchone()
+        orders = {r[0]: r[1] for r in rows}
+        last_order = {"id": last["id"], "status": last["status"], "site": last["site"],
+                      "chat_linked": bool(last["tg_chat_id"])} if last else None
+    except Exception as e:
+        orders, last_order = {"err": str(e)}, None
+    return jsonify(ok=True, terminal=TERMINAL, price=PRICE, base_url=BASE_URL,
+                   notify_url=f"{BASE_URL}/tbank/notify", test_mode=os.environ.get("TEST_MODE") == "1",
+                   telegram=bool(tg_token()), bot=tg_bot(), orders=orders, last_order=last_order, keys=keys)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8000")))

@@ -5,7 +5,13 @@
 из 2 прогонов бренд упомянут). Бэкенд позже отдаёт сюда тот же JSON из живых ответов.
 Запуск демо:  python3 build_report.py
 """
-import os, json, math, datetime, html
+import os, re, json, math, datetime, html
+
+def plural(n, one, few, many):
+    n = abs(int(n)); d = n % 10; dd = n % 100
+    if d == 1 and dd != 11: return one
+    if 2 <= d <= 4 and not (12 <= dd <= 14): return few
+    return many
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 FONTS = os.environ.get("FONTS_DIR") or _HERE   # шрифты и ассеты лежат рядом со скриптом (без подпапок)
@@ -39,9 +45,12 @@ def _join_groups(names):
 
 def _matrix_verdict(d):
     """Вывод под матрицей: строится из данных, без зашитых формулировок."""
+    if d.get('overall', 0) == 0:
+        return ("Бренд не появился ни в одном из проверенных ответов: все ячейки 0/2. "
+                "Это отправная точка, дальше задача — получить первые устойчивые упоминания.")
     if d.get('stable_cells', 0) == 0:
-        return ("Пока нет ни одного запроса со стабильным появлением (2 из 2): бренд возникает максимум "
-                "через раз. Это первоочередная зона роста.")
+        return ("Стабильного появления (2 из 2) пока нет: где-то бренд возникает в одном ответе из двух. "
+                "Задача — довести эти запросы до устойчивого появления.")
     top = _join_groups(d.get('top_groups', []))
     weak = _join_groups(d.get('weak_groups', []))
     s = f"Стабильнее всего бренд виден по группам запросов: {top}." if top else "Стабильное появление есть лишь по части запросов."
@@ -81,6 +90,8 @@ def compute(d):
     d['top_groups']=[x['name'] for x in gs[:2]]
     low=[x['name'] for x in gs if x['rate']<=15]
     d['weak_groups']=low[:2] if low else [x['name'] for x in gs[::-1][:2]]
+    d['prio_groups']=[x['name'] for x in sorted(gs, key=lambda x:-x['n'])[:3]]   # самые ёмкие группы (по числу запросов)
+    d['zero']=d['overall']==0
     for c in d['competitors']: c['gap']=c['rate']-d['overall']
     return d
 
@@ -241,29 +252,41 @@ def p_cover(d):
 
 def p_summary(d):
     rm=d['result_meaning']
+    loss_h="Главная потеря" if not d.get('zero') else "Где бренда нет"
+    strong_h="Сильная зона" if not d.get('zero') else "С чего начинать"
+    if d.get('zero'):
+        stat3_n="0%"; stat3_l="разницы между каналами нет: упоминаний не найдено нигде"
+    else:
+        stat3_n=esc(d['best']['name']); stat3_l=f"лучший канал ({d['best']['rate']}%) · слабее всего {esc(d['worst']['name'])} ({d['worst']['rate']}%)"
     return f'''<div class="page"><h2><span class="num">01</span>Что означает результат</h2>
-      <div class="sec-intro">Короткий вывод по итогам {d['total_answers']} проверок: где бренд уже виден, где теряется и какая ближайшая цель.</div>
+      <div class="sec-intro">Короткий вывод по итогам {d['total_answers']} ответов: где бренд уже виден, где теряется и какая ближайшая цель.</div>
       <div class="card"><div style="font-size:13pt;font-weight:700;margin-bottom:2mm">{d['overall']}%: {esc(rm['headline'])}</div>
         <p style="font-size:10.5pt;color:{INK};line-height:1.55">{esc(rm['text'])}</p></div>
       <div class="two" style="margin-top:4mm">
-        <div class="box"><h4>Главная потеря</h4><p>{esc(rm['loss'])}</p></div>
-        <div class="box"><h4>Сильная зона</h4><p>{esc(rm['strong'])}</p></div></div>
+        <div class="box"><h4>{loss_h}</h4><p>{esc(rm['loss'])}</p></div>
+        <div class="box"><h4>{strong_h}</h4><p>{esc(rm['strong'])}</p></div></div>
       <div class="box cream"><h4>Ближайшая цель</h4><p>{esc(rm['goal'])}</p></div>
       <div class="grid3" style="margin-top:5mm">
-        <div class="stat"><div class="n">{d['overall']}%</div><div class="l">средняя видимость по {len(d['engines'])} нейросетям</div></div>
-        <div class="stat"><div class="n">{d['stable_q']} из {len(d['queries'])}</div><div class="l">запросов со стабильным появлением (2 из 2)</div></div>
-        <div class="stat"><div class="n">{d['best']['name']}</div><div class="l">лучший канал ({d['best']['rate']}%) · слабее всего {d['worst']['name']} ({d['worst']['rate']}%)</div></div></div>
-      <div class="box"><h4>Что дальше в отчёте</h4><p>Видимость по каждой нейросети, матрица стабильности (2/2, 1/2, 0/2), разбор по сегментам, примеры реальных ответов, конкуренты и источники, а также персональный план действий с приоритетами и сроками.</p></div>
+        <div class="stat"><div class="n">{d['overall']}%</div><div class="l">средняя видимость по {len(d['engines'])} {plural(len(d['engines']),'нейросети','нейросетям','нейросетям')}</div></div>
+        <div class="stat"><div class="n">{d['stable_q']} из {len(d['queries'])}</div><div class="l">запросов с устойчивым появлением (2 из 2)</div></div>
+        <div class="stat"><div class="n">{stat3_n}</div><div class="l">{stat3_l}</div></div></div>
+      <div class="box"><h4>Что дальше в отчёте</h4><p>Видимость по каждой нейросети, матрица повторяемости (2/2, 1/2, 0/2), разбор по группам запросов, примеры реальных ответов, что работает и что мешает, и персональный план действий с приоритетами и сроками.</p></div>
       {footer(d)}</div>'''
 
 def p_engines(d):
     bars="".join(bar(e['name'], e['rate'], f"{e['mentions']} упоминаний в {e['answers']} ответах · {esc(e['note'])}", wl="150px") for e in d['engines'])
+    if d.get('zero'):
+        strong_p="Пока ни одна сеть не называет бренд: опорных каналов нет. Рост начинается с источников, на которые ссылаются нейросети: отзывы, карты и тематические каталоги."
+        weak_p=f"{_join(d['weak_engines'])} пока не знают бренд по этим запросам. С них и начнём набирать упоминания."
+    else:
+        strong_p=f"Выше всего видимость в {_join(d['strong_engines'])}. Это опорные каналы: держите отзывы и факты по нише на сайте свежими, чтобы удержать позиции."
+        weak_p=f"Ниже всего в {_join(d['weak_engines'])}. Рост здесь дают отзывы, карты и присутствие в тематических каталогах."
     return f'''<div class="page"><h2><span class="num">02</span>Где вас находят нейросети</h2>
       <div class="sec-intro">Каждой нейросети задано {len(d['queries'])} коммерческих запросов вашей ниши по {RUNS} прогона ({d['engines'][0]['answers']} ответов на движок). Процент: доля ответов, где упомянут бренд или сайт.</div>
       <div class="card">{bars}</div>
       <div class="two">
-        <div class="box cream"><h4>Сильные каналы</h4><p>Выше всего видимость в {_join(d['strong_engines'])}. Это опорные каналы: держите отзывы и факты по нише на сайте свежими, чтобы удержать позиции.</p></div>
-        <div class="box"><h4>Слабые каналы</h4><p>Ниже всего в {_join(d['weak_engines'])}. Рост здесь дают отзывы, карты и присутствие в тематических каталогах.</p></div>
+        <div class="box cream"><h4>Сильные каналы</h4><p>{strong_p}</p></div>
+        <div class="box"><h4>Слабые каналы</h4><p>{weak_p}</p></div>
       </div>
       <div class="box"><h4>Как читать</h4><p>Процент: доля из {d['engines'][0]['answers']} ответов, где нейросеть упомянула бренд или сайт. Чем выше, тем чаще вас видит клиент, который спрашивает совета у ИИ.</p></div>
       {footer(d)}</div>'''
@@ -288,14 +311,22 @@ def p_matrix(d):
       {footer(d)}</div>'''
 
 def p_groups(d):
-    bars="".join(bar(g['name'], g['rate'], f"{g['n']} запрос(а) в группе", wl="190px") for g in d['groups'])
+    bars="".join(bar(g['name'], g['rate'], f"{g['n']} {plural(g['n'],'запрос','запроса','запросов')} в группе", wl="190px") for g in d['groups'])
+    if d.get('zero'):
+        loss_p=f"Бренд не появляется ни по одной группе запросов (везде 0%). Самые ёмкие направления для старта: {_join_groups(d['prio_groups'])}."
+        lean_p="Опереться на текущую видимость пока нельзя: её нет ни по одной группе. Точка входа: внешние подтверждения (отзывы, карты, каталоги) и понятные страницы под ключевые услуги."
+        prio_p=f"Начать стоит с самых частотных коммерческих направлений: {_join_groups(d['prio_groups'])}. Параллельно наращивать внешние упоминания, на которые опираются нейросети."
+    else:
+        loss_p=f"Ниже всего видимость в группах: {_join_groups(d['weak_groups'])}. Здесь бренд почти не появляется, а такие запросы часто приносят самых дорогих клиентов."
+        lean_p=f"Выше всего узнаваемость в группах: {_join_groups(d['top_groups'])}. С них стоит начать усиление, чтобы быстрее поднять общий процент."
+        prio_p=f"Сначала усилить сильные группы: {_join_groups(d['top_groups'])}. Это быстрый рост из текущей базы. Затем закрыть слабые: {_join_groups(d['weak_groups'])}, где сейчас близко к нулю."
     return f'''<div class="page"><h2><span class="num">04</span>Видимость по группам запросов</h2>
       <div class="sec-intro">Те же запросы, сгруппированные по направлениям. Видно, в каких сегментах вас находят, а в каких нет.</div>
       <div class="card">{bars}</div>
       <div class="two" style="margin-top:4mm">
-        <div class="box cream"><h4>Главные потери</h4><p>Ниже всего видимость в группах: {_join_groups(d['weak_groups'])}. Здесь бренд почти не появляется, а такие запросы часто приносят самых дорогих клиентов.</p></div>
-        <div class="box"><h4>На что опереться</h4><p>Выше всего узнаваемость в группах: {_join_groups(d['top_groups'])}. С них стоит начать усиление, чтобы быстрее поднять общий процент.</p></div></div>
-      <div class="box"><h4>Приоритет по сегментам</h4><p>Сначала усилить сильные группы: {_join_groups(d['top_groups'])}. Это быстрый рост из текущей базы. Затем закрыть слабые: {_join_groups(d['weak_groups'])}, где сейчас близко к нулю.</p></div>
+        <div class="box cream"><h4>Главные потери</h4><p>{loss_p}</p></div>
+        <div class="box"><h4>На что опереться</h4><p>{lean_p}</p></div></div>
+      <div class="box"><h4>Приоритет по сегментам</h4><p>{prio_p}</p></div>
       {footer(d)}</div>'''
 
 def p_examples(d):
@@ -308,26 +339,30 @@ def p_examples(d):
           <div class="r"><b>{esc(ex['engine'])} назвал:</b> {esc(named)}<br>
           <b>«{esc(d['brand_short'])}»:</b> {esc(ex['result'])}<br>
           <b>Почему:</b> {esc(ex['why'])}</div></div>'''
+    n_ex=len(d['examples'])
+    intro=("Пример ответа из проверки: кого называет нейросеть и появился ли ваш бренд." if n_ex==1
+           else "Несколько ответов из проверки: кого называет нейросеть, появился ли ваш бренд и какая возможная причина.")
+    if d.get('zero'):
+        takeaway="Бренд не появился ни в одном из примеров: на эти запросы нейросеть называет другие компании или общие варианты. Чтобы попасть в ответ, нужны материалы и упоминания именно по этим запросам."
+    else:
+        takeaway="Там, где у бренда есть материалы и упоминания по теме, нейросеть называет его чаще. Там, где их нет, в ответе оказываются другие компании."
     return f'''<div class="page"><h2><span class="num">05</span>Примеры реальных ответов нейросетей</h2>
-      <div class="sec-intro">Несколько ответов из проверки: кого называет нейросеть, появился ли ваш бренд и по какой причине.</div>
+      <div class="sec-intro">{intro}</div>
       {cards}
-      <div class="box cream"><h4>Что показывают примеры</h4><p>Там, где у вас есть страница и отзывы по теме, нейросети называют бренд стабильно. Там, где контента и упоминаний по запросу нет, вас заменяют конкурентами.</p></div>
-      <div class="note">Приведены короткие фрагменты ответов на дату проверки. Полные ответы сохранены и доступны по запросу.</div>
+      <div class="box cream"><h4>Что показывают примеры</h4><p>{takeaway}</p></div>
+      <div class="note">Приведены короткие фрагменты ответов на дату проверки. Причины отсутствия бренда указаны как возможные, а не доказанные.</div>
       {footer(d)}</div>'''
 
 def p_competitors(d):
-    bars=bar(f"{d['brand_short']} (вы)", d['overall'], "ваша текущая видимость", wl="150px", color=ACCENTD, you=True)
-    bars+="".join(bar(c['name'], c['rate'], f"разрыв с вами: +{c['gap']} п.п. · чаще всего по: {esc(c['focus'])}", wl="150px", color=FAINT) for c in d['competitors'])
-    ev=""
-    for c in d['competitors']:
-        ev+=f'''<div class="ex"><div class="q">{esc(c['name'])} · {c['rate']}%</div>
-          <div class="r">Источники ответов: {esc(c['sources'])}<br>
-          Внешних источников с отзывами: <b>{c['reviews']}</b> · материалов на сайте: <b>{c['materials']}</b></div></div>'''
-    return f'''<div class="page"><h2><span class="num">06</span>Кого рекомендуют вместо вас</h2>
-      <div class="sec-intro">Компании, которые нейросети называют чаще на те же запросы. Важно не присутствие, а почему алгоритм выбирает их.</div>
-      <div class="card">{bars}</div>
+    you_bar=bar(f"{d['brand_short']} (вы)", d['overall'], "ваша текущая видимость", wl="150px", color=ACCENTD, you=True)
+    comp_bars="".join(bar(c['name'], c['rate'], f"+{c['gap']} п.п. к вам · упомянут в {c['count']} из {c['total']} ответов", wl="150px", color=FAINT) for c in d['competitors'])
+    ev="".join(f'''<div class="ex"><div class="q">{esc(c['name'])} · {c['rate']}%</div>
+          <div class="r">Упомянут в <b>{c['count']}</b> из <b>{c['total']}</b> ответов нейросетей по вашим запросам.</div></div>''' for c in d['competitors'])
+    return f'''<div class="page"><h2><span class="num">06</span>Кого называют вместо вас</h2>
+      <div class="sec-intro">Компании, которые нейросети чаще всего называли в ответах на ваши запросы. Процент считается так же, как ваш: доля из {d['total_answers']} ответов, где встретилось название.</div>
+      <div class="card">{you_bar}{comp_bars}</div>
       <div style="margin-top:4mm">{ev}</div>
-      <div class="box cream"><h4>Что общего у лидеров</h4><p>Их объединяет не реклама, а количество подтверждений в сети: отзывы на нескольких площадках, материалы на сайте и присутствие в каталогах. Нейросеть собирает ответ из этих источников и называет тех, о ком есть внятная информация. Это управляемо.</p></div>
+      <div class="box cream"><h4>Что это значит</h4><p>Эти компании нейросети находят и называют по вашим запросам, а вас пока нет. Как правило, у них больше согласованных упоминаний в открытых источниках: сайт, отзывы, карты, тематические подборки. Что именно сыграло в каждом случае, видно из полных ответов; точное число отзывов и материалов в этом замере не подсчитывалось.</p></div>
       {footer(d)}</div>'''
 
 def p_sources(d):
@@ -356,7 +391,7 @@ def p_reco(d, items, n0, title_extra=""):
     for i,r in enumerate(items, n0):
         steps="".join(f'<li>{esc(s)}</li>' for s in r['steps'])
         cards+=f'''<div class="rcard"><div class="rcard-h"><span class="rcard-n">{i}</span><h3>{esc(r['title'])}</h3></div>
-          <div class="rlabel">Что обнаружено {status(r['status'])}</div><p>{esc(r['found'])}</p>
+          <div class="rlabel">Результат проверки {status(r['status'])}</div><p>{esc(r['found'])}</p>
           <div class="rlabel">Почему это важно</div><p>{esc(r['why'])}</p>
           <div class="rlabel">Что сделать</div><ul class="rsteps">{steps}</ul>
           {metrics(r['effect'],r['difficulty'],r['term'])}</div>'''
@@ -397,9 +432,16 @@ def p_author(d):
 def build(data, out):
     d=compute(data)
     recs=d['recommendations']
-    body=(p_cover(d)+p_summary(d)+p_engines(d)+p_matrix(d)+p_groups(d)+p_examples(d)
-          +p_competitors(d)+p_sources(d)+p_works(d)
-          +p_reco(d, recs[:2], 1)+p_reco(d, recs[2:], 3)+p_plan(d)+p_author(d))
+    pages=[p_cover(d), p_summary(d), p_engines(d), p_matrix(d), p_groups(d), p_examples(d)]
+    if d.get('competitors'):                  # блок конкурентов только если есть подтверждённые (>=2)
+        pages.append(p_competitors(d))
+    pages += [p_works(d), p_reco(d, recs[:2], 1), p_reco(d, recs[2:], 3), p_plan(d), p_author(d)]
+    body="".join(pages)
+    # секции перенумеровываются последовательно (часть страниц может быть скрыта)
+    cnt=[0]
+    def _renum(m):
+        cnt[0]+=1; return f'<span class="num">{cnt[0]:02d}</span>'
+    body=re.sub(r'<span class="num">\d+</span>', _renum, body)
     doc=f'<!doctype html><html><head><meta charset="utf-8"><style>{css()}</style></head><body>{body}</body></html>'
     from weasyprint import HTML
     HTML(string=doc).write_pdf(out)

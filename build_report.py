@@ -47,10 +47,10 @@ def _matrix_verdict(d):
     """Вывод под матрицей: строится из данных, без зашитых формулировок."""
     if d.get('overall', 0) == 0:
         return ("Бренд не появился ни в одном из проверенных ответов: все ячейки 0/2. "
-                "Это отправная точка, дальше задача — получить первые устойчивые упоминания.")
+                "Это отправная точка, дальше задача — получить первые повторяемые упоминания.")
     if d.get('stable_cells', 0) == 0:
-        return ("Стабильного появления (2 из 2) пока нет: где-то бренд возникает в одном ответе из двух. "
-                "Задача — довести эти запросы до устойчивого появления.")
+        return ("Повторяемого упоминания (2 из 2) пока нет: где-то бренд возникает в одной из двух проверок. "
+                "Задача — довести эти запросы до повторяемого появления.")
     top = _join_groups(d.get('top_groups', []))
     weak = _join_groups(d.get('weak_groups', []))
     s = f"Стабильнее всего бренд виден по группам запросов: {top}." if top else "Стабильное появление есть лишь по части запросов."
@@ -268,7 +268,7 @@ def p_summary(d):
       <div class="box cream"><h4>Ближайшая цель</h4><p>{esc(rm['goal'])}</p></div>
       <div class="grid3" style="margin-top:5mm">
         <div class="stat"><div class="n">{d['overall']}%</div><div class="l">средняя видимость по {len(d['engines'])} {plural(len(d['engines']),'нейросети','нейросетям','нейросетям')}</div></div>
-        <div class="stat"><div class="n">{d['stable_q']} из {len(d['queries'])}</div><div class="l">запросов с устойчивым появлением (2 из 2)</div></div>
+        <div class="stat"><div class="n">{d['stable_q']} из {len(d['queries'])}</div><div class="l">запросов с повторяемым упоминанием (2 из 2)</div></div>
         <div class="stat"><div class="n">{stat3_n}</div><div class="l">{stat3_l}</div></div></div>
       <div class="box"><h4>Что дальше в отчёте</h4><p>Видимость по каждой нейросети, матрица повторяемости (2/2, 1/2, 0/2), разбор по группам запросов, примеры реальных ответов, что работает и что мешает, и персональный план действий с приоритетами и сроками.</p></div>
       {footer(d)}</div>'''
@@ -302,10 +302,10 @@ def p_matrix(d):
         rows+=f'<tr><td class="q">{esc(q["q"])}<div class="grp">{esc(q["group"])}</div></td>{cells}</tr>'
     legend=" · ".join(f'{esc(e["short"])}: {esc(e["name"])}' for e in eng)
     return f'''<div class="page"><h2><span class="num">03</span>В каких ответах бренд появляется, а в каких нет</h2>
-      <div class="sec-intro">Каждый запрос проверен по {RUNS} раза. 2/{RUNS}: бренд появился в обоих ответах (стабильно). 1/{RUNS}: в одном (нестабильно). 0/{RUNS}: не появился.</div>
+      <div class="sec-intro">Каждый запрос проверен по {RUNS} раза. 2/{RUNS}: упоминание повторилось в обеих проверках. 1/{RUNS}: в одной из двух. 0/{RUNS}: не появился.</div>
       <table class="mx"><thead><tr><th class="q">Запрос</th>{head}</tr></thead><tbody>{rows}</tbody></table>
       <div class="two" style="margin-top:5mm">
-        <div class="box"><h4>Итог стабильности</h4><p>Стабильно (2/{RUNS}): <b>{d['stable_cells']}</b> · нестабильно (1/{RUNS}): <b>{d['partial_cells']}</b> · нет (0/{RUNS}): <b>{d['zero_cells']}</b> из {len(d['queries'])*len(eng)} ячеек.</p></div>
+        <div class="box"><h4>Повторяемость упоминаний</h4><p>Повторилось (2/{RUNS}): <b>{d['stable_cells']}</b> · в одной из двух (1/{RUNS}): <b>{d['partial_cells']}</b> · не обнаружено (0/{RUNS}): <b>{d['zero_cells']}</b> из {len(d['queries'])*len(eng)} ячеек.</p></div>
         <div class="box"><h4>Вывод</h4><p>{_matrix_verdict(d)}</p></div></div>
       <div class="note" style="margin-top:4mm">{legend}</div>
       {footer(d)}</div>'''
@@ -313,9 +313,9 @@ def p_matrix(d):
 def p_groups(d):
     bars="".join(bar(g['name'], g['rate'], f"{g['n']} {plural(g['n'],'запрос','запроса','запросов')} в группе", wl="190px") for g in d['groups'])
     if d.get('zero'):
-        loss_p=f"Бренд не появляется ни по одной группе запросов (везде 0%). Самые ёмкие направления для старта: {_join_groups(d['prio_groups'])}."
-        lean_p="Опереться на текущую видимость пока нельзя: её нет ни по одной группе. Точка входа: внешние подтверждения (отзывы, карты, каталоги) и понятные страницы под ключевые услуги."
-        prio_p=f"Начать стоит с самых частотных коммерческих направлений: {_join_groups(d['prio_groups'])}. Параллельно наращивать внешние упоминания, на которые опираются нейросети."
+        loss_p=f"Бренд не появляется ни по одной группе запросов (везде 0%). В этой проверке больше всего запросов пришлось на группы: {_join_groups(d['prio_groups'])}."
+        lean_p="Опереться на текущую видимость пока нельзя: её нет ни по одной группе. Точка входа: внешние упоминания (отзывы, карты, каталоги) и понятные страницы под ключевые услуги."
+        prio_p="Ранжировать направления по важности на таком объёме проверки нельзя. Двигаться стоит сразу по двум линиям: понятные страницы услуг на сайте и внешние упоминания, на которые опираются нейросети."
     else:
         loss_p=f"Ниже всего видимость в группах: {_join_groups(d['weak_groups'])}. Здесь бренд почти не появляется, а такие запросы часто приносят самых дорогих клиентов."
         lean_p=f"Выше всего узнаваемость в группах: {_join_groups(d['top_groups'])}. С них стоит начать усиление, чтобы быстрее поднять общий процент."
@@ -332,7 +332,7 @@ def p_groups(d):
 def p_examples(d):
     cards=""
     for ex in d['examples']:
-        tag={'yes':('tag-yes','Бренд появился'),'no':('tag-no','Бренда нет'),'mid':('tag-mid','Нестабильно')}[ex['kind']]
+        tag={'yes':('tag-yes','Бренд появился'),'no':('tag-no','Бренда нет'),'mid':('tag-mid','В одном из двух')}[ex['kind']]
         named=", ".join(ex['named']) if ex['named'] else "не называл конкретные компании"
         cards+=f'''<div class="ex"><span class="tag {tag[0]}">{tag[1]}</span>
           <div class="q">{esc(ex['query'])}</div>
@@ -350,6 +350,7 @@ def p_examples(d):
       <div class="sec-intro">{intro}</div>
       {cards}
       <div class="box cream"><h4>Что показывают примеры</h4><p>{takeaway}</p></div>
+      {'<div class="box"><h4>Конкуренты</h4><p>В ответах не удалось надёжно определить конкретные компании, которых нейросети рекомендуют вместо бренда: по этим запросам они дают в основном общие советы и категории. Поэтому раздел «Кого называют вместо вас» в этот отчёт не вошёл.</p></div>' if not d.get('competitors') else ''}
       <div class="note">Приведены короткие фрагменты ответов на дату проверки. Причины отсутствия бренда указаны как возможные, а не доказанные.</div>
       {footer(d)}</div>'''
 
@@ -391,12 +392,11 @@ def p_reco(d, items, n0, title_extra=""):
     for i,r in enumerate(items, n0):
         steps="".join(f'<li>{esc(s)}</li>' for s in r['steps'])
         cards+=f'''<div class="rcard"><div class="rcard-h"><span class="rcard-n">{i}</span><h3>{esc(r['title'])}</h3></div>
-          <div class="rlabel">Результат проверки {status(r['status'])}</div><p>{esc(r['found'])}</p>
           <div class="rlabel">Почему это важно</div><p>{esc(r['why'])}</p>
           <div class="rlabel">Что сделать</div><ul class="rsteps">{steps}</ul>
           {metrics(r['effect'],r['difficulty'],r['term'])}</div>'''
-    head=f'<h2><span class="num">09</span>Что сделать именно вам{title_extra}</h2>' if n0==1 else f'<h2>Что сделать именно вам{title_extra}</h2>'
-    intro='<div class="sec-intro">Рекомендации построены на том, что обнаружено у вас в проверке. Сверху то, что даст рост видимости быстрее всего.</div>' if n0==1 else ''
+    head=f'<h2><span class="num">09</span>Что усиливает AI-видимость{title_extra}</h2>' if n0==1 else f'<h2>Что усиливает AI-видимость{title_extra}</h2>'
+    intro='<div class="sec-intro">Базовые шаги, которые повышают шанс попасть в ответы нейросетей. Это общие рекомендации по нише, а не выводы о конкретных страницах вашего сайта: точечный разбор сайта добавим отдельно.</div>' if n0==1 else ''
     return f'''<div class="page">{head}{intro}{cards}{footer(d)}</div>'''
 
 def p_plan(d):

@@ -479,5 +479,29 @@ def health():
                    notify_url=f"{BASE_URL}/tbank/notify", test_mode=os.environ.get("TEST_MODE") == "1",
                    telegram=bool(tg_token()), bot=tg_bot(), orders=orders, last_order=last_order, keys=keys)
 
+@app.get("/selftest")
+def selftest():
+    """Диагностика: 1 запрос на каждую ПОДКЛЮЧЁННУЮ нейросеть, показывает ответ или ошибку.
+    Стоит копейки (по 1 короткому запросу). Если задан SELFTEST_TOKEN — требуем ?token=."""
+    tok = os.environ.get("SELFTEST_TOKEN")
+    if tok and request.args.get("token") != tok:
+        abort(403)
+    niche = request.args.get("niche", "мебель на заказ")
+    city = request.args.get("city", "")
+    prompt = engine.generate_queries(niche, city)[0]["q"]
+    out = {}
+    for e in engine.active_engines():
+        eid = e["id"]; t0 = time.time()
+        try:
+            if os.environ.get("TEST_MODE") == "1" or not engine.has_key(eid):
+                ans = engine.ask_mock(prompt, eid, 0, "тест"); mode = "mock"
+            else:
+                ans = engine.REAL_ADAPTERS[eid](prompt); mode = "real"
+            out[eid] = {"ok": True, "mode": mode, "ms": int((time.time()-t0)*1000),
+                        "len": len(ans or ""), "snippet": (ans or "")[:200]}
+        except Exception as ex:
+            out[eid] = {"ok": False, "ms": int((time.time()-t0)*1000), "error": f"{type(ex).__name__}: {str(ex)[:300]}"}
+    return jsonify(prompt=prompt, test_mode=os.environ.get("TEST_MODE") == "1", engines=out)
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8000")))

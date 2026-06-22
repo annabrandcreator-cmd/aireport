@@ -108,8 +108,8 @@ _Q_INTENTS = [
     (("лучш","топ","сравн","рейтинг","выбрать","какой выбрать","какую выбрать"),   "Сравнение и выбор"),
     (("отзыв","репутац","кейс","пример"),                                          "Отзывы и кейсы"),
     (("надёжн","надежн","гарант","довери","безопас","риск","как выбрать"),         "Надёжность и выбор"),
-    (("кто ","где ","найти","заказать","специалист","компани","исполнител",
-      "агентств","студи","сделать","разработ","внедр","нужен","ищу"),             "Поиск исполнителя"),
+    (("кто ","где ","куда","найти","заказать","купить","поехать","снять","арендовать","специалист","компани",
+      "исполнител","агентств","студи","сделать","разработ","внедр","нужен","ищу","отдохнуть","выбрать место"), "Поиск и выбор"),
 ]
 def _classify_query(q):
     ql = q.lower()
@@ -142,13 +142,18 @@ def generate_queries_llm(niche, city, site_info=None):
             ctx = ("\nДанные с сайта компании (учитывай реальную бизнес-модель: проектная работа, опт, премиум, нишевые услуги, "
                    "а не только общую формулировку ниши):\n" + "\n".join(bits) + "\n")
     prompt = (
-        "Помоги проверить, в каких запросах нейросети рекомендуют ИСПОЛНИТЕЛЯ услуги. "
-        f"Составь 10 коротких поисковых запросов на русском, которые задаёт КЛИЕНТ, выбирающий, КОМУ ЗАКАЗАТЬ услугу в нише: «{niche}».{loc}{ctx}\n"
-        "Только коммерческий интент «выбор исполнителя»: найти компанию или специалиста, сравнить и выбрать лучших, цена и сроки, "
-        "надёжность и как выбрать, конкретные подуслуги ниши под заказ.\n"
-        "НЕ добавляй информационные запросы (что такое, как сделать самому, статьи, определения) и запросы ради чтения кейсов. "
-        "Не выдумывай города и регионы: используй только указанный регион или вообще без географии. "
-        "Не упоминай конкретные бренды и названия компаний.\n"
+        "Помоги проверить, в каких запросах нейросети рекомендуют именно эту компанию или место. "
+        f"Составь 10 коротких поисковых запросов на русском, которые реальный КЛИЕНТ задаёт ИИ-ассистенту, когда ищет и выбирает, "
+        f"где заказать, куда обратиться или куда поехать в нише: «{niche}».{loc}{ctx}\n"
+        "Дай РАЗНЫЙ охват по широте: часть запросов — широкие, где клиент ещё не знает конкретную компанию "
+        "(например «где отдохнуть с семьёй недалеко от Москвы», «аренда коттеджа за городом на выходные», «база отдыха у воды»); "
+        "часть — более конкретные: по услуге, цене и бронированию, отзывам, формату, как выбрать.\n"
+        "Интент коммерческий: человек выбирает, куда потратить деньги (а не «выбор подрядчика» дословно — подбери формулировки под тип бизнеса: "
+        "для отеля это выбор места отдыха, для магазина — где купить, для услуг — кому заказать).\n"
+        "НЕ добавляй чисто информационные запросы (что такое, как сделать самому, определения). "
+        "Используй регион из данных, не выдумывай произвольные города. Не упоминай конкретные бренды и названия компаний.\n"
+        "Формулируй как ЕСТЕСТВЕННЫЕ вопросы человека к ИИ-ассистенту, а не SEO-ключи. "
+        "Плохо: «фабрика мебели металлокаркас Москва адреса». Хорошо: «Какие компании делают офисную мебель на металлокаркасе в Москве?».\n"
         "Верни только сами запросы, каждый с новой строки, без нумерации, кавычек и пояснений."
     )
     try:
@@ -179,14 +184,26 @@ def generate_queries_llm(niche, city, site_info=None):
 def _host(site):
     return re.sub(r"^https?://", "", (site or "")).replace("www.", "").split("/")[0].lower()
 
-def detect_mention(answer, brand, brand_short, site):
+def brand_aliases(site, site_info=None, brand="", brand_short=""):
+    """Все варианты имени бренда: домен, введённое имя, названия с сайта (og:site_name, Schema name, title).
+    По ним детектим упоминание и их же исключаем из конкурентов, чтобы бренд не попал сам к себе в конкуренты."""
+    host = _host(site)
+    al = set()
+    for x in (brand, brand_short, host):
+        x = (x or "").strip().strip("«»\"'").lower()
+        if len(x) >= 3: al.add(x)
+    for nm in ((site_info or {}).get("names") or []):
+        n = nm.strip().strip("«»\"'").lower()
+        if 3 <= len(n) <= 50 and n not in _COMMON: al.add(n)
+    base = re.sub(r"\.[a-zа-я]{2,6}$", "", host)              # домен без зоны: vazuza-club.ru -> vazuza-club
+    if "-" in base:                                          # многословный домен, единичное слово не берём (геориск)
+        al.add(base); al.add(base.replace("-", " "))
+    return {a for a in al if len(a) >= 3}
+
+def detect_mention(answer, aliases):
     if not answer: return False
     a = answer.lower()
-    for b in [brand, brand_short]:
-        b = (b or "").lower().strip().strip("«»\"'")
-        if b and b in a: return True
-    h = _host(site)
-    return bool(h and h in a)
+    return any(al in a for al in (aliases or ()))
 
 # ───────────────────────── разбор сайта (доказательная база) ──────────
 def _fetch_text(url, timeout=12, limit=400000):
@@ -224,11 +241,19 @@ def analyze_site(site):
     out["description"] = re.sub(r"\s+", " ", m.group(1)).strip()[:300] if m else ""
     txt = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html)
     out["text_excerpt"] = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", txt)).strip()[:1200]
-    types = set()
+    types = set(); names = []
+    m = re.search(r'(?is)<meta[^>]+property=["\']og:site_name["\'][^>]+content=["\'](.*?)["\']', html)
+    if m: names.append(m.group(1).strip())
     for blk in re.findall(r'(?is)<script[^>]+ld\+json[^>]*>(.*?)</script>', html):
         for t in re.findall(r'"@type"\s*:\s*"([^"]+)"', blk):
             types.add(t)
+        for nm in re.findall(r'"name"\s*:\s*"([^"]{2,60})"', blk):
+            names.append(nm.strip())
+    if out.get("title"):
+        first = re.split(r'[—\-|·:•]', out["title"])[0].strip()
+        if 2 < len(first) <= 50: names.append(first)
     out["schema"] = sorted(types)
+    out["names"] = list(dict.fromkeys([n for n in names if n and len(n) >= 3]))[:6]
     links = set()
     for href in re.findall(r'href=["\']([^"\']+)["\']', html):
         h = href.lower()
@@ -240,6 +265,12 @@ def analyze_site(site):
     out["case_pages"] = _cnt(["кейс", "kejs", "keys", "case", "портфолио", "portfolio", "проект", "proekt", "project",
                               "works", "работы", "rabot", "объект", "obekt", "obyekt", "realizov", "примеры", "primery"])
     out["links_count"] = len(links)
+    paths = []
+    for l in links:
+        p = re.sub(r'^https?://[^/]+', '', l).split('#')[0].split('?')[0].strip()
+        if p and p != '/' and p not in paths:
+            paths.append(p)
+    out["pages_list"] = paths[:16]
     out["robots_found"] = False; out["robots_blocks_ai"] = []
     try:
         _, robots = _fetch_text("https://" + host + "/robots.txt", timeout=8, limit=60000)
@@ -256,10 +287,56 @@ def analyze_site(site):
     out["sitemap_urls"] = None
     try:
         _, sm = _fetch_text("https://" + host + "/sitemap.xml", timeout=8, limit=300000)
-        n = len(re.findall(r"<loc>", sm)); out["sitemap_urls"] = n or None
+        locs = re.findall(r"<loc>(.*?)</loc>", sm)
+        out["sitemap_urls"] = len(locs) or None
+        sm_paths = []
+        for u in locs:
+            p = re.sub(r'^https?://[^/]+', '', u.strip()).split('?')[0].strip()
+            if p and p not in sm_paths: sm_paths.append(p)
+        if sm_paths:
+            out["pages_list"] = sm_paths[:16]            # карта сайта точнее ссылок с главной
     except Exception:
         pass
     return out
+
+# ── расшифровка Schema.org и уточнение ниши ───────────────────────────
+def _schema_summary(types):
+    t = {str(x).lower() for x in (types or [])}
+    return {"org": bool(t & {"organization", "localbusiness", "corporation", "professionalservice"}),
+            "service": "service" in t, "faq": "faqpage" in t, "product": "product" in t}
+
+def _schema_phrase(types):
+    s = _schema_summary(types)
+    found = [n for f, n in [(s["org"], "организация"), (s["service"], "услуги"), (s["faq"], "FAQ"), (s["product"], "товары")] if f]
+    miss = [n for f, n in [(s["org"], "организация"), (s["service"], "услуги")] if not f]
+    parts = []
+    if found: parts.append("есть разметка: " + ", ".join(found))
+    if miss: parts.append("не найдена: " + ", ".join(miss))
+    return "; ".join(parts) if parts else "значимая разметка не найдена"
+
+def refine_niche(niche, site_info):
+    """По данным сайта уточняет нишу до реальной бизнес-модели (проектное оснащение, опт, премиум и т.п.)."""
+    if not (site_info and site_info.get("ok")):
+        return niche
+    ask = _first_keyed_adapter()
+    if not ask:
+        return niche
+    bits = " ".join(filter(None, [site_info.get("title"), site_info.get("description"), (site_info.get("text_excerpt") or "")[:700]]))
+    if not bits.strip():
+        return niche
+    prompt = ("По данным сайта определи реальную нишу компании И ФОРМАТ её работы "
+              "(например: комплексное проектирование и оснащение, производство под заказ, розница, опт, премиум-сегмент, "
+              "консалтинг, агентство, услуги под ключ). Верни ОДНУ короткую фразу из 3-8 слов, отражающую это. Без пояснений и кавычек.\n\n"
+              f"Введённая ниша: {niche}\nДанные сайта: {bits[:1000]}")
+    try:
+        raw = ask(prompt)
+    except Exception:
+        return niche
+    line = ((raw or "").strip().splitlines() or [""])[0]
+    line = re.sub(r'^[-*•\d\).\s]+', "", line).strip(' "«».')
+    if 6 <= len(line) <= 80 and re.search(r"[А-Яа-яЁё]", line):
+        return line
+    return niche
 
 # гео-основы и платформы/слова, которые НИКОГДА не конкуренты
 _GEO_STEMS = ("росси", "москв", "петербург", "санкт", "рунет", "рф")
@@ -346,20 +423,33 @@ def _competitors_llm(answers, niche):
             seen.add(n.lower()); out.append(n)
     return out
 
-def extract_competitors(answers, brand, brand_short, niche="", top=3):
-    """[(компания, в скольких ответах названа)]. Только подтверждённые: реально встречаются >=2 раз."""
-    own = {(brand or "").lower(), (brand_short or "").lower(), _host(brand or "").lower()}
+def _clean_comp_name(n):
+    n = re.sub(r"\.(ru|com|рф|su|net|org|io|ai|pro|store|shop|moscow|spb)$", "", n.strip(), flags=re.I)  # убрать домен
+    n = n.strip(" /\\")
+    if n and n.islower() and " " not in n:                # доменное «zorini» -> «Zorini»
+        n = n[:1].upper() + n[1:]
+    return n
+
+def extract_competitors(answers, brand, brand_short, niche="", top=3, aliases=None):
+    """[(компания, в скольких ответах названа)]. Только подтверждённые (>=2). Алиасы бренда исключаются."""
+    own = {o for o in (set(aliases) if aliases else
+           {(brand or "").lower(), (brand_short or "").lower(), _host(brand or "").lower()}) if o}
+    def _is_own(low):
+        if low in own: return True
+        for al in own:
+            if len(al) >= 6 and (al in low or low in al): return True   # «Vazuza Country Club Resort» и т.п.
+        return False
     names = _competitors_llm(answers, niche)
     if names is None:                       # ключа нет -> эвристический запас
         names = _competitors_regex(answers, own)
     res, seen = [], set()
     for name in names:
         low = name.lower()
-        if not low or low in own or low in seen: continue
+        if not low or _is_own(low) or low in seen: continue
         seen.add(low)
         c = sum(1 for a in answers if low in (a or "").lower())   # реальная частота в ответах
         if c >= 2:
-            res.append((name, c))
+            res.append((_clean_comp_name(name), c))
     res.sort(key=lambda x: (-x[1], -len(x[0])))
     return res[:top]
 
@@ -498,9 +588,10 @@ def _ask_one(prompt, eid, run, brand, test):
     except Exception:
         return ""   # сеть недоступна -> считаем как не упомянут
 
-def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=None):
+def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=None, aliases=None):
     queries = generate_queries(niche, city, site_info)
     test = os.environ.get("TEST_MODE") == "1"
+    aliases = aliases or brand_aliases(site, site_info, brand, brand_short)
     engines = active_engines()
     for q in queries:
         q["hits"] = {e["id"]: 0 for e in engines}
@@ -513,9 +604,9 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
     all_answers = []
     for (qi, eid, _q, _run), ans in zip(tasks, answers):
         all_answers.append(ans)
-        if detect_mention(ans, brand, brand_short, site):
+        if detect_mention(ans, aliases):
             queries[qi]["hits"][eid] += 1
-    competitors = extract_competitors(all_answers, brand, brand_short, niche)
+    competitors = extract_competitors(all_answers, brand, brand_short, niche, aliases=aliases)
     return queries, competitors
 
 # ───────────────────────── сборка данных отчёта ───────────────────────
@@ -534,6 +625,45 @@ def _groups(queries):
         gg["m"] += sum(q["hits"].values()); gg["mx"] += ne*RUNS
     return sorted(([k, round(v["m"]/v["mx"]*100)] for k,v in g.items()), key=lambda x:-x[1])
 
+def _plan30(site_info=None):
+    """План на месяц с учётом фактов автопроверки: не создавать то, что уже есть, а усиливать."""
+    s = site_info or {}
+    ok = s.get("ok")
+    sm = _schema_summary(s.get("schema")) if ok else {}
+    svc = bool(s.get("service_pages")); case = bool(s.get("case_pages"))
+    robots_open = ok and s.get("robots_found") and not s.get("robots_blocks_ai")
+    w1 = []
+    if ok and s.get("robots_blocks_ai"):
+        w1.append("Открыть доступ ИИ-ботам в robots.txt (сейчас часть закрыта)")
+    elif robots_open:
+        w1.append("Сохранить открытый доступ ИИ-ботам, перепроверять robots.txt после изменений")
+    else:
+        w1.append("Проверить доступ ИИ-ботам в robots.txt")
+    w1.append("Дополнить разметку типом Service для услуг" if (ok and sm.get("org")) else "Добавить разметку Organization")
+    w1.append("Чётко описать на главной, чем занимается компания и для кого")
+    if svc:
+        w2 = ["Проверить, какие из найденных страниц услуг отвечают выбранным AI-запросам",
+              "Усилить заголовки, описания и внутренние ссылки на приоритетных страницах",
+              "Добавить блок вопросов и ответов (FAQ) на ключевые страницы"]
+    else:
+        w2 = ["Сделать отдельные страницы под ключевые услуги ниши",
+              "Добавить блок вопросов и ответов и разметку Service/FAQPage"]
+    if case:
+        w3 = ["Дополнить существующие кейсы текстом: задача, решение, сроки, состав работ",
+              "Связать кейсы с релевантными услугами внутренними ссылками",
+              "Усилить данные о заказчиках и результатах, где это уместно"]
+    else:
+        w3 = ["Опубликовать 3-5 кейсов: задача, решение, результат",
+              "Начать сбор отзывов на профильных площадках"]
+    w4 = ["Получить отраслевые публикации и упоминания в тематических подборках",
+          "Повторить замер видимости и сравнить с этим отчётом"]
+    return [
+        {"week":"Неделя 1 · фундамент", "items":w1[:3]},
+        {"week":"Неделя 2 · ключевые услуги", "items":w2},
+        {"week":"Неделя 3 · доказательства", "items":w3},
+        {"week":"Неделя 4 · внешнее присутствие и замер", "items":w4},
+    ]
+
 def build_data(brand, brand_short, site, niche, city, queries, competitors, site_info=None):
     eng = active_engines()
     rates = _rates(queries)
@@ -546,6 +676,12 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
     weak_txt = ", ".join(weak).lower() if weak else "нишевые и премиальные запросы"
     strong_txt = ", ".join(strong).lower() if strong else "общие коммерческие запросы"
     top_txt = ", ".join(g[0] for g in groups[:3]).lower() if groups else "коммерческие запросы ниши"
+    # факты для честных формулировок при ненулевом результате
+    mentioned_engines = [e["name"] for e in eng if rates[e["id"]] > 0]
+    zero_engines = [e["name"] for e in eng if rates[e["id"]] == 0]
+    groups_pos = [g[0] for g in groups if g[1] > 0]
+    groups_zero = [g[0] for g in groups if g[1] == 0]
+    pos_txt = ", ".join(groups_pos); zero_grp_txt = ", ".join(groups_zero)
     total = len(queries)*len(eng)*RUNS
     comp_conf = [(n, c) for n, c in competitors if c >= 2]   # подтверждён: упомянут минимум в 2 ответах
     if len(comp_conf) < 2:                                   # по аудиту: блок только при >=2 подтверждённых
@@ -556,8 +692,10 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
     data = {
         "brand": brand, "brand_short": brand_short, "site": _host(site),
         "niche": niche, "city": city, "date": datetime.datetime.now().strftime("%d.%m.%Y"),
-        "cover_sub": (f"Бренд пока не появляется ни по одному направлению ниши. Точки входа для роста: {top_txt}."
-                      if zero else f"Основные потери: {weak_txt}. Сильная зона: {strong_txt}."),
+        "cover_sub": ("Бренд пока не появляется ни по одному направлению ниши. Первые задачи: усилить страницы услуг, кейсы и внешние упоминания."
+                      if zero else
+                      (f"Бренд появляется в части ответов, чаще всего по группам: {pos_txt}."
+                       + (f" По группам {zero_grp_txt} упоминаний пока нет." if zero_grp_txt else ""))),
         "engines": [dict(e) for e in eng],
         "queries": queries,
         "result_meaning": {
@@ -566,12 +704,13 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
                      "Одна из возможных причин — недостаток доступных нейросетям материалов и внешних упоминаний; "
                      "для точного вывода нужна отдельная проверка сайта и источников."
                      if zero else
-                     "Бренд уже известен части AI-сервисов, но присутствие неравномерно: в одной генерации компания появляется, в следующей нет. Повторяемо вас находят лишь по нескольким направлениям."),
+                     (f"В этой проверке бренд появился в {', '.join(mentioned_engines)}" + (f", но не появился в {', '.join(zero_engines)}." if zero_engines else ".")
+                      + " Видимость пока низкая и неравномерная.")),
             "loss": (f"Ни по одному направлению бренд не упоминается. В этой проверке больше всего запросов пришлось на группы: {top_txt}."
-                     if zero else f"Запросы по направлениям: {weak_txt}. Здесь бренд почти не появляется."),
+                     if zero else (f"Упоминаний пока нет по группам: {zero_grp_txt}." if zero_grp_txt else "Упоминания распределены неравномерно по запросам.")),
             "strong": ("Опорной зоны по данным проверки пока нет. Точку входа обычно дают внешние упоминания, "
                        "на которые опираются нейросети: отзывы, карты, каталоги, плюс понятные страницы услуг на сайте."
-                       if zero else f"Запросы по направлениям: {strong_txt}. Здесь есть базовая узнаваемость, на неё можно опереться."),
+                       if zero else (f"Повторяемые упоминания есть по группам: {pos_txt}. На них можно опереться, но видимость всё ещё низкая." if pos_txt else "Опорных групп с повторяемым упоминанием пока мало.")),
             "goal": "Поднять не только общий процент, но и число запросов с повторяемым появлением: чтобы бренд возникал в обоих ответах из двух.",
         },
         "examples": examples,
@@ -582,15 +721,12 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
             {"name":"СМИ и блоги","share":9},{"name":"Соцсети","share":5},
         ],
         "site_info": site_info,
-        "positives": _positives(rates, best, zero, site_info),
-        "blockers": _blockers(groups, zero, site_info),
+        "mentioned_engines": mentioned_engines, "zero_engines": zero_engines,
+        "groups_pos": groups_pos, "groups_zero": groups_zero,
+        "positives": _positives(rates, best, zero, site_info, groups_pos),
+        "blockers": _blockers(groups, zero, site_info, mentioned_engines, zero_engines, groups_zero),
         "recommendations": _recommendations(queries, groups, total, site_info),
-        "plan30": [
-            {"week":"Неделя 1 · фундамент","items":["Открыть доступ ИИ-ботам и проверить robots.txt","Чётко описать на сайте, чем занимается компания и для кого","Добавить разметку Organization"]},
-            {"week":"Неделя 2 · ключевые услуги","items":["Сделать отдельные страницы под ключевые услуги ниши","Добавить блок вопросов и ответов и разметку Service/FAQPage"]},
-            {"week":"Неделя 3 · доказательства","items":["Опубликовать 3-5 кейсов: задача, решение, результат","Начать сбор отзывов на профильных площадках"]},
-            {"week":"Неделя 4 · внешнее присутствие и замер","items":["Добавить упоминания в тематических подборках и каталогах","Повторить замер видимости и сравнить с этим отчётом"]},
-        ],
+        "plan30": _plan30(site_info),
         "method_note": (f"Проверка: каждой из {len(eng)} нейросетей задано {len(queries)} коммерческих запросов ниши "
                         f"по {RUNS} прогона (всего {len(queries)*len(eng)*RUNS} ответов) на дату на обложке, веб-поиск там, где движок его поддерживает, "
                         "новая сессия на каждый запрос. Упоминанием считается явное называние бренда, домена или короткого имени. "
@@ -608,7 +744,7 @@ def _pick_examples(queries, brand_short, best, competitors):
     if strong_cell:
         ex.append({"kind":"yes","query":strong_cell["q"],"engine":best["name"],
                    "named":(competitors[:1]+[brand_short]),"result":"бренд появился в обоих ответах (2 из 2)",
-                   "why":"по этому запросу нейросеть нашла достаточно материалов, связанных с брендом."})
+                   "why":"возможное объяснение: в доступных источниках оказалось достаточно релевантной информации, чтобы нейросеть включила бренд. По одному результату точную причину установить нельзя."})
     if zero_cell:
         ex.append({"kind":"no","query":zero_cell["q"],"engine":best["name"],
                    "named":competitors[:3],"result":"бренд не появился (0 из 2)",
@@ -627,17 +763,18 @@ def _competitor_objs(comp_conf, total):
                      "focus":"коммерческие запросы ниши", "sources":"ответы нейросетей"})
     return objs
 
-def _positives(rates, best, zero, site_info=None):
+def _positives(rates, best, zero, site_info=None, groups_pos=None):
     pos = []
     if not zero:
         pos.append(f"Бренд появляется в {best['name']} ({rates[best['id']]}% ответов)")
-        strong = [e for e in active_engines() if rates[e["id"]] >= 40]
-        if len(strong) >= 2:
-            pos.append(f"Заметное присутствие в {strong[0]['name']} и {strong[1]['name']}")
+        if groups_pos:
+            pos.append("Повторяемые упоминания по группам: " + ", ".join(groups_pos))
     s = site_info or {}
     if s.get("ok"):                                     # реальные активы сайта (проверено)
-        if s.get("schema"):
-            pos.append("На сайте есть разметка Schema.org: " + ", ".join(s["schema"][:4]))
+        sm = _schema_summary(s.get("schema"))
+        if sm["org"]: pos.append("Есть разметка организации (Organization)")
+        if sm["service"]: pos.append("Есть разметка услуг (Service)")
+        if sm["faq"]: pos.append("Есть FAQ-разметка")
         if s.get("service_pages"):
             pos.append(f"Найдены отдельные страницы услуг ({s['service_pages']})")
         if s.get("case_pages"):
@@ -648,21 +785,29 @@ def _positives(rates, best, zero, site_info=None):
         pos = ["По результатам этой проверки пока не найдено факторов, которые уже обеспечивают заметную AI-видимость. Для старта это нормально и поправимо."]
     return pos[:5]
 
-def _blockers(groups, zero, site_info=None):
+def _blockers(groups, zero, site_info=None, mentioned_engines=None, zero_engines=None, groups_zero=None):
     blk = []
     if zero:
         blk += ["Бренд не упомянут ни по одному запросу проверки",
                 "По этим запросам нейросети не называют ваш сайт как источник"]
     else:
-        weak = [g[0].lower() for g in groups if g[1] <= 20]
-        if weak: blk.append(f"Слабая видимость по направлениям: {', '.join(weak)}")
-        blk.append("Бренд появляется не в каждом ответе по части запросов")
+        if groups_zero:
+            blk.append("Упоминаний пока нет по группам: " + ", ".join(groups_zero))
+        if mentioned_engines and zero_engines:
+            if len(mentioned_engines) == 1:
+                blk.append(f"Упоминания только в одном движке ({mentioned_engines[0]}); в {', '.join(zero_engines)} бренд не появился")
+            else:
+                blk.append(f"В {', '.join(zero_engines)} упоминаний нет")
+        blk.append("Видимость низкая: бренд появляется не по всем запросам")
     s = site_info or {}
     if s.get("ok"):                                     # реальные пробелы сайта (проверено)
+        sm = _schema_summary(s.get("schema"))
         if s.get("robots_blocks_ai"):
             blk.append("robots.txt закрывает доступ ИИ-ботам: " + ", ".join(s["robots_blocks_ai"]))
-        if not s.get("schema"):
-            blk.append("Не найдена разметка Schema.org (Organization, Service, FAQPage)")
+        if not sm["org"]:
+            blk.append("Не найдена разметка организации (Organization)")
+        elif not sm["service"]:
+            blk.append("Не найдена разметка услуг (Service)")
         if not s.get("service_pages"):
             blk.append("Не удалось обнаружить отдельные страницы услуг (если есть, дайте на них прямые ссылки в меню)")
         if not s.get("case_pages"):
@@ -683,9 +828,15 @@ def _recommendations(queries, groups, total, site_info=None):
             "steps":["Убрать Disallow для GPTBot, OAI-SearchBot, PerplexityBot, YandexBot, Google-Extended","Проверить, что страницы услуг открыты для индексации"],
             "effect":"Высокий","difficulty":"Низкая","term":"1 день"})
     svc_seen = bool(s.get("service_pages")); case_seen = bool(s.get("case_pages"))
-    recs.append({"title":("Усилить страницы ключевых услуг" if svc_seen else "Сделать отдельные страницы под ключевые услуги"),"status":"","found":"",
-         "why":f"По коммерческим запросам бренд не появился в {miss} из {total} ответов. Отдельные понятные страницы услуг дают нейросетям конкретные факты, которые можно процитировать.",
-         "steps":["Под каждую ключевую услугу — отдельная страница с понятным заголовком","Описать задачу, решение и измеримый результат","Добавить ответы на 7-10 частых вопросов клиентов","Указать форматы работы, сроки и условия"],
+    if svc_seen:
+        svc_title = f"Усилить найденные страницы услуг ({s.get('service_pages')})"
+        svc_why = (f"На сайте уже найдено {s.get('service_pages')} страниц услуг. Создавать новые не нужно: задача — понять, какие из них отвечают вашим AI-запросам, и усилить именно их.")
+        svc_steps = ["Определить страницы, которые отвечают выбранным коммерческим запросам","Усилить заголовки, описания и факты на самых релевантных страницах","Связать страницы услуг и товаров внутренними ссылками","Добавить ответы на частые вопросы клиентов"]
+    else:
+        svc_title = "Сделать отдельные страницы под ключевые услуги"
+        svc_why = f"По коммерческим запросам бренд не появился в {miss} из {total} ответов. Отдельные понятные страницы услуг дают нейросетям конкретные факты, которые можно процитировать."
+        svc_steps = ["Под каждую ключевую услугу — отдельная страница с понятным заголовком","Описать задачу, решение и измеримый результат","Добавить ответы на 7-10 частых вопросов клиентов","Указать форматы работы, сроки и условия"]
+    recs.append({"title":svc_title,"status":"","found":"","why":svc_why,"steps":svc_steps,
          "effect":"Высокий","difficulty":"Средняя","term":"1-2 недели"})
     recs.append({"title":("Вынести кейсы так, чтобы их видели нейросети" if case_seen else "Показать кейсы и доказательства результата"),"status":"","found":"",
          "why":("Кейсы на сайте есть, но важно, чтобы они были текстом и с прямыми ссылками: нейросети охотнее называют тех, у кого есть проверяемые примеры." if case_seen
@@ -693,23 +844,40 @@ def _recommendations(queries, groups, total, site_info=None):
          "steps":["Каждый кейс отдельной страницей: задача, что сделано, результат","Добавить отзывы клиентов с именем и компанией","Показать понятные цифры эффекта, где это уместно"],
          "effect":"Высокий","difficulty":"Средняя","term":"2-3 недели"})
     recs.append({"title":"Нарастить внешние подтверждения о компании","status":"","found":"",
-         "why":"Нейросети собирают ответ из внешних источников: отзывы, карты, тематические подборки и каталоги. Чем больше согласованных упоминаний, тем выше шанс попасть в ответ.",
+         "why":"При работе с веб-поиском нейросети могут использовать сайт компании, карты, отзывы, каталоги, публикации и другие доступные источники. Чем больше согласованных упоминаний, тем выше шанс попасть в ответ.",
          "steps":["Собрать отзывы на профильных площадках и картах","Попасть в тематические подборки и каталоги ниши","Привести название и описание компании к единому виду везде"],
          "effect":"Высокий","difficulty":"Низкая","term":"3-4 недели"})
-    if not (s.get("ok") and s.get("robots_blocks_ai")):  # если доступ не закрыт — общий технический пункт
-        why_tech = "Разметка и понятная структура помогают нейросетям использовать сайт как источник."
-        if s.get("ok") and not s.get("schema"):
-            why_tech = "На сайте не найдена разметка Schema.org. Без неё нейросетям сложнее считывать факты о компании и услугах."
+    if not (s.get("ok") and s.get("robots_blocks_ai")):  # если доступ не закрыт — технический пункт по фактам
+        sm = _schema_summary(s.get("schema")) if s.get("ok") else {}
+        if s.get("ok") and sm.get("org"):
+            why_tech = "Базовая разметка организации уже есть. Дело за тем, чтобы она была корректной и покрывала ключевые страницы (товары, услуги, вопросы)."
+            t_steps = ["Проверить корректность существующей разметки и дополнить страницы типами Product, Offer, Service или FAQPage по их содержанию"]
+        elif s.get("ok"):
+            why_tech = "На сайте не найдена разметка организации. Без неё нейросетям сложнее считывать факты о компании."
+            t_steps = ["Добавить разметку организации (Organization или LocalBusiness), затем Product, Offer, Service или FAQPage по содержанию страниц"]
+        else:
+            why_tech = "Разметка и понятная структура помогают нейросетям использовать сайт как источник."
+            t_steps = ["Добавить разметку Organization, Service и FAQPage"]
+        if s.get("ok") and s.get("robots_found") and not s.get("robots_blocks_ai"):
+            t_steps.append("Сохранить открытый доступ ИИ-ботам, проверить, что важные страницы не закрыты noindex")
+        else:
+            t_steps.append("Проверить доступ ИИ-ботам в robots.txt")
+        t_steps.append("Чётко указать на главной, чем занимается компания и для кого")
         recs.append({"title":"Подготовить сайт к AI-поиску технически","status":"","found":"",
-             "why":why_tech,
-             "steps":["Добавить разметку Organization, Service и FAQPage","Чётко указать на главной, чем занимается компания и для кого","Проверить доступ ИИ-ботам в robots.txt"],
-             "effect":"Средний","difficulty":"Низкая","term":"3-5 дней"})
+             "why":why_tech, "steps":t_steps, "effect":"Средний","difficulty":"Низкая","term":"3-5 дней"})
     return recs[:5]
 
 def run(brand, site, niche, city, brand_short=None, out=None):
-    brand_short = brand_short or re.sub(r"[«»\"']", "", brand).split("(")[0].strip().split(",")[0].split(" ")[-1]
     site_info = None if os.environ.get("TEST_MODE") == "1" else analyze_site(site)
-    queries, competitors = analyze(brand, brand_short, site, niche, city, site_info=site_info)
+    niche = refine_niche(niche, site_info)              # уточняем нишу до реальной бизнес-модели по сайту
+    names = (site_info or {}).get("names") or []
+    official = next((n for n in names if 3 <= len(n) <= 45), "")   # официальное имя с сайта (og/schema/title)
+    if official:
+        brand = official; brand_short = official
+    else:
+        brand_short = brand_short or re.sub(r"[«»\"']", "", brand).split("(")[0].strip().split(",")[0].split(" ")[-1]
+    aliases = brand_aliases(site, site_info, brand, brand_short)
+    queries, competitors = analyze(brand, brand_short, site, niche, city, site_info=site_info, aliases=aliases)
     data = build_data(brand, brand_short, site, niche, city, queries, competitors, site_info=site_info)
     if out:
         with open(out, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=1)

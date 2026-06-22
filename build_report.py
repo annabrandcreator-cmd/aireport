@@ -48,14 +48,14 @@ def _matrix_verdict(d):
     if d.get('overall', 0) == 0:
         return ("Бренд не появился ни в одном из проверенных ответов: все ячейки 0/2. "
                 "Это отправная точка, дальше задача — получить первые повторяемые упоминания.")
-    if d.get('stable_cells', 0) == 0:
-        return ("Повторяемого упоминания (2 из 2) пока нет: где-то бренд возникает в одной из двух проверок. "
-                "Задача — довести эти запросы до повторяемого появления.")
-    top = _join_groups(d.get('top_groups', []))
-    weak = _join_groups(d.get('weak_groups', []))
-    s = f"Стабильнее всего бренд виден по группам запросов: {top}." if top else "Стабильное появление есть лишь по части запросов."
-    if weak:
-        s += f" Слабее всего по группам {weak}: там пусто или появляется через раз."
+    rep = _join_groups(d.get('rep_groups', []))
+    zero_g = _join_groups(d.get('groups_zero', []))
+    if rep:
+        s = f"Повторяемые упоминания (2 из 2) есть по группам: {rep}."
+    else:
+        s = "Повторяемого упоминания (2 из 2) пока нет: бренд появлялся максимум в одной из двух проверок."
+    if zero_g:
+        s += f" По группам {zero_g} упоминаний не обнаружено."
     return s
 
 # ── расчёт всех чисел из матрицы ────────────────────────────────────────────
@@ -92,6 +92,11 @@ def compute(d):
     d['weak_groups']=low[:2] if low else [x['name'] for x in gs[::-1][:2]]
     d['prio_groups']=[x['name'] for x in sorted(gs, key=lambda x:-x['n'])[:3]]   # самые ёмкие группы (по числу запросов)
     d['zero']=d['overall']==0
+    # факты по движкам и группам (для честного ненулевого сценария)
+    d['mentioned_engines']=[e['name'] for e in eng if e['rate']>0]
+    d['zero_engines']=[e['name'] for e in eng if e['rate']==0]
+    d.setdefault('groups_zero',[x['name'] for x in gs if x['rate']==0])
+    d['rep_groups']=sorted({q['group'] for q in qs if any(q['hits'].get(e['id'],0)==2 for e in eng)})
     for c in d['competitors']: c['gap']=c['rate']-d['overall']
     return d
 
@@ -268,25 +273,30 @@ def p_summary(d):
       <div class="box cream"><h4>Ближайшая цель</h4><p>{esc(rm['goal'])}</p></div>
       <div class="grid3" style="margin-top:5mm">
         <div class="stat"><div class="n">{d['overall']}%</div><div class="l">средняя видимость по {len(d['engines'])} {plural(len(d['engines']),'нейросети','нейросетям','нейросетям')}</div></div>
-        <div class="stat"><div class="n">{d['stable_q']} из {len(d['queries'])}</div><div class="l">запросов с повторяемым упоминанием (2 из 2)</div></div>
+        <div class="stat"><div class="n">{d['stable_q']} из {len(d['queries'])}</div><div class="l">запросов с повторяемым упоминанием (2/2 хотя бы в одной сети)</div></div>
         <div class="stat"><div class="n">{stat3_n}</div><div class="l">{stat3_l}</div></div></div>
       <div class="box"><h4>Что дальше в отчёте</h4><p>Видимость по каждой нейросети, матрица повторяемости (2/2, 1/2, 0/2), разбор по группам запросов, примеры реальных ответов, что работает и что мешает, и персональный план действий с приоритетами и сроками.</p></div>
       {footer(d)}</div>'''
 
 def p_engines(d):
     bars="".join(bar(e['name'], e['rate'], f"{e['mentions']} упоминаний в {e['answers']} ответах · {esc(e['note'])}", wl="150px") for e in d['engines'])
-    if d.get('zero'):
-        strong_p="Пока ни одна сеть не называет бренд: опорных каналов нет. Рост начинается с источников, на которые ссылаются нейросети: отзывы, карты и тематические каталоги."
-        weak_p=f"{_join(d['weak_engines'])} пока не знают бренд по этим запросам. С них и начнём набирать упоминания."
+    me=d.get('mentioned_engines',[]); ze=d.get('zero_engines',[]); ans=d['engines'][0]['answers']
+    if not me:
+        h1,strong_p="Опорные каналы","Пока ни одна сеть не называет бренд. Рост начинается с источников, на которые ссылаются нейросети: отзывы, карты и тематические каталоги."
+        h2,weak_p="Где начинать работу",f"{_join(ze)} не знают бренд по этим запросам. С них и начнём набирать упоминания."
     else:
-        strong_p=f"Выше всего видимость в {_join(d['strong_engines'])}. Это опорные каналы: держите отзывы и факты по нише на сайте свежими, чтобы удержать позиции."
-        weak_p=f"Ниже всего в {_join(d['weak_engines'])}. Рост здесь дают отзывы, карты и присутствие в тематических каталогах."
+        mlist="; ".join(f"{esc(e['name'])} — {e['mentions']} из {e['answers']}" for e in d['engines'] if e['rate']>0)
+        h1,strong_p="Опорные каналы",f"Упоминания обнаружены в: {mlist}."
+        if ze:
+            h2,weak_p="Каналы без упоминаний",f"В {_join(ze)} бренд не появился ни в одном из {ans} ответов."
+        else:
+            h2,weak_p="Где наращивать","Упоминания есть во всех каналах, но видимость пока низкая. Задача — повышать долю ответов с упоминанием."
     return f'''<div class="page"><h2><span class="num">02</span>Где вас находят нейросети</h2>
       <div class="sec-intro">Каждой нейросети задано {len(d['queries'])} коммерческих запросов вашей ниши по {RUNS} прогона ({d['engines'][0]['answers']} ответов на движок). Процент: доля ответов, где упомянут бренд или сайт.</div>
       <div class="card">{bars}</div>
       <div class="two">
-        <div class="box cream"><h4>Сильные каналы</h4><p>{strong_p}</p></div>
-        <div class="box"><h4>Слабые каналы</h4><p>{weak_p}</p></div>
+        <div class="box cream"><h4>{h1}</h4><p>{strong_p}</p></div>
+        <div class="box"><h4>{h2}</h4><p>{weak_p}</p></div>
       </div>
       <div class="box"><h4>Как читать</h4><p>Процент: доля из {d['engines'][0]['answers']} ответов, где нейросеть упомянула бренд или сайт. Чем выше, тем чаще вас видит клиент, который спрашивает совета у ИИ.</p></div>
       {footer(d)}</div>'''
@@ -317,9 +327,10 @@ def p_groups(d):
         lean_p="Опереться на текущую видимость пока нельзя: её нет ни по одной группе. Точка входа: внешние упоминания (отзывы, карты, каталоги) и понятные страницы под ключевые услуги."
         prio_p="Ранжировать направления по важности на таком объёме проверки нельзя. Двигаться стоит сразу по двум линиям: понятные страницы услуг на сайте и внешние упоминания, на которые опираются нейросети."
     else:
-        loss_p=f"Ниже всего видимость в группах: {_join_groups(d['weak_groups'])}. Здесь бренд почти не появляется, а такие запросы часто приносят самых дорогих клиентов."
-        lean_p=f"Выше всего узнаваемость в группах: {_join_groups(d['top_groups'])}. С них стоит начать усиление, чтобы быстрее поднять общий процент."
-        prio_p=f"Сначала усилить сильные группы: {_join_groups(d['top_groups'])}. Это быстрый рост из текущей базы. Затем закрыть слабые: {_join_groups(d['weak_groups'])}, где сейчас близко к нулю."
+        rep=_join_groups(d.get('rep_groups',[])); zg=_join_groups(d.get('groups_zero',[]))
+        loss_p=(f"Упоминаний пока нет по группам: {zg}. " if zg else "По большинству групп упоминаний мало. ") + "Эти запросы относятся к этапу выбора поставщика."
+        lean_p=(f"Повторяемые упоминания есть по группам: {rep}. " if rep else "Повторяемых упоминаний пока мало. ") + "На них можно опереться, но видимость всё ещё низкая."
+        prio_p="Двигаться стоит по двум линиям: усилить материалы под группы без упоминаний и закрепить то, что уже сработало. Группы с одним запросом не стоит напрямую сравнивать с группами из нескольких запросов."
     return f'''<div class="page"><h2><span class="num">04</span>Видимость по группам запросов</h2>
       <div class="sec-intro">Те же запросы, сгруппированные по направлениям. Видно, в каких сегментах вас находят, а в каких нет.</div>
       <div class="card">{bars}</div>
@@ -345,7 +356,7 @@ def p_examples(d):
     if d.get('zero'):
         takeaway="Бренд не появился ни в одном из примеров: на эти запросы нейросеть называет другие компании или общие варианты. Чтобы попасть в ответ, нужны материалы и упоминания именно по этим запросам."
     else:
-        takeaway="Там, где у бренда есть материалы и упоминания по теме, нейросеть называет его чаще. Там, где их нет, в ответе оказываются другие компании."
+        takeaway="Повторяемые упоминания обнаружены по части запросов. По остальным бренд не появился; точные причины требуют отдельного анализа страниц сайта, внешних публикаций и источников, использованных нейросетью."
     return f'''<div class="page"><h2><span class="num">05</span>Примеры реальных ответов нейросетей</h2>
       <div class="sec-intro">{intro}</div>
       {cards}
@@ -354,16 +365,34 @@ def p_examples(d):
       <div class="note">Приведены короткие фрагменты ответов на дату проверки. Причины отсутствия бренда указаны как возможные, а не доказанные.</div>
       {footer(d)}</div>'''
 
+def _gap_phrase(gap):
+    if gap > 0: return f"опережает вас на {gap} п.п."
+    if gap < 0: return f"на {abs(gap)} п.п. ниже вас"
+    return "наравне с вами"
+
 def p_competitors(d):
-    you_bar=bar(f"{d['brand_short']} (вы)", d['overall'], "ваша текущая видимость", wl="150px", color=ACCENTD, you=True)
-    comp_bars="".join(bar(c['name'], c['rate'], f"+{c['gap']} п.п. к вам · упомянут в {c['count']} из {c['total']} ответов", wl="150px", color=FAINT) for c in d['competitors'])
+    N=d['total_answers']; bc=d.get('total_mentions',0); ov=d['overall']
+    rows=[(d['brand_short'], ov, bc, True)] + [(c['name'], c['rate'], c['count'], False) for c in d['competitors']]
+    rows.sort(key=lambda r:-r[1])
+    bars=""
+    for name,rate,cnt,is_you in rows:
+        sub=("ваша текущая видимость" if is_you else f"{_gap_phrase(rate-ov)} · упомянут в {cnt} из {N} ответов")
+        bars+=bar((esc(name)+" (вы)") if is_you else name, rate, sub, wl="150px", color=(ACCENTD if is_you else FAINT), you=is_you)
     ev="".join(f'''<div class="ex"><div class="q">{esc(c['name'])} · {c['rate']}%</div>
           <div class="r">Упомянут в <b>{c['count']}</b> из <b>{c['total']}</b> ответов нейросетей по вашим запросам.</div></div>''' for c in d['competitors'])
-    return f'''<div class="page"><h2><span class="num">06</span>Кого называют вместо вас</h2>
-      <div class="sec-intro">Компании, которые нейросети чаще всего называли в ответах на ваши запросы. Процент считается так же, как ваш: доля из {d['total_answers']} ответов, где встретилось название.</div>
-      <div class="card">{you_bar}{comp_bars}</div>
+    names_join=_join([c['name'] for c in d['competitors']])
+    max_c=max((c['rate'] for c in d['competitors']), default=0)
+    if ov>0 and ov>=max_c:
+        lead=f"«{esc(d['brand_short'])}» упомянут в {bc} из {N} ответов — чаще найденных компаний"
+        if d.get('mentioned_engines'): lead+=f", но только в {_join(d['mentioned_engines'])}"
+        takeaway=f"Помимо «{esc(d['brand_short'])}», в ответах встречались {names_join}. {lead}. Это хороший знак: бренд уже попадает в выдачу."
+    else:
+        takeaway=f"Помимо «{esc(d['brand_short'])}», в ответах встречались {names_join}. У части из них упоминаний больше. Как правило, помогает количество согласованных упоминаний в открытых источниках: сайт, отзывы, карты, подборки."
+    return f'''<div class="page"><h2><span class="num">06</span>Какие компании ещё встречаются в ответах</h2>
+      <div class="sec-intro">Компании, которые нейросети называли в ответах на ваши запросы. Они могут упоминаться и вместе с вами. Процент считается так же, как ваш: доля из {N} ответов, где встретилось название.</div>
+      <div class="card">{bars}</div>
       <div style="margin-top:4mm">{ev}</div>
-      <div class="box cream"><h4>Что это значит</h4><p>Эти компании нейросети находят и называют по вашим запросам, а вас пока нет. Как правило, у них больше согласованных упоминаний в открытых источниках: сайт, отзывы, карты, тематические подборки. Что именно сыграло в каждом случае, видно из полных ответов; точное число отзывов и материалов в этом замере не подсчитывалось.</p></div>
+      <div class="box cream"><h4>Что это значит</h4><p>{takeaway}</p></div>
       {footer(d)}</div>'''
 
 def p_sources(d):
@@ -378,21 +407,32 @@ def p_sources(d):
       </div>
       {footer(d)}</div>'''
 
+def _schema_human(types):
+    t={str(x).lower() for x in (types or [])}
+    org=bool(t & {"organization","localbusiness","corporation","professionalservice","hotel","lodgingbusiness","restaurant","store"})
+    svc="service" in t; faq="faqpage" in t; prod="product" in t
+    found=[n for f,n in [(org,"организация"),(svc,"услуги"),(prod,"товары"),(faq,"FAQ")] if f]
+    miss=[n for f,n in [(org,"организация"),(svc or prod,"услуги/товары")] if not f]
+    s=("есть разметка: "+", ".join(found)) if found else "значимая разметка не найдена"
+    if miss: s+="; не найдена: "+", ".join(miss)
+    return s
+
 def _site_evidence(d):
     s=d.get('site_info') or {}
     if not s.get('ok'):
-        if s and s.get('host') and not s.get('ok'):
+        if s and s.get('host'):
             return '<div class="box"><h4>Проверка сайта</h4><p>Сайт не удалось открыть автоматически для проверки. Проверьте адрес и доступность для ботов.</p></div>'
         return ''
     parts=[]
     if s.get('sitemap_urls'): parts.append(f"страниц в sitemap: {s['sitemap_urls']}")
-    parts.append(f"ссылок на главной: {s.get('links_count',0)}")
     parts.append(f"страниц услуг найдено: {s.get('service_pages',0)}")
     parts.append(f"страниц кейсов/проектов: {s.get('case_pages',0)}")
-    parts.append("Schema.org: "+(", ".join(s['schema'][:4]) if s.get('schema') else "не найдена"))
+    parts.append("Schema.org: "+_schema_human(s.get('schema')))
     if s.get('robots_found'):
         parts.append("robots.txt: "+("закрывает ИИ-ботов ("+", ".join(s['robots_blocks_ai'])+")" if s.get('robots_blocks_ai') else "доступ ИИ-ботам открыт"))
-    return f'<div class="box"><h4>Проверка сайта (факты автопроверки)</h4><p>{" · ".join(esc(p) for p in parts)}</p></div>'
+    pages=s.get('pages_list') or []
+    pages_html=(f'<div class="note" style="margin-top:2mm">Просмотренные страницы (выборка): {esc(", ".join(pages[:12]))}</div>') if pages else ""
+    return f'<div class="box"><h4>Проверка сайта (факты автопроверки)</h4><p>{" · ".join(esc(p) for p in parts)}</p>{pages_html}</div>'
 
 def p_works(d):
     pos="".join(f'<li><span class="m mk-y">✓</span><span>{esc(x)}</span></li>' for x in d['positives'])
@@ -433,7 +473,7 @@ def p_author(d):
           <p>Создатель сервиса AI-видимости, AI-консультант и бренд-маркетолог. Проектирую и внедряю цифровые системы и AI-решения для бизнеса: сайты, внутренние сервисы, автоматизацию и аналитические инструменты.</p>
         </div>
       </div>
-      <div class="cta" style="margin-top:6mm"><h3>Поднимем вашу видимость в нейросетях</h3>
+      <div class="cta" style="margin-top:6mm"><h3>Усилим основу для появления бренда в ответах нейросетей</h3>
         <p>Реализация рекомендаций может включать доработку текущего сайта, разработку нового сайта с нуля или создание отдельного цифрового решения под задачи компании. На консультации определим приоритеты, объём работ и подходящий формат реализации.</p>
         <span class="btn">Записаться на консультацию →</span></div>
       <div class="contacts">

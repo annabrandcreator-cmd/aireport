@@ -181,6 +181,43 @@ def maybe_start_generation(oid):
     return True
 
 # ───────────────────────── маршруты ──────────────────────────────────
+ORDER_FORM = """<!doctype html><html lang=ru><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>Отчёт о видимости в нейросетях</title><style>
+*{box-sizing:border-box}body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#141210;color:#fff;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:24px}
+.card{width:100%;max-width:440px}
+.ey{display:inline-block;font-size:11px;font-weight:700;letter-spacing:1.6px;text-transform:uppercase;color:#DE4A2C;border:1px solid rgba(222,74,44,.4);border-radius:30px;padding:6px 14px;margin-bottom:18px}
+h1{font-size:25px;line-height:1.15;margin:0 0 10px}
+p.sub{color:rgba(255,255,255,.6);font-size:15px;line-height:1.5;margin:0 0 20px}
+label{display:block;font-size:13px;color:rgba(255,255,255,.7);margin:14px 0 6px}
+input{width:100%;padding:13px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.05);color:#fff;font-size:15px}
+input:focus{outline:none;border-color:#DE4A2C}
+button{width:100%;margin-top:22px;padding:15px;border:0;border-radius:30px;background:#DE4A2C;color:#fff;font-size:16px;font-weight:700;cursor:pointer}
+.note{font-size:12px;color:rgba(255,255,255,.45);margin-top:14px;line-height:1.5}
+</style></head><body><div class=card>
+<div class=ey>AI-видимость · отчёт</div>
+<h1>Проверим ваш бизнес в 7 нейросетях</h1>
+<p class=sub>Введите сайт. Проверим по 10 коммерческим запросам в ChatGPT, Яндекс Нейро и ещё 5 AI-сервисах. Готовый отчёт придёт в Telegram.</p>
+<form method=post action=/create-payment>
+  <label>Адрес сайта *</label><input name=site placeholder="example.ru" required>
+  <label>Ниша, чем занимаетесь</label><input name=niche placeholder="мебель на заказ">
+  <label>Город</label><input name=city placeholder="Москва">
+  <label>E-mail (необязательно)</label><input name=email type=email placeholder="вы@почта.ру">
+  <button type=submit>Получить отчёт за 1290 ₽ &rarr;</button>
+</form>
+<p class=note>После оплаты вы перейдёте в Telegram-бот, нажмёте «Старт», и отчёт придёт в чат за несколько минут.</p>
+</div></body></html>"""
+
+def err_page(msg, code=502):
+    return ("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+            "<div style='font-family:system-ui,Arial;max-width:460px;margin:14vh auto;text-align:center;color:#1c1813;padding:0 20px'>"
+            f"<h2>Не получилось</h2><p style='color:#5e564a;line-height:1.5'>{msg}</p>"
+            "<a href='/' style='color:#DE4A2C;font-weight:600'>Назад к форме</a></div>", code)
+
+@app.get("/")
+def home():
+    return ORDER_FORM
+
 @app.post("/create-payment")
 def create_payment():
     f = request.get_json(force=True, silent=True) or request.form
@@ -188,7 +225,7 @@ def create_payment():
     email = (f.get("email") or "").strip()     # опционально, как резерв
     niche = (f.get("niche") or "").strip()
     if not site or "." not in site:
-        return jsonify(error="Укажите адрес сайта"), 400
+        return err_page("Укажите корректный адрес сайта.", 400)
     brand = (f.get("brand") or "").strip() or engine._host(site)
     short = (f.get("brand_short") or "").strip() or re.sub(r"[«»\"']", "", brand).split(",")[0]
     order_id = uuid.uuid4().hex[:16]
@@ -198,12 +235,14 @@ def create_payment():
     try:
         res = tbank_init(order_id, email)
     except Exception as e:
-        return jsonify(error="Платёж недоступен: " + str(e)), 502
+        return err_page("Платёж временно недоступен, попробуйте позже.", 502)
     if not res.get("Success"):
-        return jsonify(error=res.get("Message", "Ошибка оплаты"), details=res.get("Details")), 502
+        return err_page("Оплата недоступна: " + str(res.get("Message", "ошибка")), 502)
     with db() as c:
         c.execute("UPDATE orders SET status='pending', payment_id=? WHERE id=?", (res.get("PaymentId"), order_id))
-    return jsonify(paymentUrl=res["PaymentURL"], orderId=order_id)
+    if request.is_json:
+        return jsonify(paymentUrl=res["PaymentURL"], orderId=order_id)
+    return redirect(res["PaymentURL"], code=302)   # обычная форма -> сразу на оплату
 
 @app.post("/tbank/notify")
 def tbank_notify():

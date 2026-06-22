@@ -70,8 +70,6 @@ def tbank_token(params, password):
 
 def tbank_init(order_id, email):
     password = os.environ["TBANK_PASSWORD"]  # из секрета, не из кода
-    bot = tg_bot()
-    back = f"https://t.me/{bot}?start={order_id}" if bot else f"{BASE_URL}/thanks?order={order_id}"
     payload = {
         "TerminalKey": TERMINAL,
         "Amount": PRICE * 100,                 # в копейках
@@ -79,8 +77,8 @@ def tbank_init(order_id, email):
         "Description": "Отчёт о видимости бренда в нейросетях",
         "PayType": "O",                        # одностадийная оплата (списание сразу)
         "NotificationURL": f"{BASE_URL}/tbank/notify",
-        "SuccessURL": back,                    # возврат в бот, там придёт отчёт
-        "FailURL": back,
+        "SuccessURL": f"{BASE_URL}/thanks?order={order_id}",   # обычная веб-страница, не t.me
+        "FailURL": f"{BASE_URL}/fail?order={order_id}",
     }
     payload["Token"] = tbank_token(payload, password)
     req = urllib.request.Request(TBANK_INIT, data=json.dumps(payload).encode(),
@@ -283,10 +281,10 @@ def thanks():
     return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
     <div style="font-family:system-ui,Arial;max-width:520px;margin:12vh auto;padding:0 20px;text-align:center;color:#1c1813">
       <h2 style="font-size:24px">Оплата прошла, спасибо!</h2>
-      <p style="font-size:16px;color:#5e564a;line-height:1.55">Отчёт формируется (5-10 минут) и придёт вам в Telegram.
-      Нажмите кнопку, затем «Старт» в боте, туда придёт готовый PDF.</p>
+      <p style="font-size:16px;color:#5e564a;line-height:1.55">Ваш отчёт о видимости уже формируется и придёт
+      в Telegram в течение 10 минут. Можно вернуться в чат и подождать, я пришлю готовый PDF сам.</p>
       <a href="{link}" style="display:inline-block;margin-top:14px;background:#DE4A2C;color:#fff;font-weight:700;
-      text-decoration:none;padding:14px 26px;border-radius:30px;font-size:16px">Получить отчёт в Telegram</a>
+      text-decoration:none;padding:14px 26px;border-radius:30px;font-size:16px">Вернуться в Telegram</a>
     </div>"""
 
 @app.post("/telegram/webhook")

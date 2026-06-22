@@ -1,0 +1,3 @@
+Flask>=3.0
+weasyprint>=60
+gunicorn>=21

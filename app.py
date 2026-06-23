@@ -240,18 +240,18 @@ def _do_review(oid):
         with db() as c: c.execute("UPDATE orders SET status='paid' WHERE id=?", (oid,))
         return
     with db() as c:
-        c.execute("UPDATE orders SET prep=?, brand=?, brand_short=?, niche=? WHERE id=?",
+        c.execute("UPDATE orders SET prep=?, brand=?, brand_short=?, niche=?, status='reviewing' WHERE id=?",
                   (json.dumps(prep, ensure_ascii=False), prep["brand"], prep["brand_short"], prep["niche"], oid))
     if o["tg_chat_id"]:
         tg_send_message(o["tg_chat_id"], _review_text(prep, edited=False))
 
 def maybe_start_review(oid):
-    """После оплаты: готовим запросы и просим подтвердить. Защита от двойного старта."""
+    """После оплаты: готовим запросы (статус preparing) и одним сообщением просим подтвердить. Защита от двойного старта."""
     with db() as c:
         o = c.execute("SELECT status, tg_chat_id FROM orders WHERE id=?", (oid,)).fetchone()
         if not o or o["status"] != "paid":
             return False
-        c.execute("UPDATE orders SET status='reviewing' WHERE id=?", (oid,))
+        c.execute("UPDATE orders SET status='preparing' WHERE id=?", (oid,))
     threading.Thread(target=_do_review, args=(oid,), daemon=True).start()
     return True
 
@@ -619,11 +619,18 @@ def tg_webhook():
                 if st == "done" and o["pdf"] and os.path.exists(o["pdf"]):
                     try: tg_send_report(chat, o["pdf"], o)
                     except Exception as e: print("[tg] ошибка:", e)
-                elif st == "paid":      # оплачено -> готовим запросы и просим подтвердить
-                    tg_send_message(chat, "Оплата подтверждена. Готовлю запросы для проверки, пришлю их сюда на подтверждение.")
+                elif st == "paid":      # оплачено -> готовим запросы; список придёт одним сообщением
                     maybe_start_review(oid)
+                elif st == "preparing":
+                    tg_send_message(chat, "Оплата получена. Готовлю запросы для проверки, пришлю их сюда в течение минуты.")
                 elif st == "reviewing":
-                    tg_send_message(chat, "Запросы для проверки — в сообщении выше. Ответьте ОК, чтобы запустить, или пришлите свой список.")
+                    if o["prep"]:
+                        tg_send_message(chat, _review_text(json.loads(o["prep"])))   # повторно показываем список
+                    else:
+                        tg_send_message(chat, "Готовлю запросы для проверки, пришлю их сюда через минуту.")
+                elif st == "await_queries":   # дозакупка оплачена -> ждём запросы клиента
+                    n = o["qn"] or 1
+                    tg_send_message(chat, f"Жду ваши {n} {_plural_q(n)} для проверки — каждый с новой строки.")
                 elif st == "processing":
                     tg_send_message(chat, "Отчёт уже формируется, пришлю его сюда через пару минут.")
                 elif st == "new":       # создаём платёж и шлём кнопку оплаты прямо в чат

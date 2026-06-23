@@ -225,8 +225,17 @@ def _review_text(prep, edited=False):
             "От выбранных запросов зависит содержание отчёта, поэтому важно, чтобы они отражали ваши основные услуги, целевых клиентов, географию работы и ценовой сегмент.\n\n"
             f"Запросы для проверки:\n\n{qlist}\n\n"
             "Проверка начнётся только после вашего подтверждения.\n"
-            "Если всё подходит, ответьте: ОК.\n"
-            "Чтобы изменить список, отправьте свои запросы — каждый с новой строки. Я заменю их и покажу обновлённый список перед запуском проверки.")
+            "Нажмите кнопку ниже: «Запустить проверку», если всё подходит, или «Изменить запросы», чтобы прислать свой список. "
+            "Можно и просто ответить ОК или прислать запросы — каждый с новой строки.")
+
+def _review_kb(oid):
+    return [[{"text": "✅ Запустить проверку", "callback_data": f"go:{oid}"}],
+            [{"text": "✏️ Изменить запросы", "callback_data": f"edit:{oid}"}]]
+
+def _send_review(chat, oid, prep, edited=False, prefix=""):
+    """Список запросов на подтверждение + кнопки (чтобы не набирать ОК руками)."""
+    if chat:
+        tg_send_buttons(chat, prefix + _review_text(prep, edited=edited), _review_kb(oid))
 
 def _do_review(oid):
     """Готовит запросы (есть LLM-вызовы, потому фоном) и отправляет клиенту на подтверждение."""
@@ -242,8 +251,7 @@ def _do_review(oid):
     with db() as c:
         c.execute("UPDATE orders SET prep=?, brand=?, brand_short=?, niche=?, status='reviewing' WHERE id=?",
                   (json.dumps(prep, ensure_ascii=False), prep["brand"], prep["brand_short"], prep["niche"], oid))
-    if o["tg_chat_id"]:
-        tg_send_message(o["tg_chat_id"], _review_text(prep, edited=False))
+    _send_review(o["tg_chat_id"], oid, prep, edited=False)
 
 def maybe_start_review(oid):
     """После оплаты: готовим запросы (статус preparing) и одним сообщением просим подтвердить. Защита от двойного старта."""
@@ -256,18 +264,19 @@ def maybe_start_review(oid):
     return True
 
 def revise_queries(oid, edited):
-    """Клиент прислал свой список: заменяем запросы и показываем обновлённый список на повторное подтверждение (без запуска)."""
+    """Клиент прислал свой список: правим опечатки, ограничиваем по тарифу, показываем обновлённый список на повторное подтверждение."""
     with db() as c:
         o = c.execute("SELECT prep, tg_chat_id, kind, qn FROM orders WHERE id=?", (oid,)).fetchone()
     if not o or not o["prep"]: return False
-    if (o["kind"] or "main") == "addon" and o["qn"]:
-        edited = edited[:o["qn"]]              # дозакупка: не больше оплаченного числа запросов
+    cap = (o["qn"] or 10) if (o["kind"] or "main") == "addon" else 10   # main: максимум 10, addon: оплаченное число
+    extra = len(edited) > cap
+    edited = engine.fix_queries(edited[:cap])           # исправляем опечатки/грамматику
     prep = json.loads(o["prep"])
     prep["queries"] = [{"q": q, "group": engine._classify_query(q)} for q in edited]
-    with db() as c:                                   # статус остаётся reviewing — ждём «ОК»
+    with db() as c:                                   # статус остаётся reviewing — ждём подтверждения
         c.execute("UPDATE orders SET prep=? WHERE id=?", (json.dumps(prep, ensure_ascii=False), oid))
-    if o["tg_chat_id"]:
-        tg_send_message(o["tg_chat_id"], _review_text(prep, edited=True))
+    note = (f"Вы прислали больше {cap} — взял первые {cap}.\n\n" if extra else "")
+    _send_review(o["tg_chat_id"], oid, prep, edited=True, prefix=note)
     return True
 
 def start_generation(oid):
@@ -558,7 +567,7 @@ def _addon_collect_queries(oid, qs):
     with db() as c:
         o = c.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
     if not o: return
-    n = o["qn"] or len(qs); qs = qs[:n]
+    n = o["qn"] or len(qs); qs = engine.fix_queries(qs[:n])   # ограничиваем оплаченным числом и правим опечатки
     parent_prep = None
     if o["parent"]:
         with db() as c:
@@ -569,14 +578,27 @@ def _addon_collect_queries(oid, qs):
     with db() as c:
         c.execute("UPDATE orders SET prep=?, status='reviewing', awaiting=NULL WHERE id=?",
                   (json.dumps(prep, ensure_ascii=False), oid))
-    if o["tg_chat_id"]:
-        tg_send_message(o["tg_chat_id"], _review_text(prep, edited=False))
+    _send_review(o["tg_chat_id"], oid, prep, edited=False)
 
 def _handle_callback(cq):
     data = cq.get("data") or ""
     chat = ((cq.get("message") or {}).get("chat") or {}).get("id")
     tg_answer_callback(cq.get("id"))
     if not chat: return "OK"
+    if data.startswith("go:"):              # кнопка «Запустить проверку»
+        oid = data.split(":", 1)[1]
+        with db() as c:
+            o = c.execute("SELECT status, prep FROM orders WHERE id=?", (oid,)).fetchone()
+        if o and o["status"] == "reviewing" and o["prep"]:
+            start_generation(oid)
+        elif o and o["status"] == "processing":
+            tg_send_message(chat, "Уже запускаю проверку, отчёт будет здесь через несколько минут.")
+        else:
+            tg_send_message(chat, "Этот запрос уже обработан или устарел.")
+        return "OK"
+    if data.startswith("edit:"):            # кнопка «Изменить запросы»
+        tg_send_message(chat, "Пришлите свои запросы списком — каждый с новой строки. Я исправлю опечатки, заменю набор и снова покажу на подтверждение.")
+        return "OK"
     if data.startswith("rate:"):
         try: _, n, oid = data.split(":", 2)
         except ValueError: return "OK"
@@ -625,7 +647,7 @@ def tg_webhook():
                     tg_send_message(chat, "Оплата получена. Готовлю запросы для проверки, пришлю их сюда в течение минуты.")
                 elif st == "reviewing":
                     if o["prep"]:
-                        tg_send_message(chat, _review_text(json.loads(o["prep"])))   # повторно показываем список
+                        _send_review(chat, oid, json.loads(o["prep"]))   # повторно показываем список с кнопками
                     else:
                         tg_send_message(chat, "Готовлю запросы для проверки, пришлю их сюда через минуту.")
                 elif st == "await_queries":   # дозакупка оплачена -> ждём запросы клиента
@@ -646,7 +668,10 @@ def tg_webhook():
                         print("[pay] ошибка:", e)
                         tg_send_message(chat, "Оплата временно недоступна, попробуйте чуть позже.")
                 else:                   # pending: платёж уже создан
-                    tg_send_message(chat, "Кнопка оплаты выше. После оплаты отчёт придёт сюда автоматически.")
+                    if (o["kind"] or "main") == "addon":
+                        tg_send_message(chat, "Кнопка оплаты выше. Сразу после оплаты я попрошу прислать запросы для проверки.")
+                    else:
+                        tg_send_message(chat, "Кнопка оплаты выше. После оплаты отчёт придёт сюда автоматически.")
                 return "OK"
         tg_send_message(chat, "Здравствуйте! Чтобы получить отчёт, перейдите по кнопке после оплаты на сайте.")
         return "OK"

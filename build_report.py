@@ -69,39 +69,38 @@ def compute(d):
     for e in eng:
         m=sum(q['hits'].get(e['id'],0) for q in qs)
         e['mentions']=m; e['answers']=len(qs)*RUNS
-        e['rate']=round(m/e['answers']*100)
-    tot_m=sum(e['mentions'] for e in eng); tot_a=sum(e['answers'] for e in eng)
+        e['rate']=None if e.get('failed') else round(m/e['answers']*100)
+    work=[e for e in eng if not e.get('failed')] or eng     # рабочие движки (без ошибки API) — только по ним считаем %
+    tot_m=sum(e['mentions'] for e in work); tot_a=sum(e['answers'] for e in work) or 1
     d['overall']=round(tot_m/tot_a*100)
     d['total_mentions']=tot_m; d['total_answers']=tot_a
-    es=sorted(eng,key=lambda e:-e['rate'])
+    es=sorted(work,key=lambda e:-(e['rate'] or 0))
     d['best']=es[0]; d['worst']=es[-1]
-    # стабильность: запросы, где бренд в 2/2 хотя бы у одного движка, и доля 2/2 ячеек
-    cells=[q['hits'].get(e['id'],0) for q in qs for e in eng]
+    # стабильность: только по рабочим движкам
+    cells=[q['hits'].get(e['id'],0) for q in qs for e in work]
     d['stable_cells']=sum(1 for c in cells if c==2)
     d['partial_cells']=sum(1 for c in cells if c==1)
     d['zero_cells']=sum(1 for c in cells if c==0)
-    d['stable_q']=sum(1 for q in qs if any(q['hits'].get(e['id'],0)==2 for e in eng))
-    # группы
+    d['stable_q']=sum(1 for q in qs if any(q['hits'].get(e['id'],0)==2 for e in work))
+    # группы (доли — по рабочим движкам)
     g={}
     for q in qs:
         gg=g.setdefault(q['group'],{'m':0,'mx':0,'n':0})
-        gg['m']+=sum(q['hits'].get(e['id'],0) for e in eng); gg['mx']+=len(eng)*RUNS; gg['n']+=1
+        gg['m']+=sum(q['hits'].get(e['id'],0) for e in work); gg['mx']+=len(work)*RUNS; gg['n']+=1
     d['groups']=sorted([{'name':k,'rate':round(v['m']/v['mx']*100),'n':v['n'],'m':v['m'],'mx':v['mx']} for k,v in g.items()],
                        key=lambda x:-x['rate'])
-    # опорные / слабые каналы и сегменты — для выводов в тексте (без зашитых формулировок)
     d['strong_engines']=[e['name'] for e in es[:2]]
     d['weak_engines']=[e['name'] for e in es[::-1][:2]]
     gs=d['groups']
     d['top_groups']=[x['name'] for x in gs[:2]]
     low=[x['name'] for x in gs if x['rate']<=15]
     d['weak_groups']=low[:2] if low else [x['name'] for x in gs[::-1][:2]]
-    d['prio_groups']=[x['name'] for x in sorted(gs, key=lambda x:-x['n'])[:3]]   # самые ёмкие группы (по числу запросов)
+    d['prio_groups']=[x['name'] for x in sorted(gs, key=lambda x:-x['n'])[:3]]
     d['zero']=d['overall']==0
-    # факты по движкам и группам (для честного ненулевого сценария)
-    d['mentioned_engines']=[e['name'] for e in eng if e['rate']>0]
-    d['zero_engines']=[e['name'] for e in eng if e['rate']==0]
+    d['mentioned_engines']=[e['name'] for e in work if (e['rate'] or 0)>0]
+    d['zero_engines']=[e['name'] for e in work if e['rate']==0]
     d.setdefault('groups_zero',[x['name'] for x in gs if x['rate']==0])
-    d['rep_groups']=sorted({q['group'] for q in qs if any(q['hits'].get(e['id'],0)==2 for e in eng)})
+    d['rep_groups']=sorted({q['group'] for q in qs if any(q['hits'].get(e['id'],0)==2 for e in work)})
     for c in d['competitors']: c['gap']=c['rate']-d['overall']
     return d
 
@@ -285,7 +284,7 @@ def p_cover(d):
         <div style="font-size:9pt;letter-spacing:2px;text-transform:uppercase;color:rgba(255,255,255,.85);margin-bottom:5mm">Отчёт о видимости бренда в нейросетях</div>
         <h1>{esc(d['brand'])}</h1>
         <div class="cover-meta">Сайт: <b>{esc(d['site'])}</b><br>Ниша: <b>{esc(d['niche'])}</b> · {esc(d['city'])}<br>
-          Движков: <b>{len(d['engines'])}</b> · запросов: <b>{len(d['queries'])}</b> · проверок: <b>{d['total_answers']}</b> · дата: <b>{esc(d['date'])}</b></div>
+          Нейросетей: <b>{len([e for e in d['engines'] if not e.get('failed')])}</b> · запросов: <b>{len(d['queries'])}</b> · проверок: <b>{d['total_answers']}</b> · дата: <b>{esc(d['date'])}</b></div>
         <div class="cover-head">Бренд появился в <span>{d['overall']}%</span> проверок</div>
         <div class="cover-sub">{esc(d['cover_sub'])}</div>
       </div><div style="flex:none">{ring(d['overall'])}</div></div>
@@ -299,7 +298,7 @@ def p_summary(d):
     if d.get('zero'):
         stat3_n="0%"; stat3_l="разницы между нейросетями нет: упоминаний не найдено нигде"
     else:
-        eng=d['engines']; maxr=max(e['rate'] for e in eng); minr=min(e['rate'] for e in eng)
+        eng=[e for e in d['engines'] if e.get('rate') is not None]; maxr=max(e['rate'] for e in eng); minr=min(e['rate'] for e in eng)
         best_names=[e['name'] for e in eng if e['rate']==maxr]; worst_names=[e['name'] for e in eng if e['rate']==minr]
         stat3_n=esc(_join(best_names))
         stat3_l=(f"результат одинаковый во всех каналах ({maxr}%)" if maxr==minr
@@ -313,15 +312,24 @@ def p_summary(d):
         <div class="box"><h4>{strong_h}</h4><p>{esc(rm['strong'])}</p></div></div>
       <div class="box cream"><h4>Ближайшая цель</h4><p>{esc(rm['goal'])}</p></div>
       <div class="grid3" style="margin-top:5mm">
-        <div class="stat"><div class="n">{d['overall']}%</div><div class="l">средняя видимость по {len(d['engines'])} {plural(len(d['engines']),'нейросети','нейросетям','нейросетям')}</div></div>
+        <div class="stat"><div class="n">{d['overall']}%</div><div class="l">средняя видимость по {len([e for e in d['engines'] if not e.get('failed')])} {plural(len([e for e in d['engines'] if not e.get('failed')]),'рабочей нейросети','рабочим нейросетям','рабочим нейросетям')}</div></div>
         <div class="stat"><div class="n">{d['stable_q']} из {len(d['queries'])}</div><div class="l">запросов с повторяемым упоминанием (2/2 хотя бы в одной сети)</div></div>
         <div class="stat"><div class="n">{stat3_n}</div><div class="l">{stat3_l}</div></div></div>
       <div class="note" style="margin-top:3mm">2/2 означает, что бренд появился в обоих ответах на один и тот же вопрос.</div>
       <div class="box"><h4>Что дальше в отчёте</h4><p>Дальше: видимость по каждой нейросети, таблица повторяемости ответов, разбор по группам вопросов, примеры реальных ответов, что показала проверка сайта и пошаговый план с приоритетами и ответственными.</p></div>
       {footer(d)}</div>'''
 
+def _engine_bar(e):
+    if e.get('failed'):
+        return (f'<div class="bar"><div class="bar-row">'
+                f'<div class="bar-l" style="width:150px">{esc(e["name"])}</div>'
+                f'<div class="bar-track" style="background:transparent"></div>'
+                f'<div class="bar-v" style="color:{FAINT};font-weight:600;width:auto;white-space:nowrap;font-size:9pt">не удалось проверить</div></div>'
+                f'<div class="bar-sub" style="padding-left:160px">нейросеть не ответила (ошибка доступа к API); в расчёт видимости не входит</div></div>')
+    return bar(e['name'], e['rate'], f"{e['mentions']} упоминаний в {e['answers']} ответах · {esc(e['note'])}", wl="150px")
+
 def p_engines(d):
-    bars="".join(bar(e['name'], e['rate'], f"{e['mentions']} упоминаний в {e['answers']} ответах · {esc(e['note'])}", wl="150px") for e in d['engines'])
+    bars="".join(_engine_bar(e) for e in d['engines'])
     me=d.get('mentioned_engines',[]); ze=d.get('zero_engines',[]); ans=d['engines'][0]['answers']; b=d['brand_short']
     total=d['total_answers']
     if not me:
@@ -352,9 +360,12 @@ def p_matrix(d):
     for q in d['queries']:
         cells=""
         for e in eng:
-            v=q['hits'].get(e['id'],0); cells+=f'<td class="c c{v}">{v}/{RUNS}</td>'
+            if e.get('failed'):
+                cells+='<td class="c c0">—</td>'
+            else:
+                v=q['hits'].get(e['id'],0); cells+=f'<td class="c c{v}">{v}/{RUNS}</td>'
         rows+=f'<tr><td class="q">{esc(q["q"])}<div class="grp">{esc(q["group"])}</div></td>{cells}</tr>'
-    legend=" · ".join(f'{esc(e["short"])}: {esc(e["name"])}' for e in eng)
+    legend=" · ".join(f'{esc(e["short"])}: {esc(e["name"])}' + (" (не проверено)" if e.get("failed") else "") for e in eng)
     return f'''<div class="page"><h2><span class="num">03</span>В каких ответах бренд появляется, а в каких нет</h2>
       <div class="sec-intro">Каждый запрос проверен по {RUNS} раза. 2/{RUNS}: упоминание повторилось в обеих проверках. 1/{RUNS}: в одной из двух. 0/{RUNS}: не появился.</div>
       <table class="mx"><thead><tr><th class="q">Запрос</th>{head}</tr></thead><tbody>{rows}</tbody></table>
@@ -365,8 +376,10 @@ def p_matrix(d):
       {footer(d)}</div>'''
 
 def _qd_row(q, e):
+    if e.get('failed'):
+        return f'<div class="qd-e"><b>{esc(e["short"])}:</b> не удалось проверить (ошибка доступа к API)</div>'
     h=q['hits'].get(e['id'],0)
-    comps=(q.get('evidence') or {}).get(e['id'],{}).get('comps',[])[:2]
+    comps=(q.get('evidence') or {}).get(e['id'],{}).get('comps',[])[:4]   # показываем всех названных (до 4)
     extra=(", также называл "+", ".join(comps)) if comps else ""
     if h>=2:   t="назвал ваш бренд в обоих ответах (2/2)"+extra
     elif h==1: t="назвал ваш бренд в одном ответе (1/2)"+extra
@@ -458,6 +471,15 @@ def _gap_phrase(gap):
     if gap < 0: return f"на {abs(gap)} п.п. ниже вас"
     return "наравне с вами"
 
+def _comp_where(c):
+    """Все запросы (и нейросети), где назван конкурент — чтобы «N из M» было видно по чему именно."""
+    ms=c.get("mentions") or []
+    if not ms: return ""
+    parts=[f"«{esc(m['q'])}» ({esc(', '.join(m['engines']))})" for m in ms[:4]]
+    more=f" и ещё {len(ms)-4}" if len(ms)>4 else ""
+    word="запросу" if len(ms)==1 else "запросам"
+    return f" Назван по {word}: " + "; ".join(parts) + more + "."
+
 def _comp_link(c):
     """Имя конкурента — прямая ссылка на его сайт. Если сайт определить не удалось — просто имя, без поисковой строки."""
     name=esc(c['name'])
@@ -474,7 +496,7 @@ def p_competitors(d):
         sub=("ваша текущая видимость" if is_you else f"{_gap_phrase(rate-ov)} · упомянут в {cnt} из {N} ответов")
         bars+=bar((esc(name)+" (вы)") if is_you else name, rate, sub, wl="150px", color=(ACCENTD if is_you else FAINT), you=is_you)
     ev="".join(f'''<div class="ex"><div class="q">{_comp_link(c)} · {c['rate']}%</div>
-          <div class="r">Упомянут в <b>{c['count']}</b> из <b>{c['total']}</b> ответов нейросетей по вашим запросам{(" — " + esc(c["where"])) if c.get("where") else ""}.</div></div>''' for c in d['competitors'])
+          <div class="r">Упомянут в <b>{c['count']}</b> из <b>{c['total']}</b> ответов нейросетей по вашим запросам.{_comp_where(c)}</div></div>''' for c in d['competitors'])
     names_join=_join([c['name'] for c in d['competitors']])
     max_c=max((c['rate'] for c in d['competitors']), default=0)
     if ov>0 and ov>=max_c:

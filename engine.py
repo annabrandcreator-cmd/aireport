@@ -132,6 +132,29 @@ def _classify_query(q):
             return name
     return "Услуги ниши"
 
+def fix_queries(items):
+    """Исправляет опечатки/орфографию/грамматику в запросах клиента, не меняя смысл и количество. Откат — вернуть как есть."""
+    items = [i.strip() for i in (items or []) if i and i.strip()]
+    if not items or os.environ.get("TEST_MODE") == "1":
+        return items
+    ask = _first_keyed_adapter()
+    if not ask:
+        return items
+    numbered = "\n".join(f"{i+1}. {q}" for i, q in enumerate(items))
+    prompt = ("Исправь ТОЛЬКО опечатки, орфографию и грамматику в каждом запросе ниже. "
+              "НЕ меняй смысл, формулировку, порядок и количество запросов; не добавляй и не убирай запросы. "
+              "Верни тот же пронумерованный список, каждый запрос с новой строки, без пояснений:\n" + numbered)
+    try:
+        raw = ask(prompt)
+    except Exception:
+        return items
+    out = []
+    for ln in (raw or "").splitlines():
+        s = re.sub(r"^\s*\d+[.)]\s*", "", ln).strip().strip('"«»').strip()
+        if len(s) >= 4:
+            out.append(s)
+    return out if len(out) == len(items) else items   # безопасность: только при совпадении количества
+
 def _first_keyed_adapter():
     # вспомогательные задачи (генерация запросов, извлечение конкурентов) — на дешёвом движке,
     # дорогой веб-поиск GPT бережём для реальных ответов
@@ -695,8 +718,9 @@ def _ask_one(prompt, eid, run, brand, test):
         if test or not has_key(eid):
             return ask_mock(prompt, eid, run, brand)
         return REAL_ADAPTERS[eid](prompt)
-    except Exception:
-        return ""   # сеть недоступна -> считаем как не упомянут
+    except Exception as e:
+        print(f"[ask] {eid} ошибка: {type(e).__name__}", flush=True)
+        return None   # ошибка доступа к API (квота/ключ/сеть) -> движок не отвечает, это НЕ «0% видимости»
 
 def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=None, aliases=None, queries=None):
     test = os.environ.get("TEST_MODE") == "1"
@@ -718,10 +742,16 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
     with ThreadPoolExecutor(max_workers=workers) as pool:
         answers = list(pool.map(lambda t: _ask_one(t[2], t[1], t[3], brand, test), tasks))
     all_answers = []
+    eng_err = {e["id"]: 0 for e in engines}; eng_tot = {e["id"]: 0 for e in engines}
     for (qi, eid, _q, _run), ans in zip(tasks, answers):
+        eng_tot[eid] += 1
+        if ans is None:                       # ошибка API (квота/ключ/сеть) -> не считаем как ответ
+            eng_err[eid] += 1
+            continue
         all_answers.append(ans)
         if detect_mention(ans, aliases):
             queries[qi]["hits"][eid] += 1
+    failed = [eid for eid in eng_tot if eng_tot[eid] and eng_err[eid] >= (eng_tot[eid] + 1) // 2]   # большинство вызовов с ошибкой -> движок недоступен
     competitors = extract_competitors(all_answers, brand, brand_short, niche, aliases=aliases)
     # доказательная база по каждому запросу: какой движок назвал бренд и кого из конкурентов
     comp_names = [n for n, _ in competitors]
@@ -733,7 +763,7 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
         for n in comp_names:
             if n.lower() in low and n not in ev:
                 ev.append(n)
-    return queries, competitors
+    return queries, competitors, failed
 
 # ───────────────────────── сборка данных отчёта ───────────────────────
 def _rates(queries):
@@ -822,21 +852,24 @@ def _plan30(site_info=None):
         ]},
     ]
 
-def build_data(brand, brand_short, site, niche, city, queries, competitors, site_info=None):
+def build_data(brand, brand_short, site, niche, city, queries, competitors, site_info=None, failed_engines=None):
     eng = active_engines()
+    failed_set = set(failed_engines or [])
+    work = [e for e in eng if e["id"] not in failed_set] or eng   # рабочие движки (без ошибок API)
     rates = _rates(queries)
     groups = _groups(queries)
-    overall = round(sum(q["hits"][e["id"]] for q in queries for e in eng) / (len(queries)*len(eng)*RUNS) * 100)
+    overall = round(sum(q["hits"][e["id"]] for q in queries for e in work) / (len(queries)*len(work)*RUNS) * 100)
     zero = overall == 0
     strong = [g[0] for g in groups if g[1] >= 45][:2]
     weak   = [g[0] for g in groups if g[1] <= 15]
-    best = max(eng, key=lambda e: rates[e["id"]]); worst = min(eng, key=lambda e: rates[e["id"]])
+    best = max(work, key=lambda e: rates[e["id"]]); worst = min(work, key=lambda e: rates[e["id"]])
     weak_txt = ", ".join(weak).lower() if weak else "нишевые и премиальные запросы"
     strong_txt = ", ".join(strong).lower() if strong else "общие коммерческие запросы"
     top_txt = ", ".join(g[0] for g in groups[:3]).lower() if groups else "коммерческие запросы ниши"
     # факты для честных формулировок при ненулевом результате
-    mentioned_engines = [e["name"] for e in eng if rates[e["id"]] > 0]
-    zero_engines = [e["name"] for e in eng if rates[e["id"]] == 0]
+    mentioned_engines = [e["name"] for e in work if rates[e["id"]] > 0]
+    zero_engines = [e["name"] for e in work if rates[e["id"]] == 0]
+    failed_names = [e["name"] for e in eng if e["id"] in failed_set]
     groups_pos = [g[0] for g in groups if g[1] > 0]
     groups_zero = [g[0] for g in groups if g[1] == 0]
     rep_groups = sorted({q["group"] for q in queries if any(v == 2 for v in q["hits"].values())})   # 2/2 хотя бы в одной ячейке
@@ -845,7 +878,7 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
     appeared_neg = "не появилась" if fem else "не появился"
     mentioned_neg = "не была упомянута" if fem else "не был упомянут"
     pos_txt = ", ".join(groups_pos); zero_grp_txt = ", ".join(groups_zero); rep_txt = ", ".join(rep_groups)
-    total = len(queries)*len(eng)*RUNS
+    total = len(queries)*len(work)*RUNS
     comp_conf = [(n, c) for n, c in competitors if c >= 2]   # подтверждён: упомянут минимум в 2 ответах
     if len(comp_conf) < 2:                                   # по аудиту: блок только при >=2 подтверждённых
         comp_conf = []
@@ -853,12 +886,13 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
     examples = _pick_examples(queries, brand_short, best, comp_names)
     comp_objs = _competitor_objs(comp_conf, total)
     eng_name = {e["id"]: e["name"] for e in eng}
-    for c in comp_objs:                                       # где встретился конкурент: пример запроса и нейросети
-        c["where"] = ""
+    for c in comp_objs:                                       # ВСЕ места, где назван конкурент: запрос -> нейросети
+        mentions = []
         for q in queries:
-            hit = next((eng_name.get(eid, eid) for eid, ev in (q.get("evidence") or {}).items() if c["name"] in ev.get("comps", [])), None)
-            if hit:
-                c["where"] = f"например, по запросу «{q['q']}» ({hit})"; break
+            engs = [eng_name.get(eid, eid) for eid, ev in (q.get("evidence") or {}).items() if c["name"] in ev.get("comps", [])]
+            if engs:
+                mentions.append({"q": q["q"], "engines": engs})
+        c["mentions"] = mentions
     if comp_objs and os.environ.get("TEST_MODE") != "1":     # проверенные ссылки на сайты конкурентов
         try:
             sites = _competitor_sites([c["name"] for c in comp_objs])
@@ -874,7 +908,8 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
                       ((f"Бренд появляется в части ответов. Повторяемые упоминания (2/2) по группам: {rep_txt}." if rep_groups
                         else f"Бренд появляется в части ответов, пока единичными упоминаниями по группам: {pos_txt}.")
                        + (f" По группам {zero_grp_txt} упоминаний пока нет." if zero_grp_txt else ""))),
-        "engines": [dict(e) for e in eng],
+        "engines": [dict(e, failed=(e["id"] in failed_set)) for e in eng],
+        "failed_engines": failed_names,
         "queries": queries,
         "result_meaning": {
             "headline": ("упоминания не обнаружены" if zero else ("средняя видимость" if overall>=25 else "низкая видимость")),
@@ -910,8 +945,9 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
         "blockers": _blockers(groups, zero, site_info, mentioned_engines, zero_engines, groups_zero),
         "recommendations": _recommendations(queries, groups, total, site_info, brand_short, niche),
         "plan30": _plan30(site_info),
-        "method_note": (f"Каждой из {len(eng)} нейросетей задано {len(queries)} вопросов по {RUNS} прогона — всего {len(queries)*len(eng)*RUNS} ответов на дату на обложке; "
-                        "где нейросеть умеет искать в интернете, использовался веб-поиск. Упоминание — явное называние бренда, домена или короткого имени. "
+        "method_note": (f"Каждой из {len(work)} рабочих нейросетей задано {len(queries)} вопросов по {RUNS} прогона — всего {len(queries)*len(work)*RUNS} ответов на дату на обложке; "
+                        + (f"Нейросеть {', '.join(failed_names)} в этот раз не ответила (ошибка доступа к API) и в расчёт видимости не вошла. " if failed_names else "")
+                        + "Где нейросеть умеет искать в интернете, использовался веб-поиск. Упоминание — явное называние бренда, домена или короткого имени. "
                         "Причины отсутствия бренда отмечены как гипотезы, а не доказанные факты. Ответы нейросетей меняются со временем; "
                         "повторный замер имеет смысл после индексации обновлённых страниц."),
     }
@@ -1119,7 +1155,9 @@ def _reco_examples(niche, brand_short, queries=None, site_info=None):
 def _recommendations(queries, groups, total, site_info=None, brand_short="бренд", niche=""):
     """Карточки рекомендаций на языке владельца: что означает, что сделать, пример (под нишу), кому передать, тип, приоритет."""
     b = brand_short or "бренд"
-    did = "выполнила" if _brand_gender(b) == "f" else "выполнил"
+    _g = _brand_gender(b)
+    did = "выполнила" if _g == "f" else "выполнил"
+    aneg = "не появилась" if _g == "f" else "не появился"
     rex = _reco_examples(niche, b, queries, site_info)
     miss = total - sum(v for q in queries for v in q["hits"].values())   # ответов без бренда (из total)
     s = site_info or {}
@@ -1137,7 +1175,7 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
                      f"что именно делает {b}, для каких клиентов и в каком формате — тогда нейросеть сможет это процитировать.")
     else:
         svc_plain = (f"Отдельных понятных страниц под ключевые услуги автопроверка не нашла. "
-                     f"По коммерческим вопросам {b} не появился в {miss} из {total} ответов. "
+                     f"По коммерческим вопросам {b} {aneg} в {miss} из {total} ответов. "
                      f"Когда у каждой услуги есть страница с конкретными фактами, нейросети проще назвать компанию.")
     recs.append({
         "kind": "content",
@@ -1291,10 +1329,10 @@ def run(brand=None, site=None, niche=None, city=None, brand_short=None, out=None
         prep = prepare(site, niche, city, fallback_brand=brand_short or brand or "")
     site_info = prep.get("site_info")
     aliases = set(prep.get("aliases") or [])
-    q, competitors = analyze(prep["brand"], prep["brand_short"], prep["site"], prep["niche"], prep.get("city"),
-                             site_info=site_info, aliases=aliases, queries=prep.get("queries"))
+    q, competitors, failed = analyze(prep["brand"], prep["brand_short"], prep["site"], prep["niche"], prep.get("city"),
+                                     site_info=site_info, aliases=aliases, queries=prep.get("queries"))
     data = build_data(prep["brand"], prep["brand_short"], prep["site"], prep["niche"], prep.get("city"),
-                      q, competitors, site_info=site_info)
+                      q, competitors, site_info=site_info, failed_engines=failed)
     if out:
         with open(out, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=1)
     return data

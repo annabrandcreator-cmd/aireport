@@ -152,6 +152,48 @@ def _depersonalize(q):
         return _qmark(f"Какие {nom} {tail}") if tail else _qmark(f"Какие есть {nom}")
     return _qmark("Где найти " + rest)                            # запасной: «Посоветуйте фабрику X» -> «Где найти фабрику X?»
 
+# ── ценовой сегмент и география: держим то, что на сайте, и не выдумываем ──
+def _segment(site_info, niche=""):
+    """premium / budget / '' по данным сайта — чтобы не мешать премиум с экономом."""
+    s = site_info or {}
+    txt = " ".join(filter(None, [s.get("title"), s.get("description"), s.get("text_excerpt"), niche])).lower()
+    if re.search(r"(преми[ауеo]|премиал|люкс|лакшери|luxury|эксклюзив|дизайнерск|кутюр|ателье|бутик|ручн\w+\s+работ|"
+                 r"индивидуальн\w+\s+пошив|высок\w+\s+класс|элитн)", txt):
+        return "premium"
+    if re.search(r"(эконом|бюджетн|деш[её]в|недорог|низк\w+\s+цен|дискаунтер|распродаж)", txt):
+        return "budget"
+    return ""
+_BUDGET_WORDS = re.compile(r"(эконом|бюджет|деш[её]в|недорог|низк\w*\s+цен|выгодн\w*\s+цен|скидк|распродаж)", re.I)
+_PREMIUM_WORDS = re.compile(r"(преми|люкс|лакшери|эксклюзив|элитн|дорог)", re.I)
+def _filter_segment(qs, seg):
+    """Выкидывает запросы чужого сегмента: для премиум — про эконом/дёшево, для эконома — про люкс."""
+    if seg == "premium":
+        keep = [q for q in qs if not _BUDGET_WORDS.search(q["q"])]
+    elif seg == "budget":
+        keep = [q for q in qs if not _PREMIUM_WORDS.search(q["q"])]
+    else:
+        return qs
+    return keep if len(keep) >= 4 else qs
+def _strip_geo(qs):
+    """Если город не задан, нейросеть всё равно иногда выдумывает город. Убираем выдуманную географию (кроме России/РФ)."""
+    stems = set()
+    for q in qs:
+        for m in re.finditer(r"(?:^|\s)(?:в|во|по|из)\s+([А-ЯЁ][а-яё]{3,})", q["q"]):
+            w = m.group(1).lower()
+            if w.startswith(("росс", "рф")):
+                continue
+            stems.add(w[:5])                                  # стем: Рязан(и/ской)
+    if not stems:
+        return qs
+    def clean(t):
+        for st in stems:
+            t = re.sub(r"\s*(?:в|во|по|из)\s+" + st + r"[а-яё]*(?:\s+(?:област\w+|кра\w+|обл\.?))?", "", t, flags=re.I)
+            t = re.sub(r"\s+" + st + r"[а-яё]*(?:\s+(?:област\w+|кра\w+))?", "", t, flags=re.I)   # генитив без предлога: «магазинах Рязани»
+        t = re.sub(r"\s{2,}", " ", t).strip()
+        t = re.sub(r"\s+([?.,])", r"\1", t)
+        return t
+    return [{"q": clean(q["q"]), "group": q["group"]} for q in qs]
+
 def generate_queries(niche, city, site_info=None, aliases=None):
     city = _norm_city(city)
     # боевой режим: запросы под нишу формирует сама нейросеть (с учётом сайта); иначе/при сбое — шаблоны
@@ -159,6 +201,10 @@ def generate_queries(niche, city, site_info=None, aliases=None):
     if not qs:
         qs = generate_queries_tpl(niche, city)
     qs = [{"q": _depersonalize(x["q"]), "group": x["group"]} for x in qs]   # убираем обращения к нейросети («найдите/подскажите…»)
+    if not city:                                            # город не задан -> вычищаем выдуманную нейросетью географию
+        qs = _strip_geo(qs)
+    qs = _filter_segment(qs, _segment(site_info, niche))    # премиум-бренду не подмешиваем эконом, и наоборот
+    qs = [{"q": _depersonalize(x["q"]), "group": x["group"]} for x in qs]   # повторная нормализация после чистки
     # выкидываем БРЕНДОВЫЕ запросы (где клиент уже знает компанию): основной % меряет небрендовую видимость
     al = [a for a in (aliases or ()) if len(a) >= 5]
     if al:
@@ -254,11 +300,17 @@ def generate_queries_llm(niche, city, site_info=None):
     types = {str(x).lower() for x in (s.get("schema") or [])}
     is_shop = bool(types & {"product", "offer", "aggregateoffer", "store", "onlinestore", "productgroup"}) \
               or bool(re.search(r"(интернет-?магазин|добавить в корзин|каталог товаров|товаров в наличии|купить.{0,25}доставк)", txt_all))
-    shop_block = (("\nЭТО ИНТЕРНЕТ-МАГАЗИН (продажа товаров). Формулируй как ПОКУПКУ: «На каком сайте купить…», «Где заказать…», "
-                   "«Какие интернет-магазины продают…», «Где купить … с доставкой». И ОБЯЗАТЕЛЬНО сделай ОДИН запрос про КОНКРЕТНЫЙ товар "
-                   "из ассортимента (возьми реальное название товара или бренда по данным сайта): «На каком сайте заказать [конкретный товар]?» — "
+    product_biz = is_shop or _biz_role(site_info, niche) in ("shop", "manufacturer")   # магазин ИЛИ производитель товара
+    shop_block = (("\nЭТО ТОВАРНЫЙ БИЗНЕС (продажа или производство товаров). Часть запросов формулируй как ПОКУПКУ: «На каком сайте купить…», "
+                   "«Где заказать…», «Какие магазины продают…», «Где купить … с доставкой». И ОБЯЗАТЕЛЬНО сделай ОДИН запрос про КОНКРЕТНЫЙ товар "
+                   "из ассортимента (возьми реальный тип или модель товара по данным сайта): «На каком сайте купить [конкретный товар]?» — "
                    "это самый целевой запрос, по нему видно конкуренцию за конкретный продукт.\n")
-                  if is_shop else "")
+                  if product_biz else "")
+    seg = _segment(site_info, niche)
+    seg_line = ("СЕГМЕНТ — ПРЕМИУМ. Категорически запрещены слова: дешёвый, недорого, бюджетный, эконом, выгодные цены, скидки, распродажа. "
+                "Подходящие слова: премиальный, дизайнерский, под заказ, индивидуальный пошив, качество материалов.\n"
+                if seg == "premium" else
+                ("СЕГМЕНТ — ДОСТУПНЫЙ. Не пиши про люкс, премиум, эксклюзив и элитность.\n" if seg == "budget" else ""))
     prompt = (
         "Помоги собрать запросы, по которым можно проверить, рекомендуют ли нейросети конкретную компанию. "
         f"Составь 10 запросов на русском, которые реальный КЛИЕНТ задаёт нейросети (ChatGPT, Алиса, GigaChat), "
@@ -282,9 +334,13 @@ def generate_queries_llm(niche, city, site_info=None):
         "Плохо: «фабрика мебели металлокаркас Москва», «производство мебели на заказ недорого», «Посоветуйте фабрику…» (обращение к нейросети).\n"
         "\nОХВАТ: часть запросов широкие, где клиент ещё не знает конкретную фирму; часть — конкретнее: по формату работы "
         "(под ключ, проект, опт), по материалу, как выбрать, на что смотреть. Интент коммерческий — человек выбирает, куда потратить деньги.\n"
+        f"{seg_line}"
         "ЦЕНОВОЙ СЕГМЕНТ: держи ОДИН сегмент из данных сайта и не смешивай — нельзя в одном наборе и «премиум», и «эконом/недорого». "
         "Если компания премиальная, проектная, B2B или оптовая — не пиши «недорого», «дёшево», «эконом» и не формулируй как розничную покупку. "
         "Если сегмент из сайта не ясен — НЕ указывай его вообще.\n"
+        "РЫНОК РОССИЙСКИЙ. Формулируй запросы так, чтобы нейросеть называла РОССИЙСКИЕ компании и сайты (зона .ru), а не мировых гигантов. "
+        "Где уместно, добавляй «в России» или «российск…» (российская компания, российский сервис, российский магазин). "
+        "Не провоцируй ответ про IBM, Microsoft, Google, AWS, Upwork и другие зарубежные сервисы.\n"
         "ГОРОДА: не выдумывай географию. Если регион передан — используй только его. Если регион НЕ передан — во всех 10 запросах "
         "НЕ упоминай НИ ОДНОГО города (можно «в России» или вовсе без географии). Категорически нельзя раскидывать запросы по разным городам.\n"
         "ПРЕДМЕТ: каждый запрос — про ОСНОВНОЙ продукт или услугу компании по данным сайта. Не уходи в смежные категории, которых на сайте нет "
@@ -338,9 +394,20 @@ def brand_aliases(site, site_info=None, brand="", brand_short=""):
         x = (x or "").strip().strip("«»\"'").lower()
         if len(x) >= 3: al.add(x)
     base = re.sub(r"\.[a-zа-я]{2,6}$", "", host)              # домен без зоны: vazuza-club.ru -> vazuza-club
-    if "-" in base:                                          # многословный домен, единичное слово не берём (геориск)
+    if "-" in base:                                          # многословный домен
         al.add(base); al.add(base.replace("-", " "))
+    elif len(base) >= 5 and not base.startswith(_GEO_STEMS) and base not in _COMMON:
+        al.add(base)                                         # единичное слово-домен: hollyshop -> добавляем (но не гео/общие слова)
     return {a for a in al if len(a) >= 3}
+
+def _brand_from_host(name, host):
+    """Если имя — это просто домен, делаем читаемое: hollyshop.ru -> Hollyshop, vazuza-club.ru -> Vazuza Club."""
+    n = (name or "").strip()
+    if n and n.lower() != host.lower() and not re.fullmatch(r"[a-z0-9.-]+\.[a-zа-я]{2,6}", n.lower()):
+        return n                                             # настоящее имя уже есть — не трогаем
+    base = re.sub(r"\.[a-zа-я]{2,6}$", "", host)
+    words = [w for w in base.replace("-", " ").split() if w]
+    return " ".join(w[:1].upper() + w[1:] for w in words) if words else (name or host)
 
 def detect_mention(answer, aliases):
     if not answer: return False
@@ -474,7 +541,7 @@ def brand_card(site, site_info, fallback=""):
     base = brand_aliases(site, site_info, fallback or host, fallback or host)
     ask = _first_keyed_adapter()
     if not (ask and site_info and site_info.get("ok")):
-        return (fallback or host), base
+        return _brand_from_host(fallback or host, host), base
     bits = " | ".join(filter(None, [
         "Домен: " + host,
         "Заголовок: " + (site_info.get("title") or ""),
@@ -491,7 +558,7 @@ def brand_card(site, site_info, fallback=""):
         obj = json.loads(re.search(r'\{.*\}', raw, re.S).group(0))
         canonical = _clean_brand(obj.get("brand") or "")
         if not (2 < len(canonical) <= 50):
-            return (fallback or host), base
+            return _brand_from_host(fallback or host, host), base
         al = set(base)
         for a in [canonical] + list(obj.get("aliases") or []):
             a = (a or "").strip().strip("«»\"'").lower()
@@ -591,6 +658,75 @@ _RETAILERS = {
 }
 _DOMAIN_RE = re.compile(r"\b([a-z0-9][a-z0-9-]{1,30}\.(?:ru|рф|com|by|kz|ua|net|org|store|shop|online))\b", re.I)
 _PLATFORM_DOMS = ("yandex.","ya.","google.","goo.","openai.","chatgpt.","sber.","gigachat.","perplexity.","bing.","wikipedia.")
+# мусор, который нейросети выдают как «названия», но это не компании
+_NAME_STOP = {"you","korea","official","сайт","официальный","купить","заказать","оптом","опт","доставка",
+              "корея","россия","москва","косметика","магазин","магазины","бренд","бренды","новинки","каталог",
+              "official site","официальный сайт","интернет-магазин","маркетплейс","отзывы"}
+_NAME_STOP_WORDS = {"купить","заказать","оптом","доставка","официальный","продажа","заказ","скидки","акции"}
+# категории и каналы поиска — не компании (нейросети любят выдавать их как «варианты»)
+_CATEGORY = {"поиск","интернет","интернете","выставка","выставки","ярмарка","ярмарки","каталог","каталоги",
+             "подборка","подборки","маркетплейс","маркетплейсы","форум","форумы","справочник","справочники",
+             "соцсети","соцсеть","реклама","отзыв","отзывы","агрегатор","агрегаторы","производитель","производители",
+             "поставщик","поставщики","магазины","площадка","площадки","сайты","рейтинг","рейтинги","подрядчик","подрядчики",
+             # обобщённые «категории игроков», которые нейросети выдают вместо названий
+             "консалтинг","консалтинговые","консалтинговая","интегратор","интеграторы","партнёр","партнёры","партнеры",
+             "специалист","специалисты","стартап","стартапы","фрилансер","фрилансеры","фонд","фонды","фирма","фирмы",
+             "организации","организация","аутсорс","студии","агентства","компании"}
+# Российский рынок: иностранные домены и мировые гиганты — не релевантные конкуренты для РФ-бизнеса.
+_RU_TLD = re.compile(r"\.(?:ru|рф|su|moscow|tatar)$", re.I)
+_FOREIGN_TLD = re.compile(r"\.(?:com|io|net|org|co|us|uk|de|fr|cn|in|eu|app|ai|dev|tech|store|shop|online|info|biz|me)$", re.I)
+_FOREIGN_NAMES = _GLOBAL_BRANDS | {"upwork","freelancer","toptal","fiverr","aws","azure","watson","gcp","gartner",
+    "cognizant","infosys","wipro","capgemini","epam","tcs","atos","fujitsu","huawei","alibaba","tencent","palantir",
+    "databricks","snowflake","datadog","mongodb","stripe","twilio","github","gitlab","lamoda"}
+def _is_foreign(name):
+    """Иностранный игрок: домен не .ru/.рф или мировой гигант/зарубежная площадка. Кириллица и .ru считаются российскими."""
+    n = (name or "").strip().lower()
+    if not n:
+        return False
+    if _RU_TLD.search(n):
+        return False
+    if "." in n and _FOREIGN_TLD.search(n):
+        return True
+    words = set(re.split(r"[\s/().]+", n))
+    return n in _FOREIGN_NAMES or bool(words & _FOREIGN_NAMES)
+def _dedupe_names(names):
+    """Убирает дубли-подстроки: «Guerisson» при «Guerisson for You», «You» как отдельное слово."""
+    out = []
+    for n in names:
+        nl = n.lower().strip()
+        if not nl:
+            continue
+        dup = False
+        for i, m in enumerate(out):
+            ml = m.lower()
+            if nl == ml or nl in ml.split() or ml in nl.split():     # совпало слово-в-словосочетании
+                if len(nl) > len(ml):
+                    out[i] = n                                       # оставляем более полное имя
+                dup = True; break
+        if not dup:
+            out.append(n)
+    return out
+def _clean_named_list(names):
+    """Чистит список названных игроков: выкидывает обрывки, общие слова и фразы-запросы, дедупит."""
+    res = []
+    for n in names:
+        nl = re.sub(r"\s+", " ", (n or "").strip(" .,:;()[]«»\"'")).strip()
+        low = nl.lower()
+        if len(nl) < 3 or low in _NAME_STOP:
+            continue
+        words = nl.split()                                                  # оригинальный регистр — для проверки заглавных
+        has_dot = "." in nl                                                 # домен (iherb.com) — оставляем
+        if not has_dot and not any(c.isupper() for c in nl):               # сплошь строчные и не домен — не бренд
+            continue
+        if any(w.lower().strip(".,") in _CATEGORY for w in words):          # содержит слово-категорию (выставки, поиск, производители…)
+            continue
+        if len(words) >= 2 and any(w.lower() in _NAME_STOP_WORDS for w in words):  # «купить Medicube», «официальный сайт …»
+            continue
+        if len(words) >= 4:                                                 # слишком длинно для названия
+            continue
+        res.append(nl)
+    return _dedupe_names(res)
+
 def _named_in_answer(ans, own):
     """Названные в ответе реальные игроки (ритейлеры, домены, выделенные имена), кроме самого бренда. Список (до 5)."""
     if not ans: return []
@@ -619,7 +755,7 @@ def _named_in_answer(ans, own):
         nm = _good_name_loose(tok)
         if nm and not _is_own(nm) and nm.lower() not in [f.lower() for f in found]:
             found.append(nm)
-    return found[:5]
+    return [n for n in _clean_named_list(found) if not _is_own(n) and not _is_foreign(n)][:5]   # только российские игроки
 
 def _competitors_regex(answers, own):
     """Запасной эвристический разбор (только если нет ключа для LLM-извлечения)."""
@@ -693,6 +829,8 @@ def extract_competitors(answers, brand, brand_short, niche="", top=3, aliases=No
     names = _competitors_llm(answers, niche)
     if names is None:                       # ключа нет -> эвристический запас
         names = _competitors_regex(answers, own)
+    names = _clean_named_list(names)        # дедуп подстрок + чистка обрывков/фраз
+    names = [n for n in names if not _is_foreign(n)]   # российский рынок: без иностранных гигантов и доменов
     res, seen = [], set()
     for name in names:
         low = name.lower()
@@ -902,6 +1040,7 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
     # доказательная база по каждому запросу: какой движок назвал бренд и кого из конкурентов
     comp_names = [n for n, _ in competitors]
     comp_low = {n.lower() for n in comp_names}
+    comp_words = {w for n in comp_names for w in n.lower().split()}   # слова имён конкурентов (чтобы не дублировать обрывком)
     for q in queries:
         q["evidence"] = {e["id"]: {"brand": q["hits"][e["id"]] > 0, "comps": [], "others": []} for e in engines}
     for (qi, eid, _q, _run), ans in zip(tasks, answers):
@@ -911,8 +1050,10 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
             if n.lower() in low and n not in cell["comps"]:
                 cell["comps"].append(n)
         for n in _named_in_answer(ans, aliases):              # прочие названные игроки (площадки, домены, бренды)
-            if n.lower() not in comp_low and n not in cell["others"]:
-                cell["others"].append(n)
+            nl = n.lower()
+            if nl in comp_low or nl in cell["others"]: continue
+            if " " not in nl and nl in comp_words: continue   # «Guerisson» при «Guerisson for You» — не дублируем
+            cell["others"].append(n)
     return queries, competitors, failed
 
 # ───────────────────────── сборка данных отчёта ───────────────────────
@@ -1259,6 +1400,36 @@ _GLOSSARY = [
     ("Внутренние ссылки", "ссылки между страницами одного сайта."),
 ]
 
+def _biz_role(site_info, niche=""):
+    """Роль компании по сайту: производитель / магазин / услуга. Чтобы не превращать исполнителя в посредника."""
+    s = site_info or {}
+    txt = " ".join(filter(None, [s.get("title"), s.get("description"), s.get("text_excerpt"), niche])).lower()
+    types = {str(x).lower() for x in (s.get("schema") or [])}
+    if re.search(r"(собственн\w*\s+производств|наш\w*\s+(?:производств|фабрик|цех)|мы\s+(?:производим|шь[её]м|выпускаем|изготавлива)|"
+                 r"\bфабрик|\bзавод|\bцех\b|пошив|швейн|производственн|manufactur|own\s+factory)", txt):
+        return "manufacturer"
+    if (types & {"product","offer","aggregateoffer","store","onlinestore","productgroup"}) or s.get("product_pages") \
+       or re.search(r"(интернет-?магазин|добавить в корзин|каталог товаров|купить.{0,20}доставк|маркетплейс)", txt):
+        return "shop"
+    return "service"
+
+def _role_directive(site_info, niche=""):
+    """Жёсткая инструкция: компания — сам исполнитель, а НЕ посредник/агрегатор/сервис подбора."""
+    role = _biz_role(site_info, niche)
+    base = ("РОЛЬ КОМПАНИИ. Компания — это САМ исполнитель (производитель, продавец или подрядчик), а НЕ посредник, "
+            "НЕ агрегатор, НЕ сервис подбора и НЕ каталог. Все примеры пиши ОТ ЛИЦА компании как прямого исполнителя. "
+            "Категорически запрещены обороты «поможем найти», «подберём для вас», «найдём лучших», «сравним поставщиков», "
+            "«проверенные производители/фабрики/подрядчики», «организовали встречу с производителем» — они делают из компании посредника.")
+    if role == "manufacturer":
+        base += (" Это ПРОИЗВОДИТЕЛЬ: сам выпускает товар. Подчёркивай собственное производство, ассортимент, опт и условия "
+                 "(минимальная партия, сроки изготовления/пошива, материалы). Заголовок — как у производителя, например "
+                 "«Производство [товара] оптом от фабрики», а НЕ «Поможем найти производителей».")
+    elif role == "shop":
+        base += " Это МАГАЗИН: сам продаёт товар. Пиши от лица продавца (наличие, цена, доставка, ассортимент), а не сервиса сравнения магазинов."
+    else:
+        base += " Это прямой исполнитель услуг. Пиши от первого лица как тот, кто сам делает работу, а не подбирает подрядчиков."
+    return base
+
 def _reco_examples(niche, brand_short, queries=None, site_info=None):
     """Готовые конкретные примеры под нишу/услуги/запросы компании (страница, кейс, отзыв). {} = откат на общие.
     Жёсткие правила: не выдумывать факты (сроки, цены, объёмы, география и т.п.) — неизвестное помечать [указать]."""
@@ -1275,6 +1446,7 @@ def _reco_examples(niche, brand_short, queries=None, site_info=None):
         f"Компания: «{brand_short}». Ниша: «{niche}». Чем занимается: {desc or niche}.\n"
         f"Запросы клиентов из отчёта: {qs}\n"
         f"Подтверждённые факты с сайта (только это можно подавать как факт): {verified}\n\n"
+        + _role_directive(site_info, niche) + "\n\n"
         "Сделай 3 КОНКРЕТНЫХ примера готового результата ИМЕННО для этой компании и ниши. Каждый — не пересказ совета, "
         "а готовый фрагмент, который можно вставить на сайт. Строгие правила:\n"
         "- Только эта ниша и эти услуги. Категорически нельзя примеры из других отраслей.\n"
@@ -1283,6 +1455,20 @@ def _reco_examples(niche, brand_short, queries=None, site_info=None):
         "- Запрещены общие фразы: индивидуальный подход, высокое качество, команда профессионалов, полный спектр услуг, "
         "решения любой сложности, многолетний опыт, надёжный партнёр. Вместо них — состав работ, типы объектов, проверяемые факты.\n"
         "- Каждый пример опирается на один из запросов выше. 250–520 знаков на пример. Без markdown.\n\n"
+        + (
+        # товарный бизнес (магазин/производитель): карточка товара/категории, НЕ «проект/кейс»
+        "Ответь СТРОГО в таком формате:\n"
+        "SERVICES:\n"
+        "H1: <заголовок страницы товара или категории>\n"
+        "Абзац: <первый абзац от лица продавца/производителя: что за товар или категория, для кого, чем выделяется>\n"
+        "Состав: <3–4 пункта через «; »: материал/состав, назначение, варианты, условия>\n"
+        "PROJECT:\n"
+        "Карточка товара: Товар: <тип товара> | Бренд/линейка: <название или [указать]> | Материал/состав: <…> | Для кого: <…> | "
+        "Наличие: [указать] | Цена: [указать] | Доставка: <условия или [указать]>\n"
+        "REVIEW:\n"
+        "<готовый отзыв покупателя: что купил, как подошёл размер и качество, доставка; неизвестное — в [скобках]>"
+        if _biz_role(site_info, niche) in ("shop", "manufacturer") else
+        # услуговый бизнес: услуга / проект-кейс / отзыв
         "Ответь СТРОГО в таком формате:\n"
         "SERVICES:\n"
         "H1: <заголовок страницы услуги>\n"
@@ -1291,7 +1477,7 @@ def _reco_examples(niche, brand_short, queries=None, site_info=None):
         "PROJECT:\n"
         "Объект: <тип объекта> | Задача: <задача> | Что сделали: <состав работ> | Масштаб: [указать] | Срок: [указать] | Результат: [указать]\n"
         "REVIEW:\n"
-        "<готовый отзыв клиента: услуга, тип объекта, что сделали; неизвестное — в [скобках]>")
+        "<готовый отзыв клиента: услуга, тип объекта, что сделали; неизвестное — в [скобках]>"))
     try:
         raw = ask(prompt)
     except Exception:
@@ -1332,13 +1518,14 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
     blocks_ai = ok and s.get("robots_blocks_ai")
     types = {str(x).lower() for x in (s.get("schema") or [])}
     has_products = bool(types & {"product", "offer", "aggregateoffer", "store", "onlinestore", "productgroup"})  # есть ли товары/магазин
+    product_biz = has_products or _biz_role(site_info, niche) in ("shop", "manufacturer")   # товарный бизнес: товары, а не «проекты/кейсы»
     recs = []
 
-    # 1. Контент: понятные страницы товаров (магазин) или услуг
-    if has_products:
+    # 1. Контент: понятные страницы товаров (магазин/производитель) или услуг
+    if product_biz:
         c1_title = "Сделать карточки товаров и категории понятнее для нейросетей и клиентов"
-        svc_plain = (f"На сайте есть каталог товаров и категории — создавать с нуля ничего не нужно. "
-                     f"Их заголовки и описания должны сразу объяснять, что за товар, для кого он и чем хорош, тогда нейросеть назовёт именно ваш магазин. "
+        svc_plain = (f"Главные коммерческие страницы у вас — это товары и категории. Создавать с нуля ничего не нужно. "
+                     f"Их заголовки и описания должны сразу объяснять, что за товар, для кого он и чем хорош, тогда нейросеть назовёт именно вас. "
                      f"По коммерческим вопросам {b} {aneg} в {miss} из {total} ответов.")
         c1_steps = ["Выбрать 5–7 ключевых категорий или товаров под вопросы из этого отчёта",
                     "В заголовок добавить тип товара и для кого он",
@@ -1372,8 +1559,8 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
         "handoff": "Маркетологу или редактору — подготовить тексты. SEO-специалисту — сверить заголовки с целевыми вопросами. Администратору сайта — разместить.",
         "priority": "Высокий", "term": "1–2 недели"})
 
-    # 2. Контент: карточки товаров (магазин) или проекты/кейсы (услуги)
-    if has_products:
+    # 2. Контент: карточки товаров (магазин/производитель) или проекты/кейсы (услуги)
+    if product_biz:
         proj_title = "Усилить карточки товаров и собрать отзывы под запросы клиентов"
         proj_plain = ("Нейросеть охотнее называет магазин, у которого карточки товаров наполнены фактами, а не только фото: "
                       "бренд, состав, назначение, отзывы и наличие. По ним она понимает, что у вас можно купить.")
@@ -1398,10 +1585,15 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
         "title": proj_title,
         "plain": proj_plain,
         "steps": proj_steps,
-        "example": (f"Готовая структура для вашей ниши:\n{rex['project']}\nНеизвестные данные подставьте вместо полей [указать]."
+        "example": ((f"Готовая карточка товара для вашей ниши:\n{rex['project']}\nНеизвестные данные подставьте вместо полей [указать]."
+                     if product_biz else
+                     f"Готовая структура для вашей ниши:\n{rex['project']}\nНеизвестные данные подставьте вместо полей [указать].")
                     if rex.get('project') else
-                    "Структура: «Задача клиента. Что сделали: ключевые этапы. Срок. Результат: что клиент получил». "
-                    "Заголовок лучше делать говорящим — с типом клиента и сутью, а не «Объект №3»."),
+                    ("Карточка товара: «Название и тип товара. Бренд или линейка. Материал или состав. Для кого. Наличие, цена, доставка». "
+                     "Чем конкретнее факты, тем охотнее нейросеть назовёт ваш товар."
+                     if product_biz else
+                     "Структура: «Задача клиента. Что сделали: ключевые этапы. Срок. Результат: что клиент получил». "
+                     "Заголовок лучше делать говорящим — с типом клиента и сутью, а не «Объект №3».")),
         "handoff": ("Контент-менеджеру — наполнить карточки. Маркетологу — собрать отзывы. Администратору сайта — разместить и связать ссылками."
                     if has_products else
                     "Менеджеру проекта — собрать факты. Маркетологу или редактору — оформить текст. Администратору сайта — разместить материал и ссылки."),

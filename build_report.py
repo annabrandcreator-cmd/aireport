@@ -271,6 +271,10 @@ table.mt td{{font-size:9.5pt;font-weight:700;color:{INK};padding:5px 6px}}
 .qd-q{{font-size:10pt;font-weight:700;color:{INK};margin-bottom:1.4mm;line-height:1.3}}
 .qd-q .grp{{font-weight:500;color:{FAINT};font-size:8.5pt}}
 .qd-e{{font-size:9pt;color:{INK};line-height:1.4;margin-bottom:.4mm;padding-left:4mm}} .qd-e b{{color:{MUTED}}}
+.qd--hit{{background:rgba(46,139,87,.07);border:1px solid rgba(46,139,87,.32);border-left:3px solid {GREEN};border-radius:7px;padding:2.4mm 3mm;margin-bottom:2.6mm}}
+.qd--hit:last-child{{margin-bottom:0;padding-bottom:2.4mm}}
+.qd-badge{{display:inline-block;font-size:7.5pt;font-weight:700;color:{GREEN};background:rgba(46,139,87,.14);border-radius:20px;padding:1px 8px;margin-left:6px;vertical-align:middle}}
+.qd-e--hit{{color:{GREEN}}} .qd-e--hit b{{color:{GREEN}}}
 '''
 
 def footer(d): return f'<div class="foot"><span>Отчёт о видимости в нейросетях · {esc(d["brand"])}</span><span>Анна Курбатова°</span></div>'
@@ -298,7 +302,7 @@ def p_summary(d):
     if d.get('zero'):
         stat3_n="0%"; stat3_l="разницы между нейросетями нет: упоминаний не найдено нигде"
     else:
-        eng=[e for e in d['engines'] if e.get('rate') is not None]; maxr=max(e['rate'] for e in eng); minr=min(e['rate'] for e in eng)
+        eng=[e for e in d['engines'] if e.get('rate') is not None]; maxr=max((e['rate'] for e in eng), default=0); minr=min((e['rate'] for e in eng), default=0)
         best_names=[e['name'] for e in eng if e['rate']==maxr]; worst_names=[e['name'] for e in eng if e['rate']==minr]
         stat3_n=esc(_join(best_names))
         stat3_l=(f"результат одинаковый во всех каналах ({maxr}%)" if maxr==minr
@@ -337,7 +341,7 @@ def p_engines(d):
         h2,weak_p="Что это означает",("Сейчас бренд не попадает в рекомендации нейросетей по выбранным вопросам. Для начала стоит проверить, "
                                        "насколько точно сайт описывает ключевые услуги и достаточно ли информации о вас на других площадках.")
     else:
-        mlist="; ".join(f"{esc(e['name'])} — {e['mentions']} из {e['answers']}" for e in d['engines'] if e['rate']>0)
+        mlist="; ".join(f"{esc(e['name'])} — {e['mentions']} из {e['answers']}" for e in d['engines'] if (e['rate'] or 0)>0)
         h1,strong_p="Где вас уже называют",f"Упоминания обнаружены в: {mlist}."
         if ze:
             h2,weak_p="Где пока не называют",f"В {_join(ze)} бренд не появился ни в одном из {ans} ответов."
@@ -388,7 +392,8 @@ def _qd_row(q, e):
     elif comps:t="назвал конкурентов: "+", ".join(comps)+(", "+", ".join(others) if others else "")+"; вашего бренда нет"
     elif others:t="назвал других игроков: "+", ".join(others)+"; вашего бренда нет"
     else:      t="общий ответ без названий компаний"
-    return f'<div class="qd-e"><b>{esc(e["short"])}:</b> {esc(t)}</div>'
+    cls=" qd-e--hit" if h>=1 else ""                          # строка движка зелёным, если бренд появился
+    return f'<div class="qd-e{cls}"><b>{esc(e["short"])}:</b> {esc(t)}</div>'
 
 def p_query_detail(d):
     """Блок 04: каждый запрос отдельно — кто назвал бренд и кого из конкурентов, по каждой нейросети."""
@@ -396,7 +401,10 @@ def p_query_detail(d):
     cards=[]
     for i,q in enumerate(d['queries'],1):
         rows="".join(_qd_row(q,e) for e in eng)
-        cards.append(f'<div class="qd"><div class="qd-q">{i}. {esc(q["q"])}<span class="grp"> · {esc(q["group"])}</span></div>{rows}</div>')
+        hit=any((q.get('hits') or {}).get(e['id'],0)>0 for e in eng if not e.get('failed'))   # бренд появился хотя бы в одной сети
+        cls="qd qd--hit" if hit else "qd"
+        badge='<span class="qd-badge">✓ бренд появился</span>' if hit else ''
+        cards.append(f'<div class="{cls}"><div class="qd-q">{i}. {esc(q["q"])}<span class="grp"> · {esc(q["group"])}</span>{badge}</div>{rows}</div>')
     legend=" · ".join(f'{esc(e["short"])} — {esc(e["name"])}' for e in eng)
     pages=[]; per=6
     for idx in range(0, len(cards), per):

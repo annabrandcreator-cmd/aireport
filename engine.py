@@ -158,6 +158,10 @@ def generate_queries_llm(niche, city, site_info=None):
         "ВАЖНО держи ценовой сегмент и модель продаж из данных сайта. Если компания премиальная, проектная, B2B или оптовая — "
         "НЕ добавляй запросы про «недорого», «дёшево», «эконом» и НЕ формулируй как розничную покупку в магазине. "
         "Если компания работает по проектам или оптом — спрашивай про проект, под ключ, комплексно, опт, для бизнеса, а не «купить штучно».\n"
+        "КАЖДЫЙ запрос должен быть про ОСНОВНОЙ продукт или услугу компании по данным сайта. НЕ уходи в смежные категории, "
+        "которых на сайте нет: для производителя мебели не пиши про дизайн интерьера, оформление, ремонт, оборудование, дизайн квартир. "
+        "НЕ выдумывай услуги и условия, которых нет на сайте (рассрочка, проектирование интерьеров, доставка по миру и т.п.). "
+        "Не делай запрос про конкретную компанию (без «эта компания делает…») и не оставляй запрос без предмета (всегда указывай, ЧТО ищут).\n"
         "НЕ добавляй чисто информационные запросы (что такое, как сделать самому, определения). "
         "Не разбрасывай запросы по разным городам. Если регион не задан явно, или компания работает по всей стране, удалённо или оптом — "
         "НЕ привязывай запросы к конкретным городам (можно «в России» или вообще без географии). Не упоминай конкретные бренды и названия компаний.\n"
@@ -633,7 +637,7 @@ def _queries_cache_path(site):
     d = os.environ.get("QUERIES_DIR") or os.environ.get("REPORTS_DIR") or "/tmp"
     return os.path.join(d, "qset_" + re.sub(r"[^a-z0-9.]", "_", host) + ".json")
 
-_QSET_VER = "3"   # бамп при изменении промпта запросов -> старый кэш игнорируется и набор пересобирается
+_QSET_VER = "4"   # бамп при изменении промпта запросов -> старый кэш игнорируется и набор пересобирается
 
 def _load_query_set(site):
     try:
@@ -663,14 +667,16 @@ def _ask_one(prompt, eid, run, brand, test):
     except Exception:
         return ""   # сеть недоступна -> считаем как не упомянут
 
-def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=None, aliases=None):
+def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=None, aliases=None, queries=None):
     test = os.environ.get("TEST_MODE") == "1"
     aliases = aliases or brand_aliases(site, site_info, brand, brand_short)
-    queries = None if test else _load_query_set(site)        # переиспользуем сохранённый набор -> воспроизводимость
-    if not queries:
-        queries = generate_queries(niche, city, site_info, aliases)
-        if not test:
-            _save_query_set(site, queries)
+    if queries is None:                                      # набор не передали -> кэш или генерация
+        queries = None if test else _load_query_set(site)
+        if not queries:
+            queries = generate_queries(niche, city, site_info, aliases)
+            if not test:
+                _save_query_set(site, queries)
+    queries = [{"q": x["q"], "group": x["group"]} for x in queries]   # чистая копия, без старых hits
     engines = active_engines()
     for q in queries:
         q["hits"] = {e["id"]: 0 for e in engines}
@@ -949,14 +955,30 @@ def _recommendations(queries, groups, total, site_info=None):
              "why":why_tech, "steps":t_steps, "effect":"Средний","difficulty":"Низкая","term":"3-5 дней"})
     return recs[:5]
 
-def run(brand, site, niche, city, brand_short=None, out=None):
-    site_info = None if os.environ.get("TEST_MODE") == "1" else analyze_site(site)
-    niche = refine_niche(niche, site_info)              # уточняем нишу до реальной бизнес-модели по сайту
-    fallback = (brand_short or re.sub(r"[«»\"']", "", brand or "").split("(")[0].strip().split(",")[0]).strip()
-    canonical, aliases = brand_card(site, site_info, fallback)      # каноническое имя бренда + все алиасы
-    brand = canonical; brand_short = canonical
-    queries, competitors = analyze(brand, brand_short, site, niche, city, site_info=site_info, aliases=aliases)
-    data = build_data(brand, brand_short, site, niche, city, queries, competitors, site_info=site_info)
+def prepare(site, niche, city, fallback_brand=""):
+    """Готовит контекст замера: разбор сайта, уточнённая ниша, бренд+алиасы, набор запросов. Без 40 вызовов.
+    Возвращает dict, который можно показать клиенту (запросы), при необходимости отредактировать и передать в run(prep=...)."""
+    test = os.environ.get("TEST_MODE") == "1"
+    site_info = None if test else analyze_site(site)
+    niche2 = refine_niche(niche, site_info)
+    fb = (fallback_brand or re.sub(r"[«»\"']", "", site or "").split("(")[0].strip()).strip() or _host(site)
+    canonical, aliases = brand_card(site, site_info, fb)
+    queries = (None if test else _load_query_set(site)) or generate_queries(niche2, city, site_info, aliases)
+    if not test:
+        _save_query_set(site, queries)
+    return {"site": site, "city": city, "niche": niche2, "brand": canonical, "brand_short": canonical,
+            "aliases": sorted(aliases), "site_info": site_info,
+            "queries": [{"q": x["q"], "group": x["group"]} for x in queries]}
+
+def run(brand=None, site=None, niche=None, city=None, brand_short=None, out=None, prep=None):
+    if prep is None:                                     # обычный путь: всё готовим сами
+        prep = prepare(site, niche, city, fallback_brand=brand_short or brand or "")
+    site_info = prep.get("site_info")
+    aliases = set(prep.get("aliases") or [])
+    q, competitors = analyze(prep["brand"], prep["brand_short"], prep["site"], prep["niche"], prep.get("city"),
+                             site_info=site_info, aliases=aliases, queries=prep.get("queries"))
+    data = build_data(prep["brand"], prep["brand_short"], prep["site"], prep["niche"], prep.get("city"),
+                      q, competitors, site_info=site_info)
     if out:
         with open(out, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=1)
     return data

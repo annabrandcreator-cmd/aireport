@@ -197,9 +197,9 @@ table.mx th.q{{text-align:left}}
 .tag-no{{background:rgba(193,53,37,.12);color:{RED}}} .tag-yes{{background:rgba(46,139,87,.13);color:{GREEN}}} .tag-mid{{background:rgba(201,121,26,.14);color:{AMBER}}}
 /* рекомендации */
 .rcard{{border:1px solid {BORDER};border-radius:13px;padding:5.5mm;margin-bottom:4.5mm;background:{CARD};box-shadow:0 1px 3px rgba(20,16,12,.05)}}
-.rcard-h{{display:flex;align-items:center;gap:4mm;margin-bottom:3mm}}
+.rcard-h{{display:flex;align-items:flex-start;gap:4mm;margin-bottom:3mm}}
 .rcard-n{{flex:none;width:28px;height:28px;border-radius:50%;background:{ACCENT};color:#fff;font-weight:700;font-size:11pt;text-align:center;line-height:28px}}
-.rcard-h h3{{font-size:12pt;font-weight:700}}
+.rcard-h h3{{flex:1;min-width:0;font-size:12pt;font-weight:700;line-height:1.2;padding-top:2px}}
 .rlabel{{font-size:8pt;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:{FAINT};margin:3mm 0 1.5mm}}
 .rcard p{{font-size:9.5pt;color:{INK};line-height:1.5}}
 .rsteps{{margin:1mm 0 0 5mm}} .rsteps li{{font-size:9.5pt;color:{INK};line-height:1.55;margin-bottom:1mm}}
@@ -214,8 +214,8 @@ table.mt td{{font-size:9.5pt;font-weight:700;color:{INK};padding:5px 6px}}
 .week{{margin-bottom:4mm}} .week .wh{{font-size:10pt;font-weight:700;color:{ACCENTD};margin-bottom:1.5mm}}
 .week ul{{margin-left:5mm}} .week li{{font-size:9.5pt;color:{INK};line-height:1.5}}
 /* footer / cta */
-.foot{{position:absolute;left:15mm;right:15mm;bottom:11mm;display:flex;justify-content:space-between;
-  font-size:8pt;color:{FAINT};border-top:1px solid {BORDER};padding-top:4mm}}
+.foot{{position:absolute;left:15mm;right:15mm;bottom:6mm;display:flex;justify-content:space-between;
+  font-size:8pt;color:{FAINT};border-top:1px solid {BORDER};padding-top:3mm;background:{PAGE}}}
 .cta{{background:{DARK};color:#fff;border-radius:15px;padding:7mm;margin-top:5mm}}
 .cta h3{{font-size:14pt;font-weight:700;margin-bottom:2.5mm}}
 .cta p{{font-size:9.5pt;color:rgba(255,255,255,.72);line-height:1.55;margin-bottom:4mm}}
@@ -241,7 +241,7 @@ table.mt td{{font-size:9.5pt;font-weight:700;color:{INK};padding:5px 6px}}
 .ktag-content{{background:rgba(46,139,87,.13);color:{GREEN}}}
 .ktag-tech{{background:rgba(45,90,160,.12);color:#2D5AA0}}
 .ktag-promo{{background:rgba(201,121,26,.15);color:{AMBER}}}
-.rcard-h .ktag{{margin-left:auto}}
+.rcard-h .ktag{{flex:none;white-space:nowrap;margin-top:3px}}
 .rex{{background:{CREAM};border-radius:10px;padding:4mm;margin-top:1mm;font-size:9.5pt;color:{INK};line-height:1.55}} .rex b{{color:{ACCENTD}}}
 .rhand{{font-size:9pt;color:{MUTED};line-height:1.5;margin-top:3mm}} .rhand b{{color:{INK};font-weight:600}}
 .rmeta{{display:flex;gap:8mm;margin-top:3mm;padding-top:3mm;border-top:1px solid {BORDER}}}
@@ -417,12 +417,11 @@ def _gap_phrase(gap):
     return "наравне с вами"
 
 def _comp_link(c):
-    """Имя конкурента-ссылка: проверенный сайт, иначе поиск по названию (без риска ошибочного домена)."""
+    """Имя конкурента — прямая ссылка на его сайт. Если сайт определить не удалось — просто имя, без поисковой строки."""
     name=esc(c['name'])
     if c.get('site'):
         return f'<a href="{esc(c["site"])}" style="color:{ACCENTD};text-decoration:none;font-weight:700">{name} ↗</a>'
-    return (f'<a href="https://yandex.ru/search/?text={quote(c["name"])}" style="color:{ACCENTD};text-decoration:none;font-weight:700">'
-            f'{name}<span style="font-weight:500;font-size:8.5pt;color:{FAINT}"> · найти в поиске ↗</span></a>')
+    return f'<span style="font-weight:700;color:{INK}">{name}</span>'
 
 def p_competitors(d):
     N=d['total_answers']; bc=d.get('total_mentions',0); ov=d['overall']
@@ -446,7 +445,7 @@ def p_competitors(d):
                   "Чаще всего дело в количестве согласованных упоминаний во внешних источниках (карты, отзывы, каталоги, публикации) и в понятных страницах под запросы. "
                   "С чего начать, чтобы появляться рядом с ними, — в рекомендациях дальше в отчёте.")
     return f'''<div class="page"><h2><span class="num">06</span>Какие компании ещё встречаются в ответах</h2>
-      <div class="sec-intro">Компании, которые нейросети называли в ответах на ваши запросы. Рядом с каждой — ссылка, чтобы открыть и посмотреть компанию. Процент считается так же, как ваш: доля из {N} ответов, где встретилось название.</div>
+      <div class="sec-intro">Компании, которые нейросети называли в ответах на ваши запросы. Где удалось определить сайт, имя кликабельно и ведёт прямо на него. Процент считается так же, как ваш: доля из {N} ответов, где встретилось название.</div>
       <div class="card">{bars}</div>
       <div style="margin-top:4mm">{ev}</div>
       <div class="box cream"><h4>Что это значит</h4><p>{takeaway}</p></div>
@@ -556,7 +555,8 @@ def _rec_card(r, i):
         steps="".join(f'<li>{esc(s)}</li>' for s in r["steps"])
         p.append(f'<div class="rlabel">Что сделать</div><ul class="rsteps">{steps}</ul>')
     if r.get("example"):
-        p.append(f'<div class="rlabel">Пример</div><div class="rex">{esc(r["example"])}</div>')
+        ex_html=esc(r["example"]).replace("\n","<br>")
+        p.append(f'<div class="rlabel">Пример</div><div class="rex">{ex_html}</div>')
     if r.get("handoff_note"):
         p.append(f'<div class="plashka"><b>Передайте специалисту.</b> {esc(r["handoff_note"])}</div>')
     if r.get("todo"):                                    # что настроить (только то, чего не хватает)

@@ -15,7 +15,7 @@
   DEEPSEEK_API_KEY, GIGACHAT_API_KEY, YANDEX_API_KEY, YANDEX_FOLDER_ID  (по мере появления)
   TEST_MODE=1  -> движок в мок-режиме (без ключей, для проверки)
 """
-import os, json, time, hashlib, sqlite3, threading, smtplib, ssl, urllib.request, uuid, re
+import os, json, time, hashlib, sqlite3, threading, smtplib, ssl, urllib.request, uuid, re, traceback
 from email.message import EmailMessage
 from flask import Flask, request, redirect, jsonify, send_file, abort
 
@@ -53,7 +53,7 @@ def init_db():
         if "prep" not in cols:
             c.execute("ALTER TABLE orders ADD COLUMN prep TEXT")   # JSON: запросы + контекст для подтверждения
         for col, ddl in [("rating","INTEGER"),("feedback","TEXT"),("awaiting","TEXT"),
-                         ("kind","TEXT"),("parent","TEXT"),("qn","INTEGER"),("amount","INTEGER")]:
+                         ("kind","TEXT"),("parent","TEXT"),("qn","INTEGER"),("amount","INTEGER"),("err","TEXT")]:
             if col not in cols:
                 c.execute(f"ALTER TABLE orders ADD COLUMN {col} {ddl}")
 init_db()
@@ -153,6 +153,13 @@ def tg_send_payment_button(chat_id, pay_url, brand):
 def tg_send_buttons(chat_id, text, keyboard):
     if tg_token(): _tg("sendMessage", {"chat_id": chat_id, "text": text, "reply_markup": {"inline_keyboard": keyboard}})
 
+def tg_send_force_reply(chat_id, text, placeholder=""):
+    """Сообщение с режимом ответа и понятной подсказкой в поле ввода (перебивает чужой плейсхолдер)."""
+    if tg_token():
+        rm = {"force_reply": True}
+        if placeholder: rm["input_field_placeholder"] = placeholder[:64]
+        _tg("sendMessage", {"chat_id": chat_id, "text": text, "reply_markup": rm})
+
 def tg_answer_callback(cb_id, text=""):
     if tg_token():
         try: _tg("answerCallbackQuery", {"callback_query_id": cb_id, "text": text})
@@ -222,7 +229,7 @@ def _review_text(prep, edited=False):
             f"Сфера деятельности: {prep['niche']}\n\n"
             "Запросы — это формулировки, которые потенциальные клиенты вводят в ИИ-поиске. От них зависит весь отчёт.\n\n"
             "Как составить хороший запрос:\n"
-            "• Это вопрос, на который ассистент выдаёт СПИСОК компаний или сайтов: «Какие компании…», «На каком сайте купить…», «Кто делает…», «Найди компании, которые…».\n"
+            "• Это вопрос, на который нейросеть выдаёт СПИСОК компаний или сайтов: «Какие компании…», «На каком сайте купить…», «Кто делает…», «Найди компании, которые…».\n"
             "• Избегайте общих SEO-фраз вроде «производство … Москва» и вопросов «как выбрать / на что смотреть» — по ним нейросеть отвечает без названий, и замер будет пустым.\n"
             "• Отразите свои основные услуги или товары, целевых клиентов, географию и ценовой сегмент.\n\n"
             f"Запросы для проверки:\n\n{qlist}\n\n"
@@ -242,6 +249,7 @@ def _menu_kb():
     order_url = os.environ.get("ORDER_URL") or SITE
     support_url = os.environ.get("SUPPORT_URL") or "https://t.me/annakurbatovaai"
     return [[{"text": "📊 Заказать проверку видимости", "url": order_url}],
+            [{"text": "🔁 Проверить другие запросы", "callback_data": "addon_menu"}],
             [{"text": "💬 Связаться с поддержкой", "url": support_url}]]
 
 def _send_menu(chat):
@@ -325,9 +333,19 @@ def generate(order_id):
             _send_feedback_request(o["tg_chat_id"], order_id)   # оценка 1-5 + оффер дозакупки после отзыва
         print(f"[generate] готово order={order_id} pdf_ok={os.path.exists(pdf)} отправлен_в_tg={sent}", flush=True)
     except Exception as e:
-        print("[generate] ошибка:", e, flush=True)
+        tb = traceback.format_exc()
+        print("[generate] ошибка:", tb, flush=True)
         with db() as c:
-            c.execute("UPDATE orders SET status='error' WHERE id=?", (order_id,))
+            c.execute("UPDATE orders SET status='error', err=? WHERE id=?", (tb[-1500:], order_id))
+            o = c.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
+        # Анне в личный чат — точная причина, чтобы чинить без логов Railway
+        admin_notify(f"⚠️ Отчёт не собрался\nЗаказ: {order_id}\nСайт: {o['site'] if o else ''}\nОшибка: {e}\n\n{tb[-1200:]}")
+        # клиенту — спокойное сообщение и кнопка повтора (запросы сохранены)
+        if o and o["tg_chat_id"]:
+            tg_send_buttons(o["tg_chat_id"],
+                "Не удалось собрать отчёт с первой попытки — иногда нейросеть отвечает с задержкой. "
+                "Запросы сохранены, ничего вводить заново не нужно. Нажмите кнопку, чтобы я повторил проверку.",
+                [[{"text": "🔁 Попробовать ещё раз", "callback_data": f"retry:{order_id}"}]])
 
 # ───────────────────────── маршруты ──────────────────────────────────
 ORDER_FORM = """<!doctype html><html lang=ru><head><meta charset=utf-8>
@@ -600,19 +618,28 @@ def _handle_callback(cq):
     chat = ((cq.get("message") or {}).get("chat") or {}).get("id")
     tg_answer_callback(cq.get("id"))
     if not chat: return "OK"
-    if data.startswith("go:"):              # кнопка «Запустить проверку»
+    if data.startswith("go:") or data.startswith("retry:"):   # «Запустить проверку» / «Попробовать ещё раз»
         oid = data.split(":", 1)[1]
         with db() as c:
-            o = c.execute("SELECT status, prep FROM orders WHERE id=?", (oid,)).fetchone()
-        if o and o["status"] == "reviewing" and o["prep"]:
-            start_generation(oid)
+            o = c.execute("SELECT status, prep, pdf FROM orders WHERE id=?", (oid,)).fetchone()
+        if o and o["status"] in ("reviewing", "error") and o["prep"]:
+            start_generation(oid)                 # error -> перезапуск по сохранённым запросам
         elif o and o["status"] == "processing":
             tg_send_message(chat, "Уже запускаю проверку, отчёт будет здесь через несколько минут.")
+        elif o and o["status"] == "done":
+            if o["pdf"] and os.path.exists(o["pdf"]):
+                with db() as c:
+                    full = c.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
+                try: tg_send_report(chat, o["pdf"], full)
+                except Exception as e: print("[tg] ошибка:", e)
+            else:
+                tg_send_message(chat, "Этот отчёт уже готов.")
         else:
             tg_send_message(chat, "Этот запрос уже обработан или устарел.")
         return "OK"
     if data.startswith("edit:"):            # кнопка «Изменить запросы»
-        tg_send_message(chat, "Пришлите свои запросы списком — каждый с новой строки. Я исправлю опечатки, заменю набор и снова покажу на подтверждение.")
+        tg_send_force_reply(chat, "Пришлите свои запросы списком — каждый с новой строки. Я исправлю опечатки, заменю набор и снова покажу на подтверждение.",
+                            "Запрос 1, запрос 2… каждый с новой строки")
         return "OK"
     if data.startswith("rate:"):
         try: _, n, oid = data.split(":", 2)
@@ -621,7 +648,8 @@ def _handle_callback(cq):
             c.execute("UPDATE orders SET rating=?, awaiting='fb_text' WHERE id=?", (int(n), oid))
             o = c.execute("SELECT brand, site FROM orders WHERE id=?", (oid,)).fetchone()
         admin_notify(f"Оценка отчёта: {n}/5\nЗаказ: {oid}\nБренд: {(o['brand'] if o else '') or ''}\nСайт: {(o['site'] if o else '') or ''}")
-        tg_send_message(chat, "Спасибо! Чего вам не хватило в отчёте или что оказалось особенно полезным? Ответьте одним сообщением.")
+        tg_send_message(chat, "Спасибо за оценку! Если хотите, в одном сообщении напишите, чего не хватило или что было особенно полезно.")
+        _send_addon_offer(chat, oid)              # оффер дозакупки сразу после оценки, не дожидаясь текста
         return "OK"
     if data.startswith("buy:"):
         try: _, n, parent = data.split(":", 2)
@@ -629,7 +657,16 @@ def _handle_callback(cq):
         _create_addon(parent, int(n), chat)
         return "OK"
     if data == "addon_no":
-        tg_send_message(chat, "Хорошо! Если захотите проверить другие запросы — нажмите кнопку оплаты выше в любой момент или напишите нам.")
+        tg_send_message(chat, "Хорошо! Захотите проверить другие запросы — нажмите «Проверить другие запросы» в меню (/start) в любой момент.")
+        return "OK"
+    if data == "addon_menu":                # дозакупка из меню — по последнему готовому основному отчёту
+        with db() as c:
+            o = c.execute("SELECT id FROM orders WHERE tg_chat_id=? AND status='done' AND (kind IS NULL OR kind='main') "
+                          "ORDER BY created DESC LIMIT 1", (str(chat),)).fetchone()
+        if o:
+            _send_addon_offer(chat, o["id"])
+        else:
+            tg_send_message(chat, "Докупить запросы можно после готового отчёта. Сначала закажите проверку — кнопка «Заказать проверку видимости».")
         return "OK"
     return "OK"
 
@@ -670,6 +707,12 @@ def tg_webhook():
                     tg_send_message(chat, f"Жду ваши {n} {_plural_q(n)} для проверки — каждый с новой строки.")
                 elif st == "processing":
                     tg_send_message(chat, "Отчёт уже формируется, пришлю его сюда через пару минут.")
+                elif st == "error":     # прошлая проверка упала -> предлагаем повтор по сохранённым запросам
+                    if o["prep"]:
+                        tg_send_buttons(chat, "Прошлая проверка не завершилась. Запросы сохранены — нажмите, чтобы повторить, ничего вводить заново не нужно.",
+                                        [[{"text": "🔁 Попробовать ещё раз", "callback_data": f"retry:{oid}"}]])
+                    else:
+                        tg_send_message(chat, "Прошлая проверка не завершилась. Напишите в поддержку — поможем: t.me/annakurbatovaai")
                 elif st == "new":       # создаём платёж и шлём кнопку оплаты прямо в чат
                     try:
                         res = tbank_init(oid, o["email"])
@@ -720,7 +763,7 @@ def tg_webhook():
                     c.execute("UPDATE orders SET feedback=?, awaiting=NULL WHERE id=?", (text, a["id"]))
                 admin_notify(f"Отзыв об отчёте\nЗаказ: {a['id']}\nБренд: {a['brand'] or ''}\n"
                              f"Оценка: {a['rating'] if a['rating'] is not None else '—'}/5\n\n{text}")
-                _send_addon_offer(chat, a["id"])
+                tg_send_message(chat, "Спасибо за обратную связь! Учту в работе.")   # оффер уже показан после оценки
                 return "OK"
             if a["awaiting"] == "addon_queries":
                 qs = _parse_query_list(text)
@@ -759,10 +802,11 @@ def health():
     try:
         with db() as c:
             rows = c.execute("SELECT status, COUNT(*) FROM orders GROUP BY status").fetchall()
-            last = c.execute("SELECT id, status, site, tg_chat_id FROM orders ORDER BY created DESC LIMIT 1").fetchone()
+            last = c.execute("SELECT id, status, site, tg_chat_id, err FROM orders ORDER BY created DESC LIMIT 1").fetchone()
         orders = {r[0]: r[1] for r in rows}
         last_order = {"id": last["id"], "status": last["status"], "site": last["site"],
-                      "chat_linked": bool(last["tg_chat_id"])} if last else None
+                      "chat_linked": bool(last["tg_chat_id"]),
+                      "err": (last["err"] or "")[-1200:]} if last else None
     except Exception as e:
         orders, last_order = {"err": str(e)}, None
     return jsonify(ok=True, terminal=TERMINAL, price=PRICE, base_url=BASE_URL,

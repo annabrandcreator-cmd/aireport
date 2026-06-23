@@ -52,7 +52,13 @@ def init_db():
             c.execute("ALTER TABLE orders ADD COLUMN tg_chat_id TEXT")
         if "prep" not in cols:
             c.execute("ALTER TABLE orders ADD COLUMN prep TEXT")   # JSON: запросы + контекст для подтверждения
+        for col, ddl in [("rating","INTEGER"),("feedback","TEXT"),("awaiting","TEXT"),
+                         ("kind","TEXT"),("parent","TEXT"),("qn","INTEGER"),("amount","INTEGER")]:
+            if col not in cols:
+                c.execute(f"ALTER TABLE orders ADD COLUMN {col} {ddl}")
 init_db()
+
+ADDON_PRICES = {1: 190, 3: 490, 5: 790, 10: 1290}   # дозакупка: запросов -> цена, ₽
 
 def cache_hit(site):
     """Кэш по домену на 14 дней: не гонять API повторно по тому же сайту."""
@@ -72,13 +78,14 @@ def tbank_token(params, password):
                       for k in sorted(flat))
     return hashlib.sha256(concat.encode("utf-8")).hexdigest()
 
-def tbank_init(order_id, email):
+def tbank_init(order_id, email, amount=None, description=None):
     password = os.environ["TBANK_PASSWORD"]  # из секрета, не из кода
+    rub = amount if amount is not None else PRICE
     payload = {
         "TerminalKey": TERMINAL,
-        "Amount": PRICE * 100,                 # в копейках
+        "Amount": rub * 100,                   # в копейках
         "OrderId": order_id,
-        "Description": "Отчёт о видимости бренда в нейросетях",
+        "Description": description or "Отчёт о видимости бренда в нейросетях",
         "PayType": "O",                        # одностадийная оплата (списание сразу)
         "NotificationURL": f"{BASE_URL}/tbank/notify",
         "SuccessURL": f"{BASE_URL}/thanks?order={order_id}",   # обычная веб-страница, не t.me
@@ -142,6 +149,41 @@ def tg_send_payment_button(chat_id, pay_url, brand):
     _tg("sendMessage", {"chat_id": chat_id,
         "text": f"Заказ на отчёт о видимости «{brand}» в нейросетях принят.\n\nНажмите кнопку, чтобы оплатить 1290 ₽. Сразу после оплаты я пришлю готовый отчёт сюда, в этот чат.",
         "reply_markup": {"inline_keyboard": [[{"text": "Оплатить 1290 ₽", "url": pay_url}]]}})
+
+def tg_send_buttons(chat_id, text, keyboard):
+    if tg_token(): _tg("sendMessage", {"chat_id": chat_id, "text": text, "reply_markup": {"inline_keyboard": keyboard}})
+
+def tg_answer_callback(cb_id, text=""):
+    if tg_token():
+        try: _tg("answerCallbackQuery", {"callback_query_id": cb_id, "text": text})
+        except Exception as e: print("[tg] answerCallback:", e)
+
+def admin_notify(text):
+    """Пересылка обратной связи Анне в личный чат (ADMIN_CHAT_ID)."""
+    aid = os.environ.get("ADMIN_CHAT_ID")
+    if aid and tg_token():
+        try: _tg("sendMessage", {"chat_id": aid, "text": text})
+        except Exception as e: print("[admin] ", e)
+
+def _send_feedback_request(chat_id, oid):
+    tg_send_buttons(chat_id,
+        "Удалось изучить отчёт?\n\n"
+        "Помогите улучшить сервис — оцените, насколько отчёт оказался полезным:\n"
+        "1 — не получил полезной информации, 5 — получил понятные выводы и рекомендации.",
+        [[{"text": str(n), "callback_data": f"rate:{n}:{oid}"} for n in range(1, 6)]])
+
+def _send_addon_offer(chat_id, parent_oid):
+    tg_send_buttons(chat_id,
+        "Спасибо за обратную связь!\n\n"
+        "Хотите проверить другие запросы? Первый отчёт сделан по 10 запросам. "
+        "Можно отдельно проверить видимость по запросам, которых в нём не было: например, по другой услуге или направлению, "
+        "в конкретном городе или регионе, среди определённого типа клиентов или в другом ценовом сегменте.\n\n"
+        "Вы пришлёте свои формулировки, я покажу их на подтверждение и проверю. Выберите, сколько запросов проверить:",
+        [[{"text": "1 запрос — 190 ₽",   "callback_data": f"buy:1:{parent_oid}"}],
+         [{"text": "3 запроса — 490 ₽",  "callback_data": f"buy:3:{parent_oid}"}],
+         [{"text": "5 запросов — 790 ₽", "callback_data": f"buy:5:{parent_oid}"}],
+         [{"text": "10 запросов — 1290 ₽","callback_data": f"buy:10:{parent_oid}"}],
+         [{"text": "Не сейчас",          "callback_data": "addon_no"}]])
 
 def report_ready_text(o):
     """Сообщение, которое идёт ОТДЕЛЬНО после PDF (поэтому «PDF выше»)."""
@@ -216,8 +258,10 @@ def maybe_start_review(oid):
 def revise_queries(oid, edited):
     """Клиент прислал свой список: заменяем запросы и показываем обновлённый список на повторное подтверждение (без запуска)."""
     with db() as c:
-        o = c.execute("SELECT prep, tg_chat_id FROM orders WHERE id=?", (oid,)).fetchone()
+        o = c.execute("SELECT prep, tg_chat_id, kind, qn FROM orders WHERE id=?", (oid,)).fetchone()
     if not o or not o["prep"]: return False
+    if (o["kind"] or "main") == "addon" and o["qn"]:
+        edited = edited[:o["qn"]]              # дозакупка: не больше оплаченного числа запросов
     prep = json.loads(o["prep"])
     prep["queries"] = [{"q": q, "group": engine._classify_query(q)} for q in edited]
     with db() as c:                                   # статус остаётся reviewing — ждём «ОК»
@@ -253,6 +297,8 @@ def generate(order_id):
             c.execute("UPDATE orders SET status='done', pdf=? WHERE id=?", (pdf, order_id))
             o = c.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
         sent = deliver(o, pdf)
+        if sent and (o["kind"] or "main") == "main" and o["tg_chat_id"]:
+            _send_feedback_request(o["tg_chat_id"], order_id)   # оценка 1-5 + оффер дозакупки после отзыва
         print(f"[generate] готово order={order_id} pdf_ok={os.path.exists(pdf)} отправлен_в_tg={sent}", flush=True)
     except Exception as e:
         print("[generate] ошибка:", e, flush=True)
@@ -440,13 +486,22 @@ def tbank_notify():
     if data.get("Status") in ("CONFIRMED", "AUTHORIZED") and data.get("Success"):
         oid = data.get("OrderId")
         with db() as c:
-            o = c.execute("SELECT status, tg_chat_id FROM orders WHERE id=?", (oid,)).fetchone()
+            o = c.execute("SELECT status, tg_chat_id, kind, qn FROM orders WHERE id=?", (oid,)).fetchone()
         print(f"[notify] найден={bool(o)} статус={o['status'] if o else None} чат={o['tg_chat_id'] if o else None}", flush=True)
         if o and o["status"] in ("new", "pending"):
-            with db() as c:
-                c.execute("UPDATE orders SET status='paid' WHERE id=?", (oid,))   # фиксируем оплату, движок пока НЕ запускаем
-            if o["tg_chat_id"]:           # клиент уже нажал Старт раньше оплаты -> показываем запросы на подтверждение
-                maybe_start_review(oid)
+            if (o["kind"] or "main") == "addon":          # дозакупка: после оплаты просим запросы, а не запускаем сразу
+                with db() as c:
+                    c.execute("UPDATE orders SET status='await_queries', awaiting='addon_queries' WHERE id=?", (oid,))
+                if o["tg_chat_id"]:
+                    n = o["qn"] or 1
+                    tg_send_message(o["tg_chat_id"],
+                        f"Оплата получена! Пришлите {n} {_plural_q(n)} для проверки — каждый с новой строки. "
+                        "Я покажу их на подтверждение, а потом запущу проверку и пришлю отчёт.")
+            else:
+                with db() as c:
+                    c.execute("UPDATE orders SET status='paid' WHERE id=?", (oid,))   # фиксируем оплату, движок пока НЕ запускаем
+                if o["tg_chat_id"]:           # клиент уже нажал Старт раньше оплаты -> показываем запросы на подтверждение
+                    maybe_start_review(oid)
     return "OK"
 
 @app.get("/thanks")
@@ -455,9 +510,97 @@ def thanks():
     link = f"https://t.me/{tg_bot()}?start={oid}" if tg_bot() else SITE
     return THANKS_PAGE.replace("__TGLINK__", link).replace("__SITE__", SITE)
 
+def _plural_q(n):
+    n = abs(int(n)); d = n % 10; dd = n % 100
+    if d == 1 and dd != 11: return "запрос"
+    if 2 <= d <= 4 and not 12 <= dd <= 14: return "запроса"
+    return "запросов"
+
+def _parse_query_list(text):
+    """Список запросов из текста клиента: чистим нумерацию, маркеры, короткие строки."""
+    qs = []
+    for l in text.splitlines():
+        l = re.sub(r"^\s*\d+[.)]\s*", "", l).strip(" -–—•\t").strip()
+        if len(l) >= 6: qs.append(l)
+    return qs[:12]
+
+def tg_send_addon_payment_button(chat_id, pay_url, n, price):
+    _tg("sendMessage", {"chat_id": chat_id,
+        "text": f"Доп. проверка: {n} {_plural_q(n)} за {price} ₽.\n\nНажмите кнопку для оплаты. Сразу после оплаты я попрошу прислать запросы для проверки.",
+        "reply_markup": {"inline_keyboard": [[{"text": f"Оплатить {price} ₽", "url": pay_url}]]}})
+
+def _create_addon(parent_oid, n, chat_id):
+    """Создаёт заказ-дозакупку (kind=addon) и шлёт кнопку оплаты на сумму по тарифу."""
+    price = ADDON_PRICES.get(int(n))
+    if not price: return
+    with db() as c:
+        p = c.execute("SELECT * FROM orders WHERE id=?", (parent_oid,)).fetchone()
+    if not p:
+        tg_send_message(chat_id, "Не нашёл исходный заказ. Напишите нам, поможем."); return
+    aid = uuid.uuid4().hex[:16]
+    with db() as c:
+        c.execute("INSERT INTO orders(id,created,status,brand,brand_short,site,niche,city,email,tg_chat_id,kind,parent,qn,amount) "
+                  "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                  (aid, time.time(), "new", p["brand"], p["brand_short"], p["site"], p["niche"], p["city"], p["email"],
+                   str(chat_id), "addon", parent_oid, int(n), price))
+    try:
+        res = tbank_init(aid, p["email"], amount=price, description=f"Доп. проверка видимости: {n} {_plural_q(n)}")
+    except Exception as e:
+        print("[addon] init:", e); tg_send_message(chat_id, "Оплата временно недоступна, попробуйте позже."); return
+    if res.get("Success"):
+        with db() as c: c.execute("UPDATE orders SET status='pending', payment_id=? WHERE id=?", (res.get("PaymentId"), aid))
+        tg_send_addon_payment_button(chat_id, res["PaymentURL"], int(n), price)
+    else:
+        tg_send_message(chat_id, "Не удалось создать оплату, попробуйте ещё раз чуть позже.")
+
+def _addon_collect_queries(oid, qs):
+    """Клиент прислал запросы для доп.проверки -> строим prep из родителя и показываем на подтверждение."""
+    with db() as c:
+        o = c.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
+    if not o: return
+    n = o["qn"] or len(qs); qs = qs[:n]
+    parent_prep = None
+    if o["parent"]:
+        with db() as c:
+            p = c.execute("SELECT prep FROM orders WHERE id=?", (o["parent"],)).fetchone()
+        if p and p["prep"]: parent_prep = json.loads(p["prep"])
+    prep = dict(parent_prep) if parent_prep else engine.prepare(o["site"], o["niche"], o["city"], fallback_brand=o["brand_short"] or o["brand"])
+    prep["queries"] = [{"q": q, "group": engine._classify_query(q)} for q in qs]
+    with db() as c:
+        c.execute("UPDATE orders SET prep=?, status='reviewing', awaiting=NULL WHERE id=?",
+                  (json.dumps(prep, ensure_ascii=False), oid))
+    if o["tg_chat_id"]:
+        tg_send_message(o["tg_chat_id"], _review_text(prep, edited=False))
+
+def _handle_callback(cq):
+    data = cq.get("data") or ""
+    chat = ((cq.get("message") or {}).get("chat") or {}).get("id")
+    tg_answer_callback(cq.get("id"))
+    if not chat: return "OK"
+    if data.startswith("rate:"):
+        try: _, n, oid = data.split(":", 2)
+        except ValueError: return "OK"
+        with db() as c:
+            c.execute("UPDATE orders SET rating=?, awaiting='fb_text' WHERE id=?", (int(n), oid))
+            o = c.execute("SELECT brand, site FROM orders WHERE id=?", (oid,)).fetchone()
+        admin_notify(f"Оценка отчёта: {n}/5\nЗаказ: {oid}\nБренд: {(o['brand'] if o else '') or ''}\nСайт: {(o['site'] if o else '') or ''}")
+        tg_send_message(chat, "Спасибо! Чего вам не хватило в отчёте или что оказалось особенно полезным? Ответьте одним сообщением.")
+        return "OK"
+    if data.startswith("buy:"):
+        try: _, n, parent = data.split(":", 2)
+        except ValueError: return "OK"
+        _create_addon(parent, int(n), chat)
+        return "OK"
+    if data == "addon_no":
+        tg_send_message(chat, "Хорошо! Если захотите проверить другие запросы — нажмите кнопку оплаты выше в любой момент или напишите нам.")
+        return "OK"
+    return "OK"
+
 @app.post("/telegram/webhook")
 def tg_webhook():
     upd = request.get_json(force=True, silent=True) or {}
+    if upd.get("callback_query"):
+        return _handle_callback(upd["callback_query"])
     msg = upd.get("message") or {}
     chat = (msg.get("chat") or {}).get("id")
     text = (msg.get("text") or "").strip()
@@ -500,29 +643,46 @@ def tg_webhook():
                 return "OK"
         tg_send_message(chat, "Здравствуйте! Чтобы получить отчёт, перейдите по кнопке после оплаты на сайте.")
         return "OK"
-    # свободный текст: ответ на подтверждение запросов
+    # свободный текст
     if text:
         with db() as c:
             o = c.execute("SELECT * FROM orders WHERE tg_chat_id=? AND status='reviewing' ORDER BY created DESC LIMIT 1",
                           (str(chat),)).fetchone()
-        if o:
+        if o:                                  # подтверждение или правка запросов
             if not o["prep"]:
                 tg_send_message(chat, "Секунду, ещё готовлю запросы — пришлю их сюда.")
                 return "OK"
             low = text.lower().strip(" .!…")
-            if low in ("ок","ok","да","да.","подтверждаю","запуск","поехали","go","ага","верно","всё верно","все верно","norma","норм"):
+            if low in ("ок","ok","да","да.","подтверждаю","запуск","поехали","go","ага","верно","всё верно","все верно","норм"):
                 start_generation(o["id"])
             else:
-                qs = []
-                for l in text.splitlines():
-                    l = re.sub(r"^\s*\d+[.)]\s*", "", l).strip(" -–—•\t").strip()
-                    if len(l) >= 6:
-                        qs.append(l)
-                qs = qs[:12]
-                if len(qs) >= 3:
-                    revise_queries(o["id"], qs)      # заменяем и показываем обновлённый список на повторное «ОК»
+                qs = _parse_query_list(text)
+                min_q = 1 if (o["kind"] == "addon") else 3
+                if len(qs) >= min_q:
+                    revise_queries(o["id"], qs)  # заменяем и показываем обновлённый список на повторное «ОК»
                 else:
-                    tg_send_message(chat, "Чтобы заменить запросы, пришлите их списком — каждый с новой строки, минимум 3. Или ответьте ОК, чтобы запустить по предложенному набору.")
+                    tg_send_message(chat, "Чтобы заменить запросы, пришлите их списком — каждый с новой строки. Или ответьте ОК, чтобы запустить по показанному набору.")
+            return "OK"
+        # обратная связь и дозакупка
+        with db() as c:
+            a = c.execute("SELECT * FROM orders WHERE tg_chat_id=? AND awaiting IS NOT NULL ORDER BY created DESC LIMIT 1",
+                          (str(chat),)).fetchone()
+        if a:
+            if a["awaiting"] == "fb_text":
+                with db() as c:
+                    c.execute("UPDATE orders SET feedback=?, awaiting=NULL WHERE id=?", (text, a["id"]))
+                admin_notify(f"Отзыв об отчёте\nЗаказ: {a['id']}\nБренд: {a['brand'] or ''}\n"
+                             f"Оценка: {a['rating'] if a['rating'] is not None else '—'}/5\n\n{text}")
+                _send_addon_offer(chat, a["id"])
+                return "OK"
+            if a["awaiting"] == "addon_queries":
+                qs = _parse_query_list(text)
+                if len(qs) >= 1:
+                    _addon_collect_queries(a["id"], qs)
+                else:
+                    n = a["qn"] or 1
+                    tg_send_message(chat, f"Пришлите запросы для проверки — каждый с новой строки (до {n}).")
+                return "OK"
         return "OK"
     return "OK"
 
@@ -559,7 +719,8 @@ def health():
         orders, last_order = {"err": str(e)}, None
     return jsonify(ok=True, terminal=TERMINAL, price=PRICE, base_url=BASE_URL,
                    notify_url=f"{BASE_URL}/tbank/notify", test_mode=os.environ.get("TEST_MODE") == "1",
-                   telegram=bool(tg_token()), bot=tg_bot(), orders=orders, last_order=last_order, keys=keys)
+                   telegram=bool(tg_token()), bot=tg_bot(), admin=bool(os.environ.get("ADMIN_CHAT_ID")),
+                   orders=orders, last_order=last_order, keys=keys)
 
 @app.get("/selftest")
 def selftest():

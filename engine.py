@@ -155,6 +155,9 @@ def generate_queries_llm(niche, city, site_info=None):
         "часть — более конкретные: по услуге, цене и бронированию, отзывам, формату, как выбрать.\n"
         "Интент коммерческий: человек выбирает, куда потратить деньги (а не «выбор подрядчика» дословно — подбери формулировки под тип бизнеса: "
         "для отеля это выбор места отдыха, для магазина — где купить, для услуг — кому заказать).\n"
+        "ВАЖНО держи ценовой сегмент и модель продаж из данных сайта. Если компания премиальная, проектная, B2B или оптовая — "
+        "НЕ добавляй запросы про «недорого», «дёшево», «эконом» и НЕ формулируй как розничную покупку в магазине. "
+        "Если компания работает по проектам или оптом — спрашивай про проект, под ключ, комплексно, опт, для бизнеса, а не «купить штучно».\n"
         "НЕ добавляй чисто информационные запросы (что такое, как сделать самому, определения). "
         "Не разбрасывай запросы по разным городам. Если регион не задан явно, или компания работает по всей стране, удалённо или оптом — "
         "НЕ привязывай запросы к конкретным городам (можно «в России» или вообще без географии). Не упоминай конкретные бренды и названия компаний.\n"
@@ -630,10 +633,14 @@ def _queries_cache_path(site):
     d = os.environ.get("QUERIES_DIR") or os.environ.get("REPORTS_DIR") or "/tmp"
     return os.path.join(d, "qset_" + re.sub(r"[^a-z0-9.]", "_", host) + ".json")
 
+_QSET_VER = "3"   # бамп при изменении промпта запросов -> старый кэш игнорируется и набор пересобирается
+
 def _load_query_set(site):
     try:
         with open(_queries_cache_path(site), encoding="utf-8") as f:
             obj = json.load(f)
+        if obj.get("ver") != _QSET_VER:   # промпт обновился -> старый набор не используем
+            return None
         qs = obj.get("queries")
         return [{"q": x["q"], "group": x["group"]} for x in qs] if qs else None
     except Exception:
@@ -642,8 +649,8 @@ def _load_query_set(site):
 def _save_query_set(site, queries):
     try:
         with open(_queries_cache_path(site), "w", encoding="utf-8") as f:
-            json.dump({"queries": [{"q": x["q"], "group": x["group"]} for x in queries],
-                       "version": datetime.datetime.now().strftime("%Y-%m-%d")}, f, ensure_ascii=False)
+            json.dump({"ver": _QSET_VER, "date": datetime.datetime.now().strftime("%Y-%m-%d"),
+                       "queries": [{"q": x["q"], "group": x["group"]} for x in queries]}, f, ensure_ascii=False)
     except Exception:
         pass
 

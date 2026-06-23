@@ -209,7 +209,7 @@ table.mt td{{font-size:9.5pt;font-weight:700;color:{INK};padding:5px 6px}}
 /* списки */
 .ck{{list-style:none}} .ck li{{font-size:10pt;color:{INK};line-height:1.5;padding:3.5mm 0;border-bottom:1px solid {BORDER};display:flex;gap:9px}}
 .ck li:last-child{{border-bottom:none}} .ck .m{{flex:none;font-weight:700}}
-.mk-y{{color:{GREEN}}} .mk-n{{color:{RED}}}
+.mk-y{{color:{GREEN}}} .mk-n{{color:{RED}}} .mk-w{{color:{AMBER}}}
 /* недели */
 .week{{margin-bottom:4mm}} .week .wh{{font-size:10pt;font-weight:700;color:{ACCENTD};margin-bottom:1.5mm}}
 .week ul{{margin-left:5mm}} .week li{{font-size:9.5pt;color:{INK};line-height:1.5}}
@@ -548,6 +548,10 @@ def _rec_card(r, i):
     p=[f'<div class="rcard-h"><span class="rcard-n">{i}</span><h3>{esc(r["title"])}</h3>{_ktag(r.get("kind","content"))}</div>']
     if r.get("plain"):
         p.append(f'<div class="rlabel">Что это означает</div><p>{esc(r["plain"])}</p>')
+    if r.get("status"):                                  # конкретный статус автопроверки: настроено / нет
+        mk={'ok':('mk-y','✓'),'bad':('mk-n','✗'),'warn':('mk-w','⚠')}
+        rows="".join(f'<li><span class="m {mk.get(st,("mk-w","•"))[0]}">{mk.get(st,("mk-w","•"))[1]}</span><span><b>{esc(label)}:</b> {esc(detail)}</span></li>' for label,st,detail in r["status"])
+        p.append(f'<div class="rlabel">Что показала техническая проверка</div><ul class="ck">{rows}</ul>')
     if r.get("steps"):
         steps="".join(f'<li>{esc(s)}</li>' for s in r["steps"])
         p.append(f'<div class="rlabel">Что сделать</div><ul class="rsteps">{steps}</ul>')
@@ -555,12 +559,15 @@ def _rec_card(r, i):
         p.append(f'<div class="rlabel">Пример</div><div class="rex">{esc(r["example"])}</div>')
     if r.get("handoff_note"):
         p.append(f'<div class="plashka"><b>Передайте специалисту.</b> {esc(r["handoff_note"])}</div>')
+    if r.get("todo"):                                    # что настроить (только то, чего не хватает)
+        items="".join(f'<li>{esc(t)}</li>' for t in r["todo"])
+        p.append(f'<div class="rlabel">Что настроить</div><ul class="chk2">{items}</ul>')
     if r.get("checklist"):
         items="".join(f'<li>{esc(c)}</li>' for c in r["checklist"])
         p.append(f'<div class="rlabel">Чек-лист для специалиста</div><ul class="chk2">{items}</ul>')
     if r.get("glossary"):
-        gl="".join(f'<p><b>{esc(t)}</b> — {esc(dfn)}</p>' for t,dfn in r["glossary"])
-        p.append(f'<div class="gloss"><div class="gh">Простыми словами</div>{gl}</div>')
+        gl=" · ".join(f'<b>{esc(t)}</b> — {esc(dfn)}' for t,dfn in r["glossary"])
+        p.append(f'<div class="gloss"><div class="gh">Простыми словами</div><p>{gl}</p></div>')
     p.append(f'''<div class="rmeta">
        <div><b>Приоритет</b><span>{esc(r.get("priority","—"))}</span></div>
        <div><b>Срок</b><span>{esc(r.get("term","—"))}</span></div>
@@ -568,17 +575,8 @@ def _rec_card(r, i):
     return '<div class="rcard">'+"".join(p)+'</div>'
 
 def _rec_chunks(recs):
-    """Технический чек-лист — отдельной страницей (длинный), остальные карточки по 2 на страницу."""
-    chunks=[]; buf=[]
-    for r in recs:
-        if r.get("kind")=="tech":
-            if buf: chunks.append(buf); buf=[]
-            chunks.append([r])
-        else:
-            buf.append(r)
-            if len(buf)==2: chunks.append(buf); buf=[]
-    if buf: chunks.append(buf)
-    return chunks
+    """По одной карточке на страницу: примеры под нишу и тех.статус разной длины, так надёжнее без переполнения."""
+    return [[r] for r in recs]
 
 def p_reco_page(d, items, first):
     cards="".join(_rec_card(r,i) for i,r in enumerate(items, d['_rec_n0']))

@@ -44,11 +44,15 @@ def _join_groups(names):
     names = [str(n) for n in names if n]
     return ", ".join("«" + n + "»" for n in names)
 
+def _aneg(d):
+    """«не появился/не появилась» с учётом пола личного бренда."""
+    return "не появилась" if d.get("fem") else "не появился"
+
 def _matrix_verdict(d):
     """Вывод под матрицей: строится из данных, без зашитых формулировок."""
     if d.get('overall', 0) == 0:
-        return (f"{esc(d['brand_short'])} не появился ни в одном из {d['total_answers']} ответов. Следующий шаг — определить "
-                "страницы сайта, которые должны отвечать на эти вопросы, и проверить, ясно ли на них описаны услуги, опыт и специализация компании.")
+        return (f"{esc(d['brand_short'])} {_aneg(d)} ни в одном из {d['total_answers']} ответов. Следующий шаг — определить "
+                "страницы сайта, которые должны отвечать на эти вопросы, и проверить, ясно ли на них описаны услуги, опыт и специализация.")
     rep = _join_groups(d.get('rep_groups', []))
     zero_g = _join_groups(d.get('groups_zero', []))
     if rep:
@@ -82,7 +86,7 @@ def compute(d):
     for q in qs:
         gg=g.setdefault(q['group'],{'m':0,'mx':0,'n':0})
         gg['m']+=sum(q['hits'].get(e['id'],0) for e in eng); gg['mx']+=len(eng)*RUNS; gg['n']+=1
-    d['groups']=sorted([{'name':k,'rate':round(v['m']/v['mx']*100),'n':v['n']} for k,v in g.items()],
+    d['groups']=sorted([{'name':k,'rate':round(v['m']/v['mx']*100),'n':v['n'],'m':v['m'],'mx':v['mx']} for k,v in g.items()],
                        key=lambda x:-x['rate'])
     # опорные / слабые каналы и сегменты — для выводов в тексте (без зашитых формулировок)
     d['strong_engines']=[e['name'] for e in es[:2]]
@@ -211,8 +215,10 @@ table.mt td{{font-size:9.5pt;font-weight:700;color:{INK};padding:5px 6px}}
 .ck li:last-child{{border-bottom:none}} .ck .m{{flex:none;font-weight:700}}
 .mk-y{{color:{GREEN}}} .mk-n{{color:{RED}}} .mk-w{{color:{AMBER}}}
 /* недели */
-.week{{margin-bottom:4mm}} .week .wh{{font-size:10pt;font-weight:700;color:{ACCENTD};margin-bottom:1.5mm}}
-.week ul{{margin-left:5mm}} .week li{{font-size:9.5pt;color:{INK};line-height:1.5}}
+.week{{padding-bottom:3.5mm;margin-bottom:3.5mm;border-bottom:1px solid {BORDER}}}
+.week:last-child{{border-bottom:none;margin-bottom:0;padding-bottom:0}}
+.week .wh{{font-size:11pt;font-weight:700;color:{INK};margin-bottom:1mm}}
+.week ul{{margin-left:5mm}} .week li{{font-size:9.5pt;color:{INK};line-height:1.4;margin-bottom:.4mm}}
 /* footer / cta */
 .foot{{position:absolute;left:15mm;right:15mm;bottom:6mm;display:flex;justify-content:space-between;
   font-size:8pt;color:{FAINT};border-top:1px solid {BORDER};padding-top:3mm;background:{PAGE}}}
@@ -259,7 +265,7 @@ table.mt td{{font-size:9.5pt;font-weight:700;color:{INK};padding:5px 6px}}
 .gloss .gh{{font-size:8pt;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:{FAINT};margin-bottom:2mm}}
 .gloss p{{font-size:8.5pt;color:{MUTED};line-height:1.5;margin-bottom:1mm}} .gloss b{{color:{INK};font-weight:600}}
 /* план: роли */
-.prole{{margin:1.5mm 0 1mm}} .prole .pr{{font-size:8.5pt;font-weight:700;color:{ACCENTD};text-transform:uppercase;letter-spacing:.4px;margin-bottom:1mm}}
+.prole{{margin:1.8mm 0 0}} .prole .pr{{font-size:8pt;font-weight:700;color:{FAINT};text-transform:uppercase;letter-spacing:.5px;margin-bottom:.5mm}}
 '''
 
 def footer(d): return f'<div class="foot"><span>Отчёт о видимости в нейросетях · {esc(d["brand"])}</span><span>Анна Курбатова°</span></div>'
@@ -314,8 +320,8 @@ def p_engines(d):
     total=d['total_answers']
     if not me:
         h1,strong_p="Результат проверки",f"Ни одна из проверенных нейросетей ({_join(ze)}) не упомянула {esc(b)} в этой выборке."
-        h2,weak_p="Что это означает",(f"Сейчас компания не попадает в рекомендации нейросетей по выбранным вопросам. Для начала стоит проверить, "
-                                       f"насколько точно сайт описывает ключевые услуги и есть ли о {esc(b)} достаточно информации на других площадках.")
+        h2,weak_p="Что это означает",("Сейчас бренд не попадает в рекомендации нейросетей по выбранным вопросам. Для начала стоит проверить, "
+                                       "насколько точно сайт описывает ключевые услуги и достаточно ли информации о вас на других площадках.")
     else:
         mlist="; ".join(f"{esc(e['name'])} — {e['mentions']} из {e['answers']}" for e in d['engines'] if e['rate']>0)
         h1,strong_p="Где вас уже называют",f"Упоминания обнаружены в: {mlist}."
@@ -353,11 +359,11 @@ def p_matrix(d):
       {footer(d)}</div>'''
 
 def p_groups(d):
-    bars="".join(bar(g['name'], g['rate'], f"{g['n']} {plural(g['n'],'запрос','запроса','запросов')} в группе", wl="190px") for g in d['groups'])
+    bars="".join(bar(g['name'], g['rate'], f"{g['m']} из {g['mx']} проверок · {g['n']} {plural(g['n'],'запрос','запроса','запросов')} в группе", wl="190px") for g in d['groups'])
     b=d['brand_short']
     if d.get('zero'):
         lean_h="Что делать дальше"
-        loss_p=f"В этой проверке {esc(b)} не появился ни в одной группе вопросов. Поэтому пока нельзя выделить направление, которое уже приносит компании видимость в нейросетях."
+        loss_p=f"В этой проверке {esc(b)} {_aneg(d)} ни в одной группе вопросов. Поэтому пока нельзя выделить направление, которое уже приносит бренду видимость в нейросетях."
         lean_p="Начать стоит с вопросов о поиске подрядчика и о ключевой услуге компании — это основные коммерческие сценарии, по которым клиент может искать вас через нейросеть."
         prio_p="Размер группы не говорит о её важности: по числу вопросов в группе нельзя делать вывод о приоритете. Двигаться стоит сразу по двум линиям — понятные страницы услуг и проектов на сайте и внешние упоминания."
     else:
@@ -596,17 +602,11 @@ def _week_html(w):
     return f'<div class="week"><div class="wh">{esc(w["week"])}</div>{roles}</div>'
 
 def p_plan(d):
-    first="".join(_week_html(w) for w in d['plan30'][:2])
+    weeks="".join(_week_html(w) for w in d['plan30'])
     return f'''<div class="page"><h2><span class="num">10</span>Что делать по неделям</h2>
       <div class="sec-intro">Последовательность действий на месяц, с ответственными за каждый блок. В конце — повторный замер, чтобы увидеть рост в цифрах.</div>
-      <div class="card">{first}</div>
-      {footer(d)}</div>'''
-
-def p_plan2(d):
-    rest="".join(_week_html(w) for w in d['plan30'][2:])
-    return f'''<div class="page"><h2>Что делать по неделям · продолжение</h2>
-      <div class="card">{rest}</div>
-      <div class="box"><h4>Методология и ограничения</h4><p class="note" style="color:{MUTED}">{esc(d['method_note'])}</p></div>
+      <div class="card" style="padding:5mm">{weeks}</div>
+      <div class="box"><h4>Методология и ограничения</h4><p class="note" style="font-size:8pt;color:{MUTED}">{esc(d['method_note'])}</p></div>
       {footer(d)}</div>'''
 
 def p_author(d):
@@ -641,7 +641,7 @@ def build(data, out):
     d['_rec_n0']=1                            # сквозная нумерация карточек рекомендаций
     for idx,ch in enumerate(_rec_chunks(recs)):
         pages.append(p_reco_page(d, ch, first=(idx==0)))
-    pages += [p_plan(d), p_plan2(d), p_author(d)]
+    pages += [p_plan(d), p_author(d)]
     body="".join(pages)
     # секции перенумеровываются последовательно (часть страниц может быть скрыта)
     cnt=[0]

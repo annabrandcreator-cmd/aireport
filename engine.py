@@ -208,6 +208,15 @@ def generate_queries_llm(niche, city, site_info=None):
 def _host(site):
     return re.sub(r"^https?://", "", (site or "")).replace("www.", "").split("/")[0].lower()
 
+def _brand_gender(brand_short):
+    """Личный бренд-человек: пол по фамилии (для согласования глаголов). 'f'/'m' = человек, 'n' = компания/бренд."""
+    words = (brand_short or "").strip().split()
+    if len(words) == 2 and all(re.match(r"^[А-ЯЁ][а-яё.\-]+$", w) for w in words):
+        sur = words[1].lower()
+        if re.search(r"(ова|ева|ёва|ина|ына|ская|цкая|ая)$", sur): return "f"
+        if re.search(r"(ов|ев|ёв|ин|ын|ский|цкий|ской|ной)$", sur): return "m"
+    return "n"
+
 def brand_aliases(site, site_info=None, brand="", brand_short=""):
     """Все варианты имени бренда: домен, введённое имя, названия с сайта (og:site_name, Schema name, title).
     По ним детектим упоминание и их же исключаем из конкурентов, чтобы бренд не попал сам к себе в конкуренты."""
@@ -811,6 +820,10 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
     groups_pos = [g[0] for g in groups if g[1] > 0]
     groups_zero = [g[0] for g in groups if g[1] == 0]
     rep_groups = sorted({q["group"] for q in queries if any(v == 2 for v in q["hits"].values())})   # 2/2 хотя бы в одной ячейке
+    n_rep_q = sum(1 for q in queries if any(v == 2 for v in q["hits"].values()))    # запросов с повторяемым (2/2) упоминанием
+    fem = _brand_gender(brand_short) == "f"                                          # женский личный бренд -> женское согласование
+    appeared_neg = "не появилась" if fem else "не появился"
+    mentioned_neg = "не была упомянута" if fem else "не был упомянут"
     pos_txt = ", ".join(groups_pos); zero_grp_txt = ", ".join(groups_zero); rep_txt = ", ".join(rep_groups)
     total = len(queries)*len(eng)*RUNS
     comp_conf = [(n, c) for n, c in competitors if c >= 2]   # подтверждён: упомянут минимум в 2 ответах
@@ -828,8 +841,8 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
     data = {
         "brand": brand, "brand_short": brand_short, "site": _host(site),
         "niche": niche, "city": city, "date": datetime.datetime.now().strftime("%d.%m.%Y"),
-        "cover_sub": ((f"В этой проверке {brand_short} не появился в ответах нейросетей. Первые шаги: сделать ключевые услуги понятнее на сайте, "
-                       "дополнить проекты конкретными фактами и увеличить число упоминаний компании на отраслевых площадках.")
+        "cover_sub": ((f"В этой проверке {brand_short} {appeared_neg} в ответах нейросетей. Первые шаги: сделать ключевые услуги понятнее на сайте, "
+                       "дополнить проекты конкретными фактами и увеличить число упоминаний бренда на отраслевых площадках.")
                       if zero else
                       ((f"Бренд появляется в части ответов. Повторяемые упоминания (2/2) по группам: {rep_txt}." if rep_groups
                         else f"Бренд появляется в части ответов, пока единичными упоминаниями по группам: {pos_txt}.")
@@ -838,18 +851,23 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
         "queries": queries,
         "result_meaning": {
             "headline": ("упоминания не обнаружены" if zero else ("средняя видимость" if overall>=25 else "низкая видимость")),
-            "text": (f"В {total} проверенных ответах {brand_short} не был упомянут ни одной из {len(eng)} нейросетей. "
-                     "Это не означает, что нейросети никогда не называют компанию. Результат относится к выбранным вопросам, системам и дате проверки."
+            "text": (f"В {total} проверенных ответах {brand_short} {mentioned_neg} ни одной из {len(eng)} нейросетей. "
+                     "Это не означает, что нейросети никогда не называют бренд. Результат относится к выбранным вопросам, системам и дате проверки."
                      if zero else
                      (f"В этой проверке бренд появился в {', '.join(mentioned_engines)}" + (f", но не появился в {', '.join(zero_engines)}." if zero_engines else ".")
                       + " Видимость пока низкая и неравномерная.")),
-            "loss": (f"{brand_short} не появился ни по одному из проверенных вопросов: при поиске подрядчика, выборе услуги и оценке надёжности компании."
+            "loss": (f"{brand_short} {appeared_neg} ни по одному из проверенных вопросов: при поиске подрядчика, выборе услуги и оценке надёжности."
                      if zero else (f"Упоминаний пока нет по группам: {zero_grp_txt}." if zero_grp_txt else "Упоминания распределены неравномерно по запросам.")),
             "strong": ("Сначала нужно сделать понятнее существующие страницы услуг и проектов, а затем увеличить число независимых "
                        "упоминаний компании: отзывов, публикаций, карточек и отраслевых подборок."
                        if zero else (f"Повторяемые упоминания (2/2) есть по группам: {rep_txt}. На них можно опереться, но видимость всё ещё низкая." if rep_groups
                                      else (f"Пока только единичные упоминания (1/2) по группам: {pos_txt}." if pos_txt else "Опорных групп с повторяемым упоминанием пока нет."))),
-            "goal": (f"Добиться первых повторяемых упоминаний: чтобы нейросеть называла {brand_short} не случайно, а в обоих повторных ответах на один и тот же вопрос."),
+            "goal": ("Добиться первых повторяемых упоминаний: чтобы нейросеть называла бренд не случайно, а в обоих повторных ответах на один и тот же вопрос."
+                     if zero else
+                     (f"Увеличить число запросов с повторяемым упоминанием с {n_rep_q} до 4–5"
+                      + (" и добиться появления хотя бы во второй нейросети." if len(mentioned_engines) <= 1 else " и поднять долю ответов с упоминанием в каждой нейросети.")
+                      if n_rep_q >= 1 else
+                      "Добиться первых повторяемых упоминаний (2 из 2): чтобы бренд появлялся в обоих ответах на один вопрос, а не через раз.")),
         },
         "examples": examples,
         "competitors": comp_objs,
@@ -858,19 +876,17 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
             {"name":"Официальный сайт","share":22},{"name":"Каталоги и подборки","share":14},
             {"name":"СМИ и блоги","share":9},{"name":"Соцсети","share":5},
         ],
-        "site_info": site_info,
+        "site_info": site_info, "fem": fem,
         "mentioned_engines": mentioned_engines, "zero_engines": zero_engines,
         "groups_pos": groups_pos, "groups_zero": groups_zero,
         "positives": _positives(rates, best, zero, site_info, rep_groups),
         "blockers": _blockers(groups, zero, site_info, mentioned_engines, zero_engines, groups_zero),
         "recommendations": _recommendations(queries, groups, total, site_info, brand_short, niche),
         "plan30": _plan30(site_info),
-        "method_note": (f"Проверка: каждой из {len(eng)} нейросетей задано {len(queries)} вопросов, похожих на реальные вопросы клиентов, "
-                        f"по {RUNS} прогона (всего {len(queries)*len(eng)*RUNS} ответов) на дату на обложке. Веб-поиск использовался там, где нейросеть его поддерживает, "
-                        "новая сессия на каждый вопрос. Упоминанием считается явное называние бренда, домена или короткого имени. "
-                        f"{RUNS} прогона показывают повторяемость ответа, а не гарантированную стабильность: для строгой оценки замер стоит повторять и "
-                        "увеличивать число прогонов. Причины отсутствия бренда в отчёте отмечены как гипотезы, а не доказанные факты. "
-                        "Результаты нейросетей меняются со временем. Повторный замер имеет смысл проводить после того, как обновлённые страницы будут проиндексированы."),
+        "method_note": (f"Каждой из {len(eng)} нейросетей задано {len(queries)} вопросов по {RUNS} прогона — всего {len(queries)*len(eng)*RUNS} ответов на дату на обложке; "
+                        "где нейросеть умеет искать в интернете, использовался веб-поиск. Упоминание — явное называние бренда, домена или короткого имени. "
+                        "Причины отсутствия бренда отмечены как гипотезы, а не доказанные факты. Ответы нейросетей меняются со временем; "
+                        "повторный замер имеет смысл после индексации обновлённых страниц."),
     }
     return data
 
@@ -1070,6 +1086,7 @@ def _reco_examples(niche, brand_short, queries=None, site_info=None):
 def _recommendations(queries, groups, total, site_info=None, brand_short="бренд", niche=""):
     """Карточки рекомендаций на языке владельца: что означает, что сделать, пример (под нишу), кому передать, тип, приоритет."""
     b = brand_short or "бренд"
+    did = "выполнила" if _brand_gender(b) == "f" else "выполнил"
     rex = _reco_examples(niche, b, queries, site_info)
     miss = total - sum(v for q in queries for v in q["hits"].values())   # ответов без бренда (из total)
     s = site_info or {}
@@ -1141,7 +1158,7 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
         "example": (f"Готовый отзыв вместо «Спасибо за работу»:\n«{rex['review']}»"
                     if rex.get('review') else
                     "Полезный отзыв вместо «Всё понравилось, рекомендуем»: "
-                    f"«{b} выполнил конкретную задачу для нашей компании, уложился в срок, результат — измеримая польза». "
+                    f"«{b} {did} конкретную задачу для нашей компании, уложил{'а' if did=='выполнила' else ''}ся в срок, результат — измеримая польза». "
                     "Чем конкретнее факты в отзыве, тем охотнее нейросеть их процитирует."),
         "handoff": "Маркетологу, PR-специалисту или подрядчику по продвижению.",
         "priority": "Высокий", "term": "3–4 недели"})

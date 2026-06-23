@@ -379,12 +379,15 @@ def _qd_row(q, e):
     if e.get('failed'):
         return f'<div class="qd-e"><b>{esc(e["short"])}:</b> не удалось проверить (ошибка доступа к API)</div>'
     h=q['hits'].get(e['id'],0)
-    comps=(q.get('evidence') or {}).get(e['id'],{}).get('comps',[])[:4]   # показываем всех названных (до 4)
-    extra=(", также называл "+", ".join(comps)) if comps else ""
-    if h>=2:   t="назвал ваш бренд в обоих ответах (2/2)"+extra
-    elif h==1: t="назвал ваш бренд в одном ответе (1/2)"+extra
-    elif comps:t="назвал "+", ".join(comps)+"; вашего бренда нет"
-    else:      t="общий ответ, без конкретных компаний"
+    ev=(q.get('evidence') or {}).get(e['id'],{})
+    comps=ev.get('comps',[])[:4]                              # подтверждённые нишевые конкуренты
+    others=[o for o in ev.get('others',[]) if o not in comps][:4]   # прочие названные игроки (площадки, домены, бренды)
+    named=(comps+others)[:5]
+    if h>=2:   t="назвал ваш бренд в обоих ответах (2/2)" + (", рядом назвал "+", ".join(named) if named else "")
+    elif h==1: t="назвал ваш бренд в одном ответе (1/2)" + (", рядом назвал "+", ".join(named) if named else "")
+    elif comps:t="назвал конкурентов: "+", ".join(comps)+(", "+", ".join(others) if others else "")+"; вашего бренда нет"
+    elif others:t="назвал других игроков: "+", ".join(others)+"; вашего бренда нет"
+    else:      t="общий ответ без названий компаний"
     return f'<div class="qd-e"><b>{esc(e["short"])}:</b> {esc(t)}</div>'
 
 def p_query_detail(d):
@@ -449,12 +452,17 @@ def p_examples(d):
     n_ex=len(d['examples'])
     intro=("Пример ответа из проверки: кого называет нейросеть и появился ли ваш бренд." if n_ex==1
            else "Несколько ответов из проверки: кого называет нейросеть, появился ли ваш бренд и что с этим делать.")
+    others=d.get('others_named') or []
     if d.get('zero'):
-        takeaway=(("По этим вопросам нейросети уже называют другие компании (они в разделе ниже), но не ваш бренд. "
-                   "Это и есть зона роста: появиться там, где сейчас показывают конкурентов. Что для этого усилить — в рекомендациях.")
-                  if has_comp else
-                  ("Нейросети давали общий ответ без конкретных компаний. Возможно, вопрос широкий или в доступных источниках мало данных о подрядчиках. "
-                   "Стоит посмотреть результаты по более точным вопросам и релевантным страницам сайта."))
+        if has_comp:
+            takeaway=("По этим вопросам нейросети уже называют другие компании (они в разделе ниже), но не ваш бренд. "
+                      "Это и есть зона роста: появиться там, где сейчас показывают конкурентов. Что для этого усилить — в рекомендациях.")
+        elif others:
+            takeaway=(f"По этим вопросам нейросети называют сторонние площадки и магазины (например, {esc(', '.join(others[:4]))}), но не ваш бренд. "
+                      "Это и есть зона роста: попасть в ответ там, где сейчас показывают чужие площадки. Что для этого усилить — в рекомендациях.")
+        else:
+            takeaway=("По этим вопросам нейросети давали общий ответ без названий компаний: пока никто не занимает эти ответы. "
+                      "Это редкая, но удобная ситуация — место свободно, и его можно занять первым. Что для этого усилить — в рекомендациях.")
     else:
         takeaway=("Повторяемые упоминания есть по части вопросов. По остальным бренд не появился; точную причину по одному ответу определить нельзя — "
                   "нужен разбор страниц сайта и внешних источников по этой теме.")
@@ -561,16 +569,15 @@ def _site_facts_plain(d):
         if s and s.get('host'):
             return "Сайт не удалось открыть автоматически для проверки. Стоит проверить адрес и доступность для поисковых роботов."
         return "Автоматическая проверка сайта в этот раз не проводилась."
-    total=s.get('sitemap_urls') or 0
-    svc=s.get('service_pages',0); case=s.get('case_pages',0)
-    bits=[]
-    if total: bits.append(f"Автоматическая проверка нашла на сайте {total} {plural(total,'страницу','страницы','страниц')}.")
-    else: bits.append("Автоматическая проверка прошла по доступным страницам сайта.")
-    seg=[]
-    if svc: seg.append(f"{svc} {plural(svc,'страницу','страницы','страниц')} система определила как страницы услуг")
-    if case: seg.append(f"{case} — как проекты или кейсы")
-    if seg: bits.append(("Из них " if total else "") + ", ".join(seg) + ".")
     types={str(x).lower() for x in (s.get('schema') or [])}
+    has_products=bool(types & {"product","offer","aggregateoffer","store","onlinestore","productgroup"}) or (s.get('product_pages',0) or 0)>0
+    svc=s.get('service_pages',0); case=s.get('case_pages',0)
+    bits=["Автоматическая проверка прошла по доступным страницам сайта."]
+    found=[]                                                 # без точных чисел: счёт по ссылкам с главной ненадёжен для магазинов
+    if has_products: found.append("каталог товаров и категории")
+    if svc: found.append("страницы услуг")
+    if case: found.append("страницы проектов или кейсов")
+    if found: bits.append("На сайте видны " + ", ".join(found) + ".")
     has_org=bool(types & {"organization","localbusiness","corporation","professionalservice","store","hotel","lodgingbusiness"})
     has_svc="service" in types
     if has_org and has_svc: bits.append("На сайте есть техническая разметка с данными о компании и услугах.")
@@ -582,7 +589,9 @@ def _site_facts_plain(d):
 
 def _biz_meaning(d):
     s=d.get('site_info') or {}
-    rich = s.get('ok') and (s.get('service_pages') or s.get('case_pages') or (s.get('sitemap_urls',0) or 0)>=20)
+    types={str(x).lower() for x in (s.get('schema') or [])}
+    has_products=bool(types & {"product","offer","aggregateoffer","store","onlinestore","productgroup"}) or (s.get('product_pages',0) or 0)>0
+    rich = s.get('ok') and (has_products or s.get('service_pages') or s.get('case_pages') or (s.get('sitemap_urls',0) or 0)>=20)
     if rich:
         return ("На сайте уже достаточно материалов — создавать всё с нуля не нужно. Главная задача в том, чтобы связать "
                 "существующие услуги, товары и проекты с вопросами, которые клиенты задают нейросетям, и описать их понятным языком с фактами.")

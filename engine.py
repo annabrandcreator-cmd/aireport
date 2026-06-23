@@ -193,7 +193,8 @@ _Q_INTENTS = [
     (("отзыв","репутац","кейс","пример"),                                          "Отзывы и кейсы"),
     (("надёжн","надежн","гарант","довери","безопас","риск","как выбрать"),         "Доверие к компании"),
     (("кто ","где ","куда","найти","заказать","купить","поехать","снять","арендовать","специалист","компани",
-      "исполнител","агентств","студи","сделать","разработ","внедр","нужен","ищу","отдохнуть","выбрать место"), "Поиск компании"),
+      "исполнител","агентств","студи","сделать","разработ","внедр","нужен","ищу","отдохнуть","выбрать место",
+      "магазин","бренд","сайт","поставщик","производител","маркетплейс","продаёт","продают","продаж"), "Поиск компании"),
 ]
 def _classify_query(q):
     ql = q.lower()
@@ -401,17 +402,19 @@ def analyze_site(site):
         if h.startswith(("#", "mailto:", "tel:", "javascript:")): continue
         if h.startswith("http") and host not in h: continue
         links.add(h)
-    def _cnt(words): return sum(1 for l in links if any(w in l for w in words))
-    out["service_pages"] = _cnt(["услуг", "uslug", "service", "catalog", "продукт", "produkt", "product", "решени", "resheni"])
-    out["case_pages"] = _cnt(["кейс", "kejs", "keys", "case", "портфолио", "portfolio", "проект", "proekt", "project",
-                              "works", "работы", "rabot", "объект", "obekt", "obyekt", "realizov", "примеры", "primery"])
     out["links_count"] = len(links)
-    paths = []
+    paths = []                                               # уникальные ПУТИ (без якорей и query) — иначе сотни карточек товара раздувают счёт
     for l in links:
-        p = re.sub(r'^https?://[^/]+', '', l).split('#')[0].split('?')[0].strip()
-        if p and p != '/' and p not in paths:
+        p = re.sub(r'^https?://[^/]+', '', l).split('#')[0].split('?')[0].strip().rstrip('/')
+        if p and p != '' and p not in paths:
             paths.append(p)
     out["pages_list"] = paths[:16]
+    # считаем по уникальным путям, а не по всем ссылкам; потолок 60 — иначе у магазина «524 услуги»
+    def _cnt(words): return min(60, sum(1 for p in paths if any(w in p.lower() for w in words)))
+    out["service_pages"] = _cnt(["услуг", "uslug", "service", "решени", "resheni"])
+    out["product_pages"] = _cnt(["catalog", "katalog", "продукт", "produkt", "product", "tovar", "товар", "shop", "magazin", "/p/", "cart"])
+    out["case_pages"] = _cnt(["кейс", "kejs", "keys", "case", "портфолио", "portfolio", "проект", "proekt", "project",
+                              "works", "работы", "rabot", "объект", "obekt", "obyekt", "realizov", "примеры", "primery"])
     out["robots_found"] = False; out["robots_blocks_ai"] = []
     try:
         _, robots = _fetch_text("https://" + host + "/robots.txt", timeout=8, limit=60000)
@@ -430,6 +433,7 @@ def analyze_site(site):
         _, sm = _fetch_text("https://" + host + "/sitemap.xml", timeout=8, limit=300000)
         locs = re.findall(r"<loc>(.*?)</loc>", sm)
         out["sitemap_urls"] = len(locs) or None
+        out["sitemap_index"] = bool(re.search(r"<sitemapindex", sm, re.I))   # составная карта: <loc> = под-карты, не страницы
         sm_paths = []
         for u in locs:
             p = re.sub(r'^https?://[^/]+', '', u.strip()).split('?')[0].strip()
@@ -562,6 +566,60 @@ def _good_name(n):
     if low in _GLOBAL_BRANDS or any(w in _GLOBAL_BRANDS for w in words): return None   # мировые гиганты — не конкуренты для МСБ
     if all(w in _COMMON or w in _PLATFORMS for w in words): return None
     return n
+
+def _good_name_loose(n):
+    """Как _good_name, но НЕ отбрасывает крупные бренды/ритейлеры — для пометки «назвал других игроков»."""
+    n = _norm_name(n)
+    if not (2 < len(n) <= 40): return None
+    low = n.lower(); words = low.split()
+    if any(w.startswith(_GEO_STEMS) for w in words): return None
+    if low in _PLATFORMS or low in _COMMON: return None
+    if all(w in _COMMON or w in _PLATFORMS for w in words): return None
+    return n
+
+# Крупные ритейлеры/маркетплейсы РФ: НЕ конкуренты нишевого бизнеса, но если ИИ их называет, а бренд — нет,
+# это честный и важный факт для клиента («ИИ рекомендует площадки, а не ваш сайт»).
+_RETAILERS = {
+    "ozon":"Ozon","озон":"Ozon","wildberries":"Wildberries","вайлдберриз":"Wildberries","вайлдберис":"Wildberries",
+    "яндекс маркет":"Яндекс Маркет","яндекс.маркет":"Яндекс Маркет","мегамаркет":"Мегамаркет","сбермегамаркет":"СберМегаМаркет",
+    "авито":"Авито","aliexpress":"AliExpress","алиэкспресс":"AliExpress","iherb":"iHerb","айхерб":"iHerb",
+    "золотое яблоко":"Золотое яблоко","gold apple":"Золотое яблоко","рив гош":"Рив Гош","ривгош":"Рив Гош",
+    "лэтуаль":"Лэтуаль","летуаль":"Лэтуаль","letu":"Лэтуаль","иль де ботэ":"Иль Де Ботэ","sephora":"Sephora",
+    "читай-город":"Читай-город","мвидео":"М.Видео","м.видео":"М.Видео","эльдорадо":"Эльдорадо","ситилинк":"Ситилинк",
+    "леруа мерлен":"Леруа Мерлен","leroy merlin":"Леруа Мерлен","hoff":"Hoff","хофф":"Hoff","ikea":"IKEA","икеа":"IKEA",
+    "детский мир":"Детский мир","спортмастер":"Спортмастер","связной":"Связной","dns":"DNS",
+}
+_DOMAIN_RE = re.compile(r"\b([a-z0-9][a-z0-9-]{1,30}\.(?:ru|рф|com|by|kz|ua|net|org|store|shop|online))\b", re.I)
+_PLATFORM_DOMS = ("yandex.","ya.","google.","goo.","openai.","chatgpt.","sber.","gigachat.","perplexity.","bing.","wikipedia.")
+def _named_in_answer(ans, own):
+    """Названные в ответе реальные игроки (ритейлеры, домены, выделенные имена), кроме самого бренда. Список (до 5)."""
+    if not ans: return []
+    low = ans.lower(); own = {o for o in (own or set()) if o}
+    def _is_own(s):
+        s = s.lower()
+        return any(a and (a == s or (len(a) >= 5 and a in s)) for a in own)
+    found = []
+    for k, disp in _RETAILERS.items():                       # 1) известные площадки/ритейлеры
+        if k in low and not _is_own(disp) and disp not in found:
+            found.append(disp)
+    for d in _DOMAIN_RE.findall(ans):                         # 2) домены сайтов
+        dl = d.lower()
+        if dl.startswith(_PLATFORM_DOMS) or _is_own(dl): continue
+        label = dl.split(".")[0]                               # iherb.com -> iherb (чтобы не дублировать ритейлера)
+        if any(label and label in f.lower().replace(" ", "") for f in found): continue
+        if dl not in [f.lower() for f in found]:
+            found.append(dl)
+    for m in re.finditer(r"«([^»]{2,40})»|\*\*([^*\n]{2,40})\*\*", ans):   # 3) выделенные имена «…»/**…**
+        nm = _good_name_loose(next(g for g in m.groups() if g))
+        if nm and not _is_own(nm) and nm not in found:
+            found.append(nm)
+    for m in re.finditer(r"\b([A-Z][A-Za-z][A-Za-z0-9&'’.-]{1,}(?:\s[A-Z][A-Za-z0-9&'’.-]{1,}){0,2})", ans):  # 4) латиница-бренды (Medicube, Gold Apple)
+        tok = m.group(1)
+        if not re.search(r"[a-z]", tok): continue                # пропускаем аббревиатуры (SEO, FAQ, HTML)
+        nm = _good_name_loose(tok)
+        if nm and not _is_own(nm) and nm.lower() not in [f.lower() for f in found]:
+            found.append(nm)
+    return found[:5]
 
 def _competitors_regex(answers, own):
     """Запасной эвристический разбор (только если нет ключа для LLM-извлечения)."""
@@ -778,7 +836,7 @@ def _queries_cache_path(site):
     d = os.environ.get("QUERIES_DIR") or os.environ.get("REPORTS_DIR") or "/tmp"
     return os.path.join(d, "qset_" + re.sub(r"[^a-z0-9.]", "_", host) + ".json")
 
-_QSET_VER = "7"   # бамп при изменении промпта запросов -> старый кэш игнорируется и набор пересобирается
+_QSET_VER = "8"   # бамп при изменении промпта запросов -> старый кэш игнорируется и набор пересобирается
 
 def _load_query_set(site):
     try:
@@ -843,14 +901,18 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
     competitors = extract_competitors(all_answers, brand, brand_short, niche, aliases=aliases)
     # доказательная база по каждому запросу: какой движок назвал бренд и кого из конкурентов
     comp_names = [n for n, _ in competitors]
+    comp_low = {n.lower() for n in comp_names}
     for q in queries:
-        q["evidence"] = {e["id"]: {"brand": q["hits"][e["id"]] > 0, "comps": []} for e in engines}
+        q["evidence"] = {e["id"]: {"brand": q["hits"][e["id"]] > 0, "comps": [], "others": []} for e in engines}
     for (qi, eid, _q, _run), ans in zip(tasks, answers):
         low = (ans or "").lower()
-        ev = queries[qi]["evidence"][eid]["comps"]
-        for n in comp_names:
-            if n.lower() in low and n not in ev:
-                ev.append(n)
+        cell = queries[qi]["evidence"][eid]
+        for n in comp_names:                                  # подтверждённые нишевые конкуренты
+            if n.lower() in low and n not in cell["comps"]:
+                cell["comps"].append(n)
+        for n in _named_in_answer(ans, aliases):              # прочие названные игроки (площадки, домены, бренды)
+            if n.lower() not in comp_low and n not in cell["others"]:
+                cell["others"].append(n)
     return queries, competitors, failed
 
 # ───────────────────────── сборка данных отчёта ───────────────────────
@@ -972,6 +1034,12 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
         comp_conf = []
     comp_names = [n for n, _ in comp_conf]
     examples = _pick_examples(queries, brand_short, best, comp_names)
+    others_named = []                                         # прочие игроки (площадки/домены/бренды), названные ИИ, кроме подтверждённых конкурентов
+    for q in queries:
+        for eid, evv in (q.get("evidence") or {}).items():
+            for o in evv.get("others", []):
+                if o not in others_named and o not in comp_names:
+                    others_named.append(o)
     comp_objs = _competitor_objs(comp_conf, total)
     eng_name = {e["id"]: e["name"] for e in eng}
     for c in comp_objs:                                       # ВСЕ места, где назван конкурент: запрос -> нейросети
@@ -1020,6 +1088,7 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
                       "Добиться первых повторяемых упоминаний (2 из 2): чтобы бренд появлялся в обоих ответах на один вопрос, а не через раз.")),
         },
         "examples": examples,
+        "others_named": others_named[:6],
         "competitors": comp_objs,
         "sources": [
             {"name":"Карты и справочники","share":26},{"name":"Отзывы на площадках","share":24},
@@ -1045,10 +1114,14 @@ def _pick_examples(queries, brand_short, best, competitors):
     ex = []
     eng_name = {e["id"]: e["name"] for e in active_engines()}
     def comps_engine(q):
-        """(нейросеть, [конкуренты]) реально названные по этому запросу — из доказательной базы."""
-        for eid, evv in (q.get("evidence") or {}).items():
+        """(нейросеть, [названные игроки]) реально по этому запросу — сперва конкуренты, потом прочие площадки."""
+        ev = q.get("evidence") or {}
+        for eid, evv in ev.items():
             if evv.get("comps"):
                 return eng_name.get(eid, eid), evv["comps"][:3]
+        for eid, evv in ev.items():
+            if evv.get("others"):
+                return eng_name.get(eid, eid), evv["others"][:3]
         return best["name"], []
     strong_cell = next((q for q in queries if any(v==2 for v in q["hits"].values())), None)
     zero_cell   = next((q for q in queries if all(v==0 for v in q["hits"].values())), None)
@@ -1126,10 +1199,13 @@ def _positives(rates, best, zero, site_info=None, rep_groups=None):
         if sm["org"]: pos.append("Есть разметка организации (Organization)")
         if sm["service"]: pos.append("Есть разметка услуг (Service)")
         if sm["faq"]: pos.append("Есть FAQ-разметка")
-        if s.get("service_pages"):
-            pos.append(f"Найдены отдельные страницы услуг ({s['service_pages']})")
+        _types = {str(x).lower() for x in (s.get("schema") or [])}
+        if (_types & {"product","offer","aggregateoffer","store","onlinestore","productgroup"}) or s.get("product_pages"):
+            pos.append("Есть каталог товаров и категории")
+        elif s.get("service_pages"):
+            pos.append("Найдены отдельные страницы услуг")
         if s.get("case_pages"):
-            pos.append(f"Найдены страницы кейсов или проектов ({s['case_pages']})")
+            pos.append("Найдены страницы кейсов или проектов")
         if s.get("robots_found") and not s.get("robots_blocks_ai"):
             pos.append("robots.txt не закрывает доступ ИИ-ботам")
     if not pos:
@@ -1155,13 +1231,15 @@ def _blockers(groups, zero, site_info=None, mentioned_engines=None, zero_engines
         sm = _schema_summary(s.get("schema"))
         if s.get("robots_blocks_ai"):
             blk.append("robots.txt закрывает доступ ИИ-ботам: " + ", ".join(s["robots_blocks_ai"]))
+        _types = {str(x).lower() for x in (s.get("schema") or [])}
+        _has_products = bool(_types & {"product","offer","aggregateoffer","store","onlinestore","productgroup"}) or s.get("product_pages")
         if not sm["org"]:
             blk.append("Не найдена разметка организации (Organization)")
-        elif not sm["service"]:
+        elif not _has_products and not sm["service"]:
             blk.append("Не найдена разметка услуг (Service)")
-        if not s.get("service_pages"):
+        if not _has_products and not s.get("service_pages"):
             blk.append("Не удалось обнаружить отдельные страницы услуг (если есть, дайте на них прямые ссылки в меню)")
-        if not s.get("case_pages"):
+        if not _has_products and not s.get("case_pages"):
             blk.append("Не удалось обнаружить страницы кейсов или проектов (если они есть, дайте на них прямые ссылки в меню)")
     elif s and not s.get("ok"):
         blk.append("Сайт не удалось открыть для проверки: проверьте адрес и доступность")
@@ -1259,12 +1337,9 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
     # 1. Контент: понятные страницы товаров (магазин) или услуг
     if has_products:
         c1_title = "Сделать карточки товаров и категории понятнее для нейросетей и клиентов"
-        if svc_seen:
-            svc_plain = (f"Автопроверка нашла на сайте страницы товаров и категорий ({s.get('service_pages')}). Создавать с нуля ничего не нужно. "
-                         f"Их заголовки и описания должны сразу объяснять, что за товар, для кого он и чем хорош — тогда нейросеть назовёт именно ваш магазин.")
-        else:
-            svc_plain = (f"Понятных страниц категорий и товаров автопроверка почти не нашла. По коммерческим вопросам {b} {aneg} в {miss} из {total} ответов. "
-                         f"Когда у категории и товара есть страница с конкретикой (бренд, состав, наличие), нейросети проще назвать ваш сайт.")
+        svc_plain = (f"На сайте есть каталог товаров и категории — создавать с нуля ничего не нужно. "
+                     f"Их заголовки и описания должны сразу объяснять, что за товар, для кого он и чем хорош, тогда нейросеть назовёт именно ваш магазин. "
+                     f"По коммерческим вопросам {b} {aneg} в {miss} из {total} ответов.")
         c1_steps = ["Выбрать 5–7 ключевых категорий или товаров под вопросы из этого отчёта",
                     "В заголовок добавить тип товара и для кого он",
                     "В описании указать бренд, состав, назначение — без общих слов",
@@ -1273,7 +1348,7 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
     else:
         c1_title = "Сделать ключевые услуги понятнее для нейросетей и клиентов"
         if svc_seen:
-            svc_plain = (f"Автопроверка нашла на сайте отдельные страницы услуг ({s.get('service_pages')}). "
+            svc_plain = (f"Автопроверка нашла на сайте отдельные страницы услуг. "
                          f"Создавать с нуля ничего не нужно. Их заголовки и первые абзацы должны сразу объяснять, "
                          f"что именно делает {b}, для каких клиентов и в каком формате — тогда нейросеть сможет это процитировать.")
         else:
@@ -1369,9 +1444,9 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
         else:
             status.append(("robots.txt", "warn", "не найден"))
             todo.append("Добавить robots.txt и явно разрешить AI-роботов (GPTBot, OAI-SearchBot, PerplexityBot, YandexBot)")
-        # карта сайта
+        # карта сайта (для составной карты число <loc> — это под-карты, а не страницы)
         if sm_urls:
-            status.append(("Карта сайта (sitemap.xml)", "ok", f"найдена, страниц: {sm_urls}"))
+            status.append(("Карта сайта (sitemap.xml)", "ok", "найдена (составная)" if s.get("sitemap_index") else f"найдена, страниц: {sm_urls}"))
         else:
             status.append(("Карта сайта (sitemap.xml)", "bad", "не найдена"))
             todo.append("Создать карту сайта sitemap.xml и указать её в robots.txt")
@@ -1400,15 +1475,15 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
         else:
             status.append(("Блок вопросов-ответов (FAQPage)", "warn", "не найден"))
             todo.append("Добавить блок вопросов и ответов с разметкой FAQPage на ключевые страницы")
-        # отдельные страницы
-        if s.get("service_pages"):
-            status.append(("Отдельные страницы услуг", "ok", f"найдено: {s['service_pages']}"))
+        # отдельные страницы (без точных чисел — счёт по ссылкам с главной ненадёжен)
+        if has_products or s.get("product_pages"):
+            status.append(("Каталог товаров и категории", "ok", "есть"))
+        elif s.get("service_pages"):
+            status.append(("Отдельные страницы услуг", "ok", "есть"))
         else:
             status.append(("Отдельные страницы услуг", "bad", "не обнаружены"))
         if s.get("case_pages"):
-            status.append(("Страницы проектов и кейсов", "ok", f"найдено: {s['case_pages']}"))
-        else:
-            status.append(("Страницы проектов и кейсов", "bad", "не обнаружены"))
+            status.append(("Страницы проектов и кейсов", "ok", "есть"))
     todo.append("Передать специалисту: убедиться, что ключевые страницы отдают код 200, не закрыты noindex и связаны внутренними ссылками")
     tech_prio = "Высокий" if blocks_ai else "Средний"
     recs.append({

@@ -46,8 +46,8 @@ def _join_groups(names):
 def _matrix_verdict(d):
     """Вывод под матрицей: строится из данных, без зашитых формулировок."""
     if d.get('overall', 0) == 0:
-        return ("Бренд не появился ни в одном из проверенных ответов: все ячейки 0/2. "
-                "Это отправная точка, дальше задача — получить первые повторяемые упоминания.")
+        return (f"{esc(d['brand_short'])} не появился ни в одном из {d['total_answers']} ответов. Следующий шаг — определить "
+                "страницы сайта, которые должны отвечать на эти вопросы, и проверить, ясно ли на них описаны услуги, опыт и специализация компании.")
     rep = _join_groups(d.get('rep_groups', []))
     zero_g = _join_groups(d.get('groups_zero', []))
     if rep:
@@ -235,6 +235,30 @@ table.mt td{{font-size:9.5pt;font-weight:700;color:{INK};padding:5px 6px}}
 .qr{{text-decoration:none;text-align:center;flex:none}}
 .qr img{{width:33mm;height:33mm;border:1px solid {BORDER};border-radius:11px;padding:3mm;background:#fff}}
 .qr span{{display:block;font-size:9pt;color:{ACCENTD};margin-top:2.5mm;font-weight:700}}
+/* тип рекомендации */
+.ktag{{display:inline-block;font-size:7.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.5px;padding:3px 9px;border-radius:20px}}
+.ktag-content{{background:rgba(46,139,87,.13);color:{GREEN}}}
+.ktag-tech{{background:rgba(45,90,160,.12);color:#2D5AA0}}
+.ktag-promo{{background:rgba(201,121,26,.15);color:{AMBER}}}
+.rcard-h .ktag{{margin-left:auto}}
+.rex{{background:{CREAM};border-radius:10px;padding:4mm;margin-top:1mm;font-size:9.5pt;color:{INK};line-height:1.55}} .rex b{{color:{ACCENTD}}}
+.rhand{{font-size:9pt;color:{MUTED};line-height:1.5;margin-top:3mm}} .rhand b{{color:{INK};font-weight:600}}
+.rmeta{{display:flex;gap:8mm;margin-top:3mm;padding-top:3mm;border-top:1px solid {BORDER}}}
+.rmeta div b{{color:{FAINT};font-weight:600;font-size:7.5pt;text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:1mm}}
+.rmeta div span{{font-weight:700;color:{INK};font-size:9.5pt}}
+/* плашки «кому передать» */
+.plashka{{border-left:3px solid {ACCENT};background:{CREAM};border-radius:0 10px 10px 0;padding:3.5mm 4mm;margin:3mm 0;font-size:9.5pt;color:{INK};line-height:1.5}} .plashka b{{color:{ACCENTD}}}
+/* нумерованный чек-лист */
+.chk2{{counter-reset:ck;margin-top:1mm}}
+.chk2 li{{list-style:none;position:relative;padding:2.5mm 0 2.5mm 9mm;border-bottom:1px solid {BORDER};font-size:9.5pt;color:{INK};line-height:1.5}}
+.chk2 li:last-child{{border-bottom:none}}
+.chk2 li:before{{counter-increment:ck;content:counter(ck);position:absolute;left:0;top:2.5mm;width:6mm;height:6mm;background:{TRACK};border-radius:50%;text-align:center;line-height:6mm;font-size:8pt;font-weight:700;color:{MUTED}}}
+/* словарь терминов */
+.gloss{{background:#F6F2EC;border-radius:10px;padding:4mm;margin-top:3mm}}
+.gloss .gh{{font-size:8pt;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:{FAINT};margin-bottom:2mm}}
+.gloss p{{font-size:8.5pt;color:{MUTED};line-height:1.5;margin-bottom:1mm}} .gloss b{{color:{INK};font-weight:600}}
+/* план: роли */
+.prole{{margin:1.5mm 0 1mm}} .prole .pr{{font-size:8.5pt;font-weight:700;color:{ACCENTD};text-transform:uppercase;letter-spacing:.4px;margin-bottom:1mm}}
 '''
 
 def footer(d): return f'<div class="foot"><span>Отчёт о видимости в нейросетях · {esc(d["brand"])}</span><span>Анна Курбатова°</span></div>'
@@ -257,10 +281,10 @@ def p_cover(d):
 
 def p_summary(d):
     rm=d['result_meaning']
-    loss_h="Главная потеря" if not d.get('zero') else "Где бренда нет"
-    strong_h="Сильная зона" if not d.get('zero') else "С чего начинать"
+    loss_h="Где бренд пока не появляется"
+    strong_h="С чего начинать" if d.get('zero') else "На что опереться"
     if d.get('zero'):
-        stat3_n="0%"; stat3_l="разницы между каналами нет: упоминаний не найдено нигде"
+        stat3_n="0%"; stat3_l="разницы между нейросетями нет: упоминаний не найдено нигде"
     else:
         eng=d['engines']; maxr=max(e['rate'] for e in eng); minr=min(e['rate'] for e in eng)
         best_names=[e['name'] for e in eng if e['rate']==maxr]; worst_names=[e['name'] for e in eng if e['rate']==minr]
@@ -279,30 +303,33 @@ def p_summary(d):
         <div class="stat"><div class="n">{d['overall']}%</div><div class="l">средняя видимость по {len(d['engines'])} {plural(len(d['engines']),'нейросети','нейросетям','нейросетям')}</div></div>
         <div class="stat"><div class="n">{d['stable_q']} из {len(d['queries'])}</div><div class="l">запросов с повторяемым упоминанием (2/2 хотя бы в одной сети)</div></div>
         <div class="stat"><div class="n">{stat3_n}</div><div class="l">{stat3_l}</div></div></div>
-      <div class="box"><h4>Что дальше в отчёте</h4><p>Видимость по каждой нейросети, матрица повторяемости (2/2, 1/2, 0/2), разбор по группам запросов, примеры реальных ответов, что работает и что мешает, и персональный план действий с приоритетами и сроками.</p></div>
+      <div class="note" style="margin-top:3mm">2/2 означает, что бренд появился в обоих ответах на один и тот же вопрос.</div>
+      <div class="box"><h4>Что дальше в отчёте</h4><p>Дальше: видимость по каждой нейросети, таблица повторяемости ответов, разбор по группам вопросов, примеры реальных ответов, что показала проверка сайта и пошаговый план с приоритетами и ответственными.</p></div>
       {footer(d)}</div>'''
 
 def p_engines(d):
     bars="".join(bar(e['name'], e['rate'], f"{e['mentions']} упоминаний в {e['answers']} ответах · {esc(e['note'])}", wl="150px") for e in d['engines'])
-    me=d.get('mentioned_engines',[]); ze=d.get('zero_engines',[]); ans=d['engines'][0]['answers']
+    me=d.get('mentioned_engines',[]); ze=d.get('zero_engines',[]); ans=d['engines'][0]['answers']; b=d['brand_short']
+    total=d['total_answers']
     if not me:
-        h1,strong_p="Опорные каналы","Пока ни одна сеть не называет бренд. Рост начинается с источников, на которые ссылаются нейросети: отзывы, карты и тематические каталоги."
-        h2,weak_p="Где начинать работу",f"{_join(ze)} не знают бренд по этим запросам. С них и начнём набирать упоминания."
+        h1,strong_p="Результат проверки",f"Ни одна из проверенных нейросетей ({_join(ze)}) не упомянула {esc(b)} в этой выборке."
+        h2,weak_p="Что это означает",(f"Сейчас компания не попадает в рекомендации нейросетей по выбранным вопросам. Для начала стоит проверить, "
+                                       f"насколько точно сайт описывает ключевые услуги и есть ли о {esc(b)} достаточно информации на других площадках.")
     else:
         mlist="; ".join(f"{esc(e['name'])} — {e['mentions']} из {e['answers']}" for e in d['engines'] if e['rate']>0)
-        h1,strong_p="Опорные каналы",f"Упоминания обнаружены в: {mlist}."
+        h1,strong_p="Где вас уже называют",f"Упоминания обнаружены в: {mlist}."
         if ze:
-            h2,weak_p="Каналы без упоминаний",f"В {_join(ze)} бренд не появился ни в одном из {ans} ответов."
+            h2,weak_p="Где пока не называют",f"В {_join(ze)} бренд не появился ни в одном из {ans} ответов."
         else:
-            h2,weak_p="Где наращивать","Упоминания есть во всех каналах, но видимость пока низкая. Задача — повышать долю ответов с упоминанием."
+            h2,weak_p="Где наращивать","Упоминания есть во всех нейросетях, но видимость пока низкая. Задача — повышать долю ответов с упоминанием."
     return f'''<div class="page"><h2><span class="num">02</span>Где вас находят нейросети</h2>
-      <div class="sec-intro">Каждой нейросети задано {len(d['queries'])} коммерческих запросов вашей ниши по {RUNS} прогона ({d['engines'][0]['answers']} ответов на движок). Процент: доля ответов, где упомянут бренд или сайт.</div>
+      <div class="sec-intro">Каждой нейросети задали {len(d['queries'])} вопросов, похожих на реальные вопросы потенциальных клиентов. Каждый вопрос проверили дважды — всего получено {total} ответов. Процент: доля ответов, где нейросеть упомянула бренд или сайт.</div>
       <div class="card">{bars}</div>
       <div class="two">
         <div class="box cream"><h4>{h1}</h4><p>{strong_p}</p></div>
         <div class="box"><h4>{h2}</h4><p>{weak_p}</p></div>
       </div>
-      <div class="box"><h4>Как читать</h4><p>Процент: доля из {d['engines'][0]['answers']} ответов, где нейросеть упомянула бренд или сайт. Чем выше, тем чаще вас видит клиент, который спрашивает совета у ИИ.</p></div>
+      <div class="box"><h4>Как читать</h4><p>Процент — это доля из {ans} ответов одной нейросети, где она упомянула бренд или сайт. Чем выше, тем чаще вас видит клиент, который спрашивает совета у ИИ.</p></div>
       {footer(d)}</div>'''
 
 def p_matrix(d):
@@ -326,47 +353,55 @@ def p_matrix(d):
 
 def p_groups(d):
     bars="".join(bar(g['name'], g['rate'], f"{g['n']} {plural(g['n'],'запрос','запроса','запросов')} в группе", wl="190px") for g in d['groups'])
+    b=d['brand_short']
     if d.get('zero'):
-        loss_p=f"Бренд не появляется ни по одной группе запросов (везде 0%). В этой проверке больше всего запросов пришлось на группы: {_join_groups(d['prio_groups'])}."
-        lean_p="Опереться на текущую видимость пока нельзя: её нет ни по одной группе. Точка входа: внешние упоминания (отзывы, карты, каталоги) и понятные страницы под ключевые услуги."
-        prio_p="Ранжировать направления по важности на таком объёме проверки нельзя. Двигаться стоит сразу по двум линиям: понятные страницы услуг на сайте и внешние упоминания, на которые опираются нейросети."
+        lean_h="Что делать дальше"
+        loss_p=f"В этой проверке {esc(b)} не появился ни в одной группе вопросов. Поэтому пока нельзя выделить направление, которое уже приносит компании видимость в нейросетях."
+        lean_p="Начать стоит с вопросов о поиске подрядчика и о ключевой услуге компании — это основные коммерческие сценарии, по которым клиент может искать вас через нейросеть."
+        prio_p="Размер группы не говорит о её важности: по числу вопросов в группе нельзя делать вывод о приоритете. Двигаться стоит сразу по двум линиям — понятные страницы услуг и проектов на сайте и внешние упоминания."
     else:
+        lean_h="На что опереться"
         rep=_join_groups(d.get('rep_groups',[])); zg=_join_groups(d.get('groups_zero',[]))
-        loss_p=(f"Упоминаний пока нет по группам: {zg}. " if zg else "По большинству групп упоминаний мало. ") + "Эти запросы относятся к этапу выбора поставщика."
+        loss_p=(f"Упоминаний пока нет по группам: {zg}. " if zg else "По большинству групп упоминаний мало. ") + "Эти вопросы относятся к этапу выбора компании."
         lean_p=(f"Повторяемые упоминания есть по группам: {rep}. " if rep else "Повторяемых упоминаний пока мало. ") + "На них можно опереться, но видимость всё ещё низкая."
-        prio_p="Двигаться стоит по двум линиям: усилить материалы под группы без упоминаний и закрепить то, что уже сработало. Группы с одним запросом не стоит напрямую сравнивать с группами из нескольких запросов."
-    return f'''<div class="page"><h2><span class="num">04</span>Видимость по группам запросов</h2>
-      <div class="sec-intro">Те же запросы, сгруппированные по направлениям. Видно, в каких сегментах вас находят, а в каких нет.</div>
+        prio_p="Двигаться стоит по двум линиям: усилить материалы под группы без упоминаний и закрепить то, что уже сработало. Группу из одного вопроса не стоит напрямую сравнивать с группой из нескольких."
+    return f'''<div class="page"><h2><span class="num">04</span>По каким вопросам бренд появляется, а по каким нет</h2>
+      <div class="sec-intro">Те же вопросы, собранные по направлениям. Видно, в каких сценариях клиенты вас находят, а в каких нет.</div>
       <div class="card">{bars}</div>
       <div class="two" style="margin-top:4mm">
-        <div class="box cream"><h4>Главные потери</h4><p>{loss_p}</p></div>
-        <div class="box"><h4>На что опереться</h4><p>{lean_p}</p></div></div>
-      <div class="box"><h4>Приоритет по сегментам</h4><p>{prio_p}</p></div>
+        <div class="box cream"><h4>Где бренд пока не появляется</h4><p>{loss_p}</p></div>
+        <div class="box"><h4>{lean_h}</h4><p>{lean_p}</p></div></div>
+      <div class="box"><h4>О приоритете групп</h4><p>{prio_p}</p></div>
       {footer(d)}</div>'''
 
 def p_examples(d):
     cards=""
     for ex in d['examples']:
         tag={'yes':('tag-yes','Бренд появился'),'no':('tag-no','Бренда нет'),'mid':('tag-mid','В одном из двух')}[ex['kind']]
-        named=", ".join(ex['named']) if ex['named'] else "не называл конкретные компании"
+        if ex['named']:
+            named_line=f"<b>{esc(ex['engine'])}:</b> назвал {esc(', '.join(ex['named']))}"
+        else:
+            named_line=f"<b>{esc(ex['engine'])}:</b> дал общий ответ и не рекомендовал конкретные компании"
         cards+=f'''<div class="ex"><span class="tag {tag[0]}">{tag[1]}</span>
           <div class="q">{esc(ex['query'])}</div>
-          <div class="r"><b>{esc(ex['engine'])} назвал:</b> {esc(named)}<br>
-          <b>«{esc(d['brand_short'])}»:</b> {esc(ex['result'])}<br>
+          <div class="r">{named_line}<br>
+          <b>{esc(d['brand_short'])}:</b> {esc(ex['result'])}<br>
           <b>Почему:</b> {esc(ex['why'])}</div></div>'''
     n_ex=len(d['examples'])
     intro=("Пример ответа из проверки: кого называет нейросеть и появился ли ваш бренд." if n_ex==1
-           else "Несколько ответов из проверки: кого называет нейросеть, появился ли ваш бренд и какая возможная причина.")
+           else "Несколько ответов из проверки: кого называет нейросеть, появился ли ваш бренд и что с этим делать.")
     if d.get('zero'):
-        takeaway="Бренд не появился ни в одном из примеров: на эти запросы нейросеть называет другие компании или общие варианты. Чтобы попасть в ответ, нужны материалы и упоминания именно по этим запросам."
+        takeaway=("Нейросеть дала общий ответ без названий компаний. Это может значить, что вопрос сформулирован широко или что в доступных "
+                  "источниках мало информации о конкретных подрядчиках. Чтобы проверить, стоит посмотреть результаты по более точным вопросам и релевантным страницам сайта.")
     else:
-        takeaway="Повторяемые упоминания обнаружены по части запросов. По остальным бренд не появился; точные причины требуют отдельного анализа страниц сайта, внешних публикаций и источников, использованных нейросетью."
+        takeaway=("Повторяемые упоминания есть по части вопросов. По остальным бренд не появился; точную причину по одному ответу определить нельзя — "
+                  "нужен разбор страниц сайта и внешних источников по этой теме.")
     return f'''<div class="page"><h2><span class="num">05</span>Примеры реальных ответов нейросетей</h2>
       <div class="sec-intro">{intro}</div>
       {cards}
       <div class="box cream"><h4>Что показывают примеры</h4><p>{takeaway}</p></div>
-      {'<div class="box"><h4>Конкуренты</h4><p>В ответах не удалось надёжно определить конкретные компании, которых нейросети рекомендуют вместо бренда: по этим запросам они дают в основном общие советы и категории. Поэтому раздел «Кого называют вместо вас» в этот отчёт не вошёл.</p></div>' if not d.get('competitors') else ''}
-      <div class="note">Приведены короткие фрагменты ответов на дату проверки. Причины отсутствия бренда указаны как возможные, а не доказанные.</div>
+      <div class="box"><h4>Что проверить</h4><p>Есть ли на сайте отдельная страница, которая прямо отвечает на такой вопрос — с составом работ, типами объектов, географией, сроками и примерами проектов. И упоминается ли компания по этой теме на внешних площадках.</p></div>
+      <div class="note">Приведены короткие фрагменты ответов на дату проверки. По одному ответу причина указана как возможная, а не доказанная.</div>
       {footer(d)}</div>'''
 
 def _gap_phrase(gap):
@@ -438,33 +473,123 @@ def _site_evidence(d):
     pages_html=(f'<div class="note" style="margin-top:2mm">Просмотренные страницы (выборка): {esc(", ".join(pages[:12]))}</div>') if pages else ""
     return f'<div class="box"><h4>Проверка сайта (факты автопроверки)</h4><p>{" · ".join(esc(p) for p in parts)}</p>{pages_html}</div>'
 
+def _site_facts_plain(d):
+    """Факты автопроверки простым языком, со страховкой «система определила как»."""
+    s=d.get('site_info') or {}
+    if not s.get('ok'):
+        if s and s.get('host'):
+            return "Сайт не удалось открыть автоматически для проверки. Стоит проверить адрес и доступность для поисковых роботов."
+        return "Автоматическая проверка сайта в этот раз не проводилась."
+    total=s.get('sitemap_urls') or 0
+    svc=s.get('service_pages',0); case=s.get('case_pages',0)
+    bits=[]
+    if total: bits.append(f"Автоматическая проверка нашла на сайте {total} {plural(total,'страницу','страницы','страниц')}.")
+    else: bits.append("Автоматическая проверка прошла по доступным страницам сайта.")
+    seg=[]
+    if svc: seg.append(f"{svc} {plural(svc,'страницу','страницы','страниц')} система определила как страницы услуг")
+    if case: seg.append(f"{case} — как проекты или кейсы")
+    if seg: bits.append(("Из них " if total else "") + ", ".join(seg) + ".")
+    types={str(x).lower() for x in (s.get('schema') or [])}
+    has_org=bool(types & {"organization","localbusiness","corporation","professionalservice","store","hotel","lodgingbusiness"})
+    has_svc="service" in types
+    if has_org and has_svc: bits.append("На сайте есть техническая разметка с данными о компании и услугах.")
+    elif has_org: bits.append("На сайте также есть базовая техническая разметка с информацией о компании.")
+    else: bits.append("Отдельной технической разметки с данными о компании автопроверка не нашла.")
+    if s.get('robots_blocks_ai'):
+        bits.append("Часть AI-роботов закрыта в robots.txt — это стоит поправить в первую очередь.")
+    return " ".join(bits)
+
+def _biz_meaning(d):
+    s=d.get('site_info') or {}
+    rich = s.get('ok') and (s.get('service_pages') or s.get('case_pages') or (s.get('sitemap_urls',0) or 0)>=20)
+    if rich:
+        return ("На сайте уже достаточно материалов — создавать всё с нуля не нужно. Главная задача в том, чтобы связать "
+                "существующие услуги, товары и проекты с вопросами, которые клиенты задают нейросетям, и описать их понятным языком с фактами.")
+    return ("Пока на сайте мало отдельных страниц под услуги и проекты. Их стоит создать и наполнить конкретными фактами, "
+            "чтобы нейросети могли использовать сайт как источник и называть компанию в ответах.")
+
 def p_works(d):
-    pos="".join(f'<li><span class="m mk-y">✓</span><span>{esc(x)}</span></li>' for x in d['positives'])
-    blk="".join(f'<li><span class="m mk-n">!</span><span>{esc(x)}</span></li>' for x in d['blockers'])
-    return f'''<div class="page"><h2><span class="num">08</span>Что уже работает и что мешает росту</h2>
-      <div class="sec-intro">На что можно опереться и что ограничивает видимость прямо сейчас.</div>
-      {_site_evidence(d)}
-      <div class="box"><h4 style="color:{GREEN}">Что уже помогает вашей видимости</h4><ul class="ck">{pos}</ul></div>
-      <div class="box"><h4 style="color:{RED}">Что мешает росту</h4><ul class="ck">{blk}</ul></div>
+    pos="".join(f'<li><span class="m mk-y">✓</span><span>{esc(x)}</span></li>' for x in d['positives'][:4])
+    blk="".join(f'<li><span class="m mk-n">!</span><span>{esc(x)}</span></li>' for x in d['blockers'][:4])
+    return f'''<div class="page"><h2><span class="num">08</span>Что показала проверка сайта</h2>
+      <div class="sec-intro">Что автоматическая проверка нашла на сайте, что это значит для бизнеса и что передать техническому специалисту.</div>
+      <div class="box"><h4>Что обнаружила автоматическая проверка</h4><p>{esc(_site_facts_plain(d))}</p></div>
+      <div class="box cream"><h4>Что это значит для бизнеса</h4><p>{esc(_biz_meaning(d))}</p></div>
+      <div class="two">
+        <div class="box"><h4 style="color:{GREEN}">Что уже помогает</h4><ul class="ck">{pos}</ul></div>
+        <div class="box"><h4 style="color:{RED}">Что мешает росту</h4><ul class="ck">{blk}</ul></div>
+      </div>
+      <div class="plashka"><b>Технические пункты</b> передайте администратору сайта, разработчику или SEO-специалисту — они собраны в чек-лист дальше в отчёте.</div>
       {footer(d)}</div>'''
 
-def p_reco(d, items, n0, title_extra=""):
-    cards=""
-    for i,r in enumerate(items, n0):
-        steps="".join(f'<li>{esc(s)}</li>' for s in r['steps'])
-        cards+=f'''<div class="rcard"><div class="rcard-h"><span class="rcard-n">{i}</span><h3>{esc(r['title'])}</h3></div>
-          <div class="rlabel">Почему это важно</div><p>{esc(r['why'])}</p>
-          <div class="rlabel">Что сделать</div><ul class="rsteps">{steps}</ul>
-          {metrics(r['effect'],r['difficulty'],r['term'])}</div>'''
-    head=f'<h2><span class="num">09</span>Что усиливает AI-видимость{title_extra}</h2>' if n0==1 else f'<h2>Что усиливает AI-видимость{title_extra}</h2>'
-    intro='<div class="sec-intro">Базовые шаги, которые повышают шанс попасть в ответы нейросетей. Это общие рекомендации по нише, а не выводы о конкретных страницах вашего сайта: точечный разбор сайта добавим отдельно.</div>' if n0==1 else ''
-    return f'''<div class="page">{head}{intro}{cards}{footer(d)}</div>'''
+_KTAG={'content':('ktag-content','Контент'),'tech':('ktag-tech','Техническая задача'),'promo':('ktag-promo','Продвижение')}
+def _ktag(kind):
+    c,l=_KTAG.get(kind,('ktag-content','Рекомендация')); return f'<span class="ktag {c}">{l}</span>'
+
+def _rec_card(r, i):
+    p=[f'<div class="rcard-h"><span class="rcard-n">{i}</span><h3>{esc(r["title"])}</h3>{_ktag(r.get("kind","content"))}</div>']
+    if r.get("plain"):
+        p.append(f'<div class="rlabel">Что это означает</div><p>{esc(r["plain"])}</p>')
+    if r.get("steps"):
+        steps="".join(f'<li>{esc(s)}</li>' for s in r["steps"])
+        p.append(f'<div class="rlabel">Что сделать</div><ul class="rsteps">{steps}</ul>')
+    if r.get("example"):
+        p.append(f'<div class="rlabel">Пример</div><div class="rex">{esc(r["example"])}</div>')
+    if r.get("handoff_note"):
+        p.append(f'<div class="plashka"><b>Передайте специалисту.</b> {esc(r["handoff_note"])}</div>')
+    if r.get("checklist"):
+        items="".join(f'<li>{esc(c)}</li>' for c in r["checklist"])
+        p.append(f'<div class="rlabel">Чек-лист для специалиста</div><ul class="chk2">{items}</ul>')
+    if r.get("glossary"):
+        gl="".join(f'<p><b>{esc(t)}</b> — {esc(dfn)}</p>' for t,dfn in r["glossary"])
+        p.append(f'<div class="gloss"><div class="gh">Простыми словами</div>{gl}</div>')
+    p.append(f'''<div class="rmeta">
+       <div><b>Приоритет</b><span>{esc(r.get("priority","—"))}</span></div>
+       <div><b>Срок</b><span>{esc(r.get("term","—"))}</span></div>
+       <div style="flex:1"><b>Кому передать</b><span style="font-weight:600;font-size:9pt;color:{MUTED}">{esc(r.get("handoff",""))}</span></div></div>''')
+    return '<div class="rcard">'+"".join(p)+'</div>'
+
+def _rec_chunks(recs):
+    """Технический чек-лист — отдельной страницей (длинный), остальные карточки по 2 на страницу."""
+    chunks=[]; buf=[]
+    for r in recs:
+        if r.get("kind")=="tech":
+            if buf: chunks.append(buf); buf=[]
+            chunks.append([r])
+        else:
+            buf.append(r)
+            if len(buf)==2: chunks.append(buf); buf=[]
+    if buf: chunks.append(buf)
+    return chunks
+
+def p_reco_page(d, items, first):
+    cards="".join(_rec_card(r,i) for i,r in enumerate(items, d['_rec_n0']))
+    d['_rec_n0']+=len(items)
+    if first:
+        head='<h2><span class="num">09</span>Что сделать, чтобы бренд появлялся в ответах</h2>'
+        intro='<div class="sec-intro">Каждая задача расписана так: что это значит простыми словами, что конкретно сделать, пример и кому передать. Тип задачи помечен ярлыком: контент, продвижение или техническая работа.</div>'
+    else:
+        head='<h2>Что сделать, чтобы бренд появлялся в ответах · продолжение</h2>'; intro=''
+    return f'<div class="page">{head}{intro}{cards}{footer(d)}</div>'
+
+def _week_html(w):
+    if w.get("groups"):
+        roles="".join(f'<div class="prole"><div class="pr">{esc(g["role"])}</div><ul>{"".join(f"<li>{esc(i)}</li>" for i in g["items"])}</ul></div>' for g in w["groups"])
+    else:
+        roles=f'<ul>{"".join(f"<li>{esc(i)}</li>" for i in w.get("items",[]))}</ul>'
+    return f'<div class="week"><div class="wh">{esc(w["week"])}</div>{roles}</div>'
 
 def p_plan(d):
-    weeks="".join(f'<div class="week"><div class="wh">{esc(w["week"])}</div><ul>{"".join(f"<li>{esc(i)}</li>" for i in w["items"])}</ul></div>' for w in d['plan30'])
+    first="".join(_week_html(w) for w in d['plan30'][:2])
     return f'''<div class="page"><h2><span class="num">10</span>Что делать по неделям</h2>
-      <div class="sec-intro">Последовательность действий на месяц. В конце повторный замер, чтобы увидеть рост в цифрах.</div>
-      <div class="card">{weeks}</div>
+      <div class="sec-intro">Последовательность действий на месяц, с ответственными за каждый блок. В конце — повторный замер, чтобы увидеть рост в цифрах.</div>
+      <div class="card">{first}</div>
+      {footer(d)}</div>'''
+
+def p_plan2(d):
+    rest="".join(_week_html(w) for w in d['plan30'][2:])
+    return f'''<div class="page"><h2>Что делать по неделям · продолжение</h2>
+      <div class="card">{rest}</div>
       <div class="box"><h4>Методология и ограничения</h4><p class="note" style="color:{MUTED}">{esc(d['method_note'])}</p></div>
       {footer(d)}</div>'''
 
@@ -496,7 +621,11 @@ def build(data, out):
     pages=[p_cover(d), p_summary(d), p_engines(d), p_matrix(d), p_groups(d), p_examples(d)]
     if d.get('competitors'):                  # блок конкурентов только если есть подтверждённые (>=2)
         pages.append(p_competitors(d))
-    pages += [p_works(d), p_reco(d, recs[:2], 1), p_reco(d, recs[2:], 3), p_plan(d), p_author(d)]
+    pages.append(p_works(d))
+    d['_rec_n0']=1                            # сквозная нумерация карточек рекомендаций
+    for idx,ch in enumerate(_rec_chunks(recs)):
+        pages.append(p_reco_page(d, ch, first=(idx==0)))
+    pages += [p_plan(d), p_plan2(d), p_author(d)]
     body="".join(pages)
     # секции перенумеровываются последовательно (часть страниц может быть скрыта)
     cnt=[0]

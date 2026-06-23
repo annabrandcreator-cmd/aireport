@@ -170,6 +170,22 @@ def deliver(o, pdf):
     return sent
 
 # ───────────────────────── подтверждение запросов ───────────────────
+def _review_text(prep, edited=False):
+    """Сообщение клиенту со списком запросов на подтверждение (и при правке — на повторное подтверждение)."""
+    qlist = "\n".join(f"{i}. {q['q']}" for i, q in enumerate(prep["queries"], 1))
+    head = ("Обновил список запросов. Проверьте ещё раз." if edited
+            else "Спасибо за оплату! Перед началом проверки подтвердите данные и выбранные запросы.")
+    return (f"{head}\n\n"
+            f"Бренд: {prep['brand']}\n"
+            f"Сфера деятельности: {prep['niche']}\n\n"
+            "Теперь проверьте запросы, по которым будет оцениваться видимость бренда. "
+            "Запросы — это формулировки, которые потенциальные клиенты могут вводить в ИИ-поиске, когда ищут компанию, услугу или подрядчика. "
+            "От выбранных запросов зависит содержание отчёта, поэтому важно, чтобы они отражали ваши основные услуги, целевых клиентов, географию работы и ценовой сегмент.\n\n"
+            f"Запросы для проверки:\n\n{qlist}\n\n"
+            "Проверка начнётся только после вашего подтверждения.\n"
+            "Если всё подходит, ответьте: ОК.\n"
+            "Чтобы изменить список, отправьте свои запросы — каждый с новой строки. Я заменю их и покажу обновлённый список перед запуском проверки.")
+
 def _do_review(oid):
     """Готовит запросы (есть LLM-вызовы, потому фоном) и отправляет клиенту на подтверждение."""
     with db() as c:
@@ -185,13 +201,7 @@ def _do_review(oid):
         c.execute("UPDATE orders SET prep=?, brand=?, brand_short=?, niche=? WHERE id=?",
                   (json.dumps(prep, ensure_ascii=False), prep["brand"], prep["brand_short"], prep["niche"], oid))
     if o["tg_chat_id"]:
-        qlist = "\n".join(f"{i}. {q['q']}" for i, q in enumerate(prep["queries"], 1))
-        tg_send_message(o["tg_chat_id"],
-            "Спасибо за оплату! Перед проверкой подтвердите запросы.\n\n"
-            f"Бренд: {prep['brand']}\nНиша: {prep['niche']}\n\n"
-            f"Проверим вашу видимость по этим запросам:\n\n{qlist}\n\n"
-            "Если всё подходит, ответьте: ОК.\n"
-            "Чтобы изменить, пришлите свой список запросов, каждый с новой строки. Я заменю набор и запущу проверку.")
+        tg_send_message(o["tg_chat_id"], _review_text(prep, edited=False))
 
 def maybe_start_review(oid):
     """После оплаты: готовим запросы и просим подтвердить. Защита от двойного старта."""
@@ -203,17 +213,26 @@ def maybe_start_review(oid):
     threading.Thread(target=_do_review, args=(oid,), daemon=True).start()
     return True
 
-def start_generation(oid, edited_queries=None):
-    """Запуск анализа по подтверждённому (или отредактированному) набору запросов."""
+def revise_queries(oid, edited):
+    """Клиент прислал свой список: заменяем запросы и показываем обновлённый список на повторное подтверждение (без запуска)."""
     with db() as c:
-        o = c.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
+        o = c.execute("SELECT prep, tg_chat_id FROM orders WHERE id=?", (oid,)).fetchone()
     if not o or not o["prep"]: return False
     prep = json.loads(o["prep"])
-    if edited_queries:
-        prep["queries"] = [{"q": q, "group": engine._classify_query(q)} for q in edited_queries]
+    prep["queries"] = [{"q": q, "group": engine._classify_query(q)} for q in edited]
+    with db() as c:                                   # статус остаётся reviewing — ждём «ОК»
+        c.execute("UPDATE orders SET prep=? WHERE id=?", (json.dumps(prep, ensure_ascii=False), oid))
+    if o["tg_chat_id"]:
+        tg_send_message(o["tg_chat_id"], _review_text(prep, edited=True))
+    return True
+
+def start_generation(oid):
+    """Запуск анализа по подтверждённому набору запросов (prep уже сохранён)."""
     with db() as c:
-        c.execute("UPDATE orders SET prep=?, status='processing' WHERE id=?",
-                  (json.dumps(prep, ensure_ascii=False), oid))
+        o = c.execute("SELECT prep, tg_chat_id FROM orders WHERE id=?", (oid,)).fetchone()
+    if not o or not o["prep"]: return False
+    with db() as c:
+        c.execute("UPDATE orders SET status='processing' WHERE id=?", (oid,))
     if o["tg_chat_id"]:
         tg_send_message(o["tg_chat_id"], "Принято! Запускаю проверку по нейросетям, пришлю готовый отчёт сюда через несколько минут.")
     threading.Thread(target=generate, args=(oid,), daemon=True).start()
@@ -501,7 +520,7 @@ def tg_webhook():
                         qs.append(l)
                 qs = qs[:12]
                 if len(qs) >= 3:
-                    start_generation(o["id"], edited_queries=qs)
+                    revise_queries(o["id"], qs)      # заменяем и показываем обновлённый список на повторное «ОК»
                 else:
                     tg_send_message(chat, "Чтобы заменить запросы, пришлите их списком — каждый с новой строки, минимум 3. Или ответьте ОК, чтобы запустить по предложенному набору.")
         return "OK"

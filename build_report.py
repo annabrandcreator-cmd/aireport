@@ -207,7 +207,7 @@ table.mt{{width:100%;border-collapse:collapse;margin-top:4mm}}
 table.mt th{{font-size:7.5pt;text-transform:uppercase;letter-spacing:.4px;color:{FAINT};font-weight:600;text-align:left;padding:4px 6px;border-bottom:1px solid {BORDER}}}
 table.mt td{{font-size:9.5pt;font-weight:700;color:{INK};padding:5px 6px}}
 /* списки */
-.ck{{list-style:none}} .ck li{{font-size:10pt;color:{INK};line-height:1.5;padding:3.5mm 0;border-bottom:1px solid {BORDER};display:flex;gap:9px}}
+.ck{{list-style:none}} .ck li{{font-size:9.5pt;color:{INK};line-height:1.4;padding:2.2mm 0;border-bottom:1px solid {BORDER};display:flex;gap:9px}}
 .ck li:last-child{{border-bottom:none}} .ck .m{{flex:none;font-weight:700}}
 .mk-y{{color:{GREEN}}} .mk-n{{color:{RED}}} .mk-w{{color:{AMBER}}}
 /* недели */

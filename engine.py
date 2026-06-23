@@ -789,6 +789,12 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
     comp_names = [n for n, _ in comp_conf]
     examples = _pick_examples(queries, brand_short, best, comp_names)
     comp_objs = _competitor_objs(comp_conf, total)
+    if comp_objs and os.environ.get("TEST_MODE") != "1":     # проверенные ссылки на сайты конкурентов
+        try:
+            sites = _competitor_sites([c["name"] for c in comp_objs])
+            for c in comp_objs: c["site"] = sites.get(c["name"], "")
+        except Exception as e:
+            print("[comp-sites]", e, flush=True)
     data = {
         "brand": brand, "brand_short": brand_short, "site": _host(site),
         "niche": niche, "city": city, "date": datetime.datetime.now().strftime("%d.%m.%Y"),
@@ -843,17 +849,19 @@ def _pick_examples(queries, brand_short, best, competitors):
     strong_cell = next((q for q in queries if any(v==2 for v in q["hits"].values())), None)
     zero_cell   = next((q for q in queries if all(v==0 for v in q["hits"].values())), None)
     mid_cell    = next((q for q in queries if any(v==1 for v in q["hits"].values())), None)
+    # named держим только по проверяемым данным: появление БРЕНДА известно из матрицы;
+    # привязывать конкретных конкурентов к конкретному запросу нельзя (их частота — агрегат по всем ответам).
     if strong_cell:
         ex.append({"kind":"yes","query":strong_cell["q"],"engine":best["name"],
-                   "named":(competitors[:1]+[brand_short]),"result":"бренд появился в обоих ответах (2 из 2)",
+                   "named":[brand_short],"result":"бренд появился в обоих ответах (2 из 2)",
                    "why":"возможное объяснение: в доступных источниках оказалось достаточно релевантной информации, чтобы нейросеть включила бренд. По одному результату точную причину установить нельзя."})
     if zero_cell:
         ex.append({"kind":"no","query":zero_cell["q"],"engine":best["name"],
-                   "named":competitors[:3],"result":"бренд не появился (0 из 2)",
+                   "named":[],"result":"бренд не появился (0 из 2)",
                    "why":"по одному ответу причину точно не определить. Стоит проверить, есть ли на сайте страница, которая прямо отвечает на этот вопрос, и упоминания по теме на внешних площадках."})
     if mid_cell and mid_cell not in (strong_cell, zero_cell):
         ex.append({"kind":"mid","query":mid_cell["q"],"engine":best["name"],
-                   "named":competitors[:2],"result":"бренд появился в одной из двух проверок",
+                   "named":[brand_short],"result":"бренд появился в одной из двух проверок",
                    "why":"возможная причина: упоминаний мало и они не закреплены по этому запросу."})
     return ex[:3]
 
@@ -861,9 +869,49 @@ def _competitor_objs(comp_conf, total):
     """Реальная частота: в скольких из total ответов нейросети назвали компанию."""
     objs = []
     for name, count in comp_conf:
-        objs.append({"name":name, "rate":round(count/total*100), "count":count, "total":total,
+        objs.append({"name":name, "rate":round(count/total*100), "count":count, "total":total, "site":"",
                      "focus":"коммерческие запросы ниши", "sources":"ответы нейросетей"})
     return objs
+
+def _verify_site(name, domain):
+    """Возвращает https://домен, только если страница грузится и реально упоминает компанию. Иначе '' (без риска ошибочной ссылки)."""
+    domain = re.sub(r"^https?://", "", (domain or "").strip().strip("/")).split("/")[0].strip()
+    if not re.match(r"^[a-z0-9.-]+\.[a-z]{2,6}$", domain, re.I):
+        return ""
+    try:
+        _, body = _fetch_text("https://" + domain, timeout=5)
+    except Exception:
+        return ""
+    low = (body or "").lower()
+    toks = [t for t in re.split(r"[\s\-_]+", name.lower()) if len(t) >= 4]
+    if toks and any(t in low for t in toks):       # имя компании встречается на странице -> ссылка достоверна
+        return "https://" + domain
+    return ""
+
+def _competitor_sites(names):
+    """Спрашиваем у нейросети домены конкурентов и проверяем каждый. {имя: https://сайт} только для подтверждённых."""
+    ask = _first_keyed_adapter()
+    if not ask or not names:
+        return {}
+    prompt = ("Для каждой компании из списка укажи её официальный сайт (домен), если он тебе достоверно известен. "
+              "Формат строго построчно: «Компания | домен» (например «Рога и Копыта | rogakopyta.ru»). "
+              "Если домен неизвестен — «Компания | -». НЕ выдумывай домены. Список:\n" + "\n".join(names))
+    try:
+        raw = ask(prompt)
+    except Exception:
+        return {}
+    out = {}
+    for ln in (raw or "").splitlines():
+        if "|" not in ln:
+            continue
+        nm, dom = ln.split("|", 1)
+        nm = nm.strip().strip("«»\"").strip(); dom = dom.strip()
+        match = next((n for n in names if n.lower() == nm.lower() or n.lower() in nm.lower() or nm.lower() in n.lower()), None)
+        if match and dom and dom not in ("-", "—", "?"):
+            site = _verify_site(match, dom)
+            if site:
+                out[match] = site
+    return out
 
 def _positives(rates, best, zero, site_info=None, rep_groups=None):
     pos = []
@@ -940,6 +988,8 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
     ok = s.get("ok"); sm = _schema_summary(s.get("schema")) if ok else {}
     svc_seen = bool(s.get("service_pages")); case_seen = bool(s.get("case_pages"))
     blocks_ai = ok and s.get("robots_blocks_ai")
+    types = {str(x).lower() for x in (s.get("schema") or [])}
+    has_products = bool(types & {"product", "offer", "aggregateoffer", "store", "onlinestore", "productgroup"})  # есть ли товары/магазин
     recs = []
 
     # 1. Контент: понятные страницы услуг
@@ -959,9 +1009,10 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
                   "В заголовок добавить конкретную услугу и тип клиента",
                   "В первом абзаце указать состав работ, без общих слов",
                   "Добавить географию работы, сроки и масштаб",
-                  "Поставить ссылки на подходящие проекты и категории продукции"],
+                  ("Поставить ссылки на подходящие проекты и категории продукции" if has_products
+                   else "Поставить ссылки на подходящие проекты и смежные услуги")],
         "example": ("В заголовке страницы услуги должно быть видно три вещи: что за услуга, для кого и в каком формате. "
-                    "Было: «Доставка и сборка». Стало: «Доставка и сборка мебели для офисов под ключ». "
+                    "Например, вместо короткого «Название услуги» — «Название услуги под ключ для бизнеса» с уточнением, кому и как вы помогаете. "
                     "Текст должен звучать естественно и содержать факты, а не повторять поисковую фразу дословно."),
         "handoff": "Маркетологу или редактору — подготовить тексты. SEO-специалисту — сверить заголовки с целевыми вопросами. Администратору сайта — разместить.",
         "priority": "Высокий", "term": "1–2 недели"})
@@ -975,14 +1026,13 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
         "kind": "content",
         "title": "Дополнить проекты фактами, которые нейросеть сможет использовать",
         "plain": proj_plain,
-        "steps": ["На каждой странице проекта указать тип и название объекта, город",
-                  "Добавить объём: площадь, количество единиц или рабочих мест",
-                  "Описать задачу заказчика и состав работ компании",
+        "steps": ["На каждой странице проекта указать тип клиента и задачу",
+                  "Добавить объём работы в понятных цифрах (количество, площадь, длительность)",
+                  "Описать, что именно сделала компания и какие этапы прошли",
                   "Указать сроки реализации и нестандартные решения",
                   "Добавить измеримый результат, если он есть"],
-        "example": ("Структура кейса: «Задача: оснастить офис на 120 рабочих мест. Что сделано: разработали планировку, "
-                    "произвели мебель, организовали доставку и монтаж. Срок: 10 недель. Результат: помещение сдано под ключ "
-                    "в рамках одного договора». Заголовок лучше делать говорящим, а не просто «Объект №3»."),
+        "example": ("Структура кейса: «Задача клиента. Что сделали: ключевые этапы работы. Срок. Результат: что клиент получил». "
+                    "Заголовок лучше делать говорящим — с типом клиента и сутью проекта, а не просто «Объект №3»."),
         "handoff": "Менеджеру проекта — собрать факты. Маркетологу или редактору — оформить текст. Администратору сайта — разместить материал и ссылки.",
         "priority": "Высокий", "term": "2–3 недели"})
 
@@ -998,8 +1048,8 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
                   "Размещать проекты в отраслевых, деловых и профильных медиа",
                   "Попасть в тематические подборки подрядчиков ниши"],
         "example": ("Полезный отзыв вместо «Всё понравилось, рекомендуем»: "
-                    f"«{b} спроектировал и изготовил мебель для офиса на 80 рабочих мест, организовал доставку и монтаж, "
-                    "проект сдан в согласованные сроки». Конкретика — то, что нейросеть может процитировать."),
+                    f"«{b} выполнил конкретную задачу для нашей компании, уложился в срок, результат — измеримая польза». "
+                    "Чем конкретнее факты в отзыве, тем охотнее нейросеть их процитирует."),
         "handoff": "Маркетологу, PR-специалисту или подрядчику по продвижению.",
         "priority": "Высокий", "term": "3–4 недели"})
 
@@ -1010,25 +1060,28 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
                       "Остальное — проверка технических пометок в коде, по которым поисковые системы понимают содержание страниц.")
         tech_prio = "Высокий"
     elif ok and sm.get("org"):
-        tech_plain = (f"Базовая техническая разметка с данными о компании на сайте есть. "
-                      "Но страницы услуг и товаров размечены не полностью, поэтому поисковым системам и нейросетям сложнее точно "
-                      "определить, какие услуги предлагает компания. Это проверяет и дополняет специалист.")
+        tech_plain = ("Базовая техническая разметка с данными о компании на сайте есть. "
+                      "Но страницы услуг" + (" и товаров" if has_products else "") + " размечены не полностью, поэтому поисковым системам и нейросетям сложнее точно "
+                      "определить, что именно предлагает компания. Это проверяет и дополняет специалист.")
         tech_prio = "Средний"
     else:
         tech_plain = ("В коде сайта есть специальные пометки, по которым поисковые системы и нейросети понимают, где данные о "
-                      "компании, услугах и товарах. Базовой разметки о компании автопроверка не увидела — её стоит добавить и проверить.")
+                      "компании и услугах" + (" и товарах" if has_products else "") + ". Базовой разметки о компании автопроверка не увидела — её стоит добавить и проверить.")
         tech_prio = "Средний"
     checklist = [
         "Проверить корректность разметки Organization: название, сайт, логотип, контакты, ссылки на профили",
-        "Добавить разметку Service на страницы реальных услуг",
-        "Добавить Product и Offer на страницы товаров и предложений, где это соответствует содержанию",
+        "Добавить разметку Service на страницы реальных услуг"]
+    if has_products:
+        checklist.append("Добавить Product и Offer на страницы товаров и предложений, где это соответствует содержанию")
+    checklist += [
         "FAQPage использовать только там, где на странице реально есть видимый блок вопросов и ответов",
         "Проверить, что ключевые страницы включены в sitemap",
         "Проверить, что ключевые страницы отдают код 200 и не закрыты от индексации",
         "Проверить отсутствие noindex на важных страницах",
-        ("Открыть в robots.txt доступ закрытым AI-роботам: " + ", ".join(s["robots_blocks_ai"])) if blocks_ai
-            else "Проверить robots.txt: важные разделы и AI-роботы не должны быть закрыты",
-        "Проверить внутренние ссылки между услугами, товарами и проектами",
+        (("Открыть в robots.txt доступ закрытым AI-роботам: " + ", ".join(s["robots_blocks_ai"])) if blocks_ai
+            else "Проверить robots.txt: важные разделы и AI-роботы не должны быть закрыты"),
+        ("Проверить внутренние ссылки между услугами, товарами и проектами" if has_products
+         else "Проверить внутренние ссылки между услугами и проектами"),
     ]
     recs.append({
         "kind": "tech",
@@ -1036,7 +1089,7 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
         "plain": tech_plain,
         "handoff_note": "Этот пункт не нужно выполнять самостоятельно. Передайте администратору сайта, разработчику или SEO-специалисту.",
         "checklist": checklist,
-        "glossary": _GLOSSARY,
+        "glossary": [g for g in _GLOSSARY if has_products or not g[0].startswith("Product")],
         "steps": [],
         "example": "",
         "handoff": "Администратору сайта, разработчику или SEO-специалисту.",

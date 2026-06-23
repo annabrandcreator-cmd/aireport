@@ -6,6 +6,7 @@
 Запуск демо:  python3 build_report.py
 """
 import os, re, json, math, datetime, html
+from urllib.parse import quote
 
 def plural(n, one, few, many):
     n = abs(int(n)); d = n % 10; dd = n % 100
@@ -375,24 +376,30 @@ def p_groups(d):
       {footer(d)}</div>'''
 
 def p_examples(d):
+    has_comp=bool(d.get('competitors')); b=esc(d['brand_short'])
     cards=""
     for ex in d['examples']:
         tag={'yes':('tag-yes','Бренд появился'),'no':('tag-no','Бренда нет'),'mid':('tag-mid','В одном из двух')}[ex['kind']]
-        if ex['named']:
-            named_line=f"<b>{esc(ex['engine'])}:</b> назвал {esc(', '.join(ex['named']))}"
+        if ex['kind']=='no':
+            eng_line=(f"<b>{esc(ex['engine'])}:</b> называет другие компании (см. раздел «Какие компании ещё встречаются ниже»), вашего бренда в ответе нет"
+                      if has_comp else
+                      f"<b>{esc(ex['engine'])}:</b> дал общий ответ, конкретные компании не назвал")
         else:
-            named_line=f"<b>{esc(ex['engine'])}:</b> дал общий ответ и не рекомендовал конкретные компании"
+            eng_line=f"<b>{esc(ex['engine'])}:</b> назвал ваш бренд в ответе"
         cards+=f'''<div class="ex"><span class="tag {tag[0]}">{tag[1]}</span>
           <div class="q">{esc(ex['query'])}</div>
-          <div class="r">{named_line}<br>
-          <b>{esc(d['brand_short'])}:</b> {esc(ex['result'])}<br>
+          <div class="r">{eng_line}<br>
+          <b>{b}:</b> {esc(ex['result'])}<br>
           <b>Почему:</b> {esc(ex['why'])}</div></div>'''
     n_ex=len(d['examples'])
     intro=("Пример ответа из проверки: кого называет нейросеть и появился ли ваш бренд." if n_ex==1
            else "Несколько ответов из проверки: кого называет нейросеть, появился ли ваш бренд и что с этим делать.")
     if d.get('zero'):
-        takeaway=("Нейросеть дала общий ответ без названий компаний. Это может значить, что вопрос сформулирован широко или что в доступных "
-                  "источниках мало информации о конкретных подрядчиках. Чтобы проверить, стоит посмотреть результаты по более точным вопросам и релевантным страницам сайта.")
+        takeaway=(("По этим вопросам нейросети уже называют другие компании (они в разделе ниже), но не ваш бренд. "
+                   "Это и есть зона роста: появиться там, где сейчас показывают конкурентов. Что для этого усилить — в рекомендациях.")
+                  if has_comp else
+                  ("Нейросети давали общий ответ без конкретных компаний. Возможно, вопрос широкий или в доступных источниках мало данных о подрядчиках. "
+                   "Стоит посмотреть результаты по более точным вопросам и релевантным страницам сайта."))
     else:
         takeaway=("Повторяемые упоминания есть по части вопросов. По остальным бренд не появился; точную причину по одному ответу определить нельзя — "
                   "нужен разбор страниц сайта и внешних источников по этой теме.")
@@ -409,6 +416,14 @@ def _gap_phrase(gap):
     if gap < 0: return f"на {abs(gap)} п.п. ниже вас"
     return "наравне с вами"
 
+def _comp_link(c):
+    """Имя конкурента-ссылка: проверенный сайт, иначе поиск по названию (без риска ошибочного домена)."""
+    name=esc(c['name'])
+    if c.get('site'):
+        return f'<a href="{esc(c["site"])}" style="color:{ACCENTD};text-decoration:none;font-weight:700">{name} ↗</a>'
+    return (f'<a href="https://yandex.ru/search/?text={quote(c["name"])}" style="color:{ACCENTD};text-decoration:none;font-weight:700">'
+            f'{name}<span style="font-weight:500;font-size:8.5pt;color:{FAINT}"> · найти в поиске ↗</span></a>')
+
 def p_competitors(d):
     N=d['total_answers']; bc=d.get('total_mentions',0); ov=d['overall']
     rows=[(d['brand_short'], ov, bc, True)] + [(c['name'], c['rate'], c['count'], False) for c in d['competitors']]
@@ -417,7 +432,7 @@ def p_competitors(d):
     for name,rate,cnt,is_you in rows:
         sub=("ваша текущая видимость" if is_you else f"{_gap_phrase(rate-ov)} · упомянут в {cnt} из {N} ответов")
         bars+=bar((esc(name)+" (вы)") if is_you else name, rate, sub, wl="150px", color=(ACCENTD if is_you else FAINT), you=is_you)
-    ev="".join(f'''<div class="ex"><div class="q">{esc(c['name'])} · {c['rate']}%</div>
+    ev="".join(f'''<div class="ex"><div class="q">{_comp_link(c)} · {c['rate']}%</div>
           <div class="r">Упомянут в <b>{c['count']}</b> из <b>{c['total']}</b> ответов нейросетей по вашим запросам.</div></div>''' for c in d['competitors'])
     names_join=_join([c['name'] for c in d['competitors']])
     max_c=max((c['rate'] for c in d['competitors']), default=0)
@@ -426,9 +441,12 @@ def p_competitors(d):
         if d.get('mentioned_engines'): lead+=f", но только в {_join(d['mentioned_engines'])}"
         takeaway=f"Помимо «{esc(d['brand_short'])}», в ответах встречались {names_join}. {lead}. Это хороший знак: бренд уже попадает в выдачу."
     else:
-        takeaway=f"Помимо «{esc(d['brand_short'])}», в ответах встречались {names_join}. У части из них упоминаний больше. Как правило, помогает количество согласованных упоминаний в открытых источниках: сайт, отзывы, карты, подборки."
+        who="ваш бренд пока нет" if ov==0 else "у части из них упоминаний больше"
+        takeaway=(f"По вашим запросам нейросети называют {names_join}, а {who}. "
+                  "Чаще всего дело в количестве согласованных упоминаний во внешних источниках (карты, отзывы, каталоги, публикации) и в понятных страницах под запросы. "
+                  "С чего начать, чтобы появляться рядом с ними, — в рекомендациях дальше в отчёте.")
     return f'''<div class="page"><h2><span class="num">06</span>Какие компании ещё встречаются в ответах</h2>
-      <div class="sec-intro">Компании, которые нейросети называли в ответах на ваши запросы. Они могут упоминаться и вместе с вами. Процент считается так же, как ваш: доля из {N} ответов, где встретилось название.</div>
+      <div class="sec-intro">Компании, которые нейросети называли в ответах на ваши запросы. Рядом с каждой — ссылка, чтобы открыть и посмотреть компанию. Процент считается так же, как ваш: доля из {N} ответов, где встретилось название.</div>
       <div class="card">{bars}</div>
       <div style="margin-top:4mm">{ev}</div>
       <div class="box cream"><h4>Что это значит</h4><p>{takeaway}</p></div>

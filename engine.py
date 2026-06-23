@@ -412,6 +412,13 @@ def refine_niche(niche, site_info):
 
 # гео-основы и платформы/слова, которые НИКОГДА не конкуренты
 _GEO_STEMS = ("росси", "москв", "петербург", "санкт", "рунет", "рф")
+# мировые гиганты: для малого/среднего бизнеса это не релевантные конкуренты, а просто упоминания в ответе
+_GLOBAL_BRANDS = {"google","microsoft","amazon","apple","meta","facebook","instagram","salesforce","hubspot","sap",
+                  "oracle","ibm","adobe","cisco","intel","samsung","sony","dell","nvidia","accenture","deloitte",
+                  "mckinsey","pwc","kpmg","ernst","bcg","nike","adidas","coca-cola","pepsi","netflix","spotify",
+                  "slack","zoom","notion","figma","canva","shopify","wix","wordpress","atlassian","jira","asana",
+                  "airbnb","uber","tesla","openai","anthropic","mailchimp","zendesk","workday","servicenow",
+                  "tableau","aws","azure","alibaba","tencent","interbrand","landor","pentagram","ogilvy","wpp"}
 _PLATFORMS = {"яндекс", "яндекса", "google", "гугл", "chatgpt", "openai", "gigachat", "гигачат",
               "сбер", "сбера", "deepseek", "perplexity", "gemini", "нейро", "ai", "ии"}
 _COMMON = {"также","кроме","среди","лучшие","лучший","топ","это","этот","при","для","как","или","если","итак",
@@ -441,6 +448,7 @@ def _good_name(n):
     words = low.split()
     if any(w.startswith(_GEO_STEMS) for w in words): return None
     if low in _PLATFORMS or low in _COMMON: return None
+    if low in _GLOBAL_BRANDS or any(w in _GLOBAL_BRANDS for w in words): return None   # мировые гиганты — не конкуренты для МСБ
     if all(w in _COMMON or w in _PLATFORMS for w in words): return None
     return n
 
@@ -474,10 +482,12 @@ def _competitors_llm(answers, niche):
         f"Ниже фрагменты ответов нейросетей на коммерческие запросы в нише «{niche or 'услуги'}».\n\n"
         f"{joined[:6000]}\n\n"
         "Выпиши ТОЛЬКО реальные названия компаний, брендов или конкретных специалистов, которых нейросети называют "
-        "как ИСПОЛНИТЕЛЕЙ услуги. Строгие правила:\n"
+        "как ИСПОЛНИТЕЛЕЙ услуги и которые являются ПРЯМЫМИ конкурентами этой компании — того же масштаба, профиля и региона. Строгие правила:\n"
+        "- НЕ включай мировых гигантов и глобальные бренды (Google, Microsoft, Salesforce, HubSpot, SAP, Oracle, Adobe, Amazon, "
+        "Apple, McKinsey, Accenture, Interbrand и подобные), если они не являются прямым конкурентом именно этой компании в её нише.\n"
         "- НЕ включай категории и каналы поиска (поисковые системы, сайты, форумы, маркетплейсы, выставки, каталоги, "
         "соцсети), разделы ответа, характеристики, города, страны, общие слова и названия самих нейросетей.\n"
-        "- Включай только то, что выглядит как название конкретной организации или бренда.\n"
+        "- Включай только то, что выглядит как название конкретной организации или бренда — реального конкурента.\n"
         "Каждое название с новой строки, по убыванию частоты, максимум 6. Если таких компаний нет, ответь одним словом: НЕТ."
     )
     try:
@@ -713,6 +723,16 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
         if detect_mention(ans, aliases):
             queries[qi]["hits"][eid] += 1
     competitors = extract_competitors(all_answers, brand, brand_short, niche, aliases=aliases)
+    # доказательная база по каждому запросу: какой движок назвал бренд и кого из конкурентов
+    comp_names = [n for n, _ in competitors]
+    for q in queries:
+        q["evidence"] = {e["id"]: {"brand": q["hits"][e["id"]] > 0, "comps": []} for e in engines}
+    for (qi, eid, _q, _run), ans in zip(tasks, answers):
+        low = (ans or "").lower()
+        ev = queries[qi]["evidence"][eid]["comps"]
+        for n in comp_names:
+            if n.lower() in low and n not in ev:
+                ev.append(n)
     return queries, competitors
 
 # ───────────────────────── сборка данных отчёта ───────────────────────
@@ -832,6 +852,13 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
     comp_names = [n for n, _ in comp_conf]
     examples = _pick_examples(queries, brand_short, best, comp_names)
     comp_objs = _competitor_objs(comp_conf, total)
+    eng_name = {e["id"]: e["name"] for e in eng}
+    for c in comp_objs:                                       # где встретился конкурент: пример запроса и нейросети
+        c["where"] = ""
+        for q in queries:
+            hit = next((eng_name.get(eid, eid) for eid, ev in (q.get("evidence") or {}).items() if c["name"] in ev.get("comps", [])), None)
+            if hit:
+                c["where"] = f"например, по запросу «{q['q']}» ({hit})"; break
     if comp_objs and os.environ.get("TEST_MODE") != "1":     # проверенные ссылки на сайты конкурентов
         try:
             sites = _competitor_sites([c["name"] for c in comp_objs])
@@ -892,18 +919,24 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
 
 def _pick_examples(queries, brand_short, best, competitors):
     ex = []
+    eng_name = {e["id"]: e["name"] for e in active_engines()}
+    def comps_engine(q):
+        """(нейросеть, [конкуренты]) реально названные по этому запросу — из доказательной базы."""
+        for eid, evv in (q.get("evidence") or {}).items():
+            if evv.get("comps"):
+                return eng_name.get(eid, eid), evv["comps"][:3]
+        return best["name"], []
     strong_cell = next((q for q in queries if any(v==2 for v in q["hits"].values())), None)
     zero_cell   = next((q for q in queries if all(v==0 for v in q["hits"].values())), None)
     mid_cell    = next((q for q in queries if any(v==1 for v in q["hits"].values())), None)
-    # named держим только по проверяемым данным: появление БРЕНДА известно из матрицы;
-    # привязывать конкретных конкурентов к конкретному запросу нельзя (их частота — агрегат по всем ответам).
     if strong_cell:
         ex.append({"kind":"yes","query":strong_cell["q"],"engine":best["name"],
                    "named":[brand_short],"result":"бренд появился в обоих ответах (2 из 2)",
                    "why":"возможное объяснение: в доступных источниках оказалось достаточно релевантной информации, чтобы нейросеть включила бренд. По одному результату точную причину установить нельзя."})
     if zero_cell:
-        ex.append({"kind":"no","query":zero_cell["q"],"engine":best["name"],
-                   "named":[],"result":"бренд не появился (0 из 2)",
+        en, comps = comps_engine(zero_cell)
+        ex.append({"kind":"no","query":zero_cell["q"],"engine":en,
+                   "named":comps,"result":"бренд не появился (0 из 2)",
                    "why":"по одному ответу причину точно не определить. Стоит проверить, есть ли на сайте страница, которая прямо отвечает на этот вопрос, и упоминания по теме на внешних площадках."})
     if mid_cell and mid_cell not in (strong_cell, zero_cell):
         ex.append({"kind":"mid","query":mid_cell["q"],"engine":best["name"],

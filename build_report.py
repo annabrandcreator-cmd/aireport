@@ -217,7 +217,7 @@ table.mt td{{font-size:9.5pt;font-weight:700;color:{INK};padding:5px 6px}}
 /* недели */
 .week{{padding-bottom:3.5mm;margin-bottom:3.5mm;border-bottom:1px solid {BORDER}}}
 .week:last-child{{border-bottom:none;margin-bottom:0;padding-bottom:0}}
-.week .wh{{font-size:11pt;font-weight:700;color:{INK};margin-bottom:1mm}}
+.week .wh{{font-size:11pt;font-weight:700;color:{INK};margin-bottom:3mm}}
 .week ul{{margin-left:5mm}} .week li{{font-size:9.5pt;color:{INK};line-height:1.4;margin-bottom:.4mm}}
 /* footer / cta */
 .foot{{position:absolute;left:15mm;right:15mm;bottom:6mm;display:flex;justify-content:space-between;
@@ -266,6 +266,12 @@ table.mt td{{font-size:9.5pt;font-weight:700;color:{INK};padding:5px 6px}}
 .gloss p{{font-size:8.5pt;color:{MUTED};line-height:1.5;margin-bottom:1mm}} .gloss b{{color:{INK};font-weight:600}}
 /* план: роли */
 .prole{{margin:1.8mm 0 0}} .prole .pr{{font-size:8pt;font-weight:700;color:{FAINT};text-transform:uppercase;letter-spacing:.5px;margin-bottom:.5mm}}
+/* разбор по запросам */
+.qd{{padding-bottom:2.6mm;margin-bottom:2.6mm;border-bottom:1px solid {BORDER}}}
+.qd:last-child{{border-bottom:none;margin-bottom:0;padding-bottom:0}}
+.qd-q{{font-size:10pt;font-weight:700;color:{INK};margin-bottom:1.4mm;line-height:1.3}}
+.qd-q .grp{{font-weight:500;color:{FAINT};font-size:8.5pt}}
+.qd-e{{font-size:9pt;color:{INK};line-height:1.4;margin-bottom:.4mm;padding-left:4mm}} .qd-e b{{color:{MUTED}}}
 '''
 
 def footer(d): return f'<div class="foot"><span>Отчёт о видимости в нейросетях · {esc(d["brand"])}</span><span>Анна Курбатова°</span></div>'
@@ -358,6 +364,33 @@ def p_matrix(d):
       <div class="note" style="margin-top:4mm">{legend}</div>
       {footer(d)}</div>'''
 
+def _qd_row(q, e):
+    h=q['hits'].get(e['id'],0)
+    comps=(q.get('evidence') or {}).get(e['id'],{}).get('comps',[])[:2]
+    extra=(", также называл "+", ".join(comps)) if comps else ""
+    if h>=2:   t="назвал ваш бренд в обоих ответах (2/2)"+extra
+    elif h==1: t="назвал ваш бренд в одном ответе (1/2)"+extra
+    elif comps:t="назвал "+", ".join(comps)+"; вашего бренда нет"
+    else:      t="общий ответ, без конкретных компаний"
+    return f'<div class="qd-e"><b>{esc(e["short"])}:</b> {esc(t)}</div>'
+
+def p_query_detail(d):
+    """Блок 04: каждый запрос отдельно — кто назвал бренд и кого из конкурентов, по каждой нейросети."""
+    eng=d['engines']
+    cards=[]
+    for i,q in enumerate(d['queries'],1):
+        rows="".join(_qd_row(q,e) for e in eng)
+        cards.append(f'<div class="qd"><div class="qd-q">{i}. {esc(q["q"])}<span class="grp"> · {esc(q["group"])}</span></div>{rows}</div>')
+    legend=" · ".join(f'{esc(e["short"])} — {esc(e["name"])}' for e in eng)
+    pages=[]; per=6
+    for idx in range(0, len(cards), per):
+        first=(idx==0)
+        head=('<h2><span class="num">04</span>По каким вопросам бренд появляется и кого называют нейросети</h2>' if first
+              else '<h2>По каким вопросам бренд появляется · продолжение</h2>')
+        intro=(f'<div class="sec-intro">Каждый из {len(d["queries"])} вопросов отдельно: какая нейросеть назвала ваш бренд и кого из компаний называли. Сокращения: {legend}.</div>' if first else '')
+        pages.append(f'<div class="page">{head}{intro}<div class="card" style="padding:5mm">{"".join(cards[idx:idx+per])}</div>{footer(d)}</div>')
+    return pages
+
 def p_groups(d):
     bars="".join(bar(g['name'], g['rate'], f"{g['m']} из {g['mx']} проверок · {g['n']} {plural(g['n'],'запрос','запроса','запросов')} в группе", wl="190px") for g in d['groups'])
     b=d['brand_short']
@@ -372,8 +405,8 @@ def p_groups(d):
         loss_p=(f"Упоминаний пока нет по группам: {zg}. " if zg else "По большинству групп упоминаний мало. ") + "Эти вопросы относятся к этапу выбора компании."
         lean_p=(f"Повторяемые упоминания есть по группам: {rep}. " if rep else "Повторяемых упоминаний пока мало. ") + "На них можно опереться, но видимость всё ещё низкая."
         prio_p="Двигаться стоит по двум линиям: усилить материалы под группы без упоминаний и закрепить то, что уже сработало. Группу из одного вопроса не стоит напрямую сравнивать с группой из нескольких."
-    return f'''<div class="page"><h2><span class="num">04</span>По каким вопросам бренд появляется, а по каким нет</h2>
-      <div class="sec-intro">Те же вопросы, собранные по направлениям. Видно, в каких сценариях клиенты вас находят, а в каких нет.</div>
+    return f'''<div class="page"><h2><span class="num">04</span>Видимость по направлениям</h2>
+      <div class="sec-intro">Те же вопросы, собранные по направлениям. Видно, в каких сценариях клиенты вас находят, а в каких нет. Рядом — сколько упоминаний из всех проверок в группе.</div>
       <div class="card">{bars}</div>
       <div class="two" style="margin-top:4mm">
         <div class="box cream"><h4>Где бренд пока не появляется</h4><p>{loss_p}</p></div>
@@ -387,9 +420,12 @@ def p_examples(d):
     for ex in d['examples']:
         tag={'yes':('tag-yes','Бренд появился'),'no':('tag-no','Бренда нет'),'mid':('tag-mid','В одном из двух')}[ex['kind']]
         if ex['kind']=='no':
-            eng_line=(f"<b>{esc(ex['engine'])}:</b> называет другие компании (см. раздел «Какие компании ещё встречаются ниже»), вашего бренда в ответе нет"
-                      if has_comp else
-                      f"<b>{esc(ex['engine'])}:</b> дал общий ответ, конкретные компании не назвал")
+            if ex.get('named'):
+                eng_line=f"<b>{esc(ex['engine'])}:</b> назвал {esc(', '.join(ex['named']))}; вашего бренда в ответе нет"
+            elif has_comp:
+                eng_line=f"<b>{esc(ex['engine'])}:</b> называет другие компании (см. раздел ниже), вашего бренда в ответе нет"
+            else:
+                eng_line=f"<b>{esc(ex['engine'])}:</b> дал общий ответ, конкретные компании не назвал"
         else:
             eng_line=f"<b>{esc(ex['engine'])}:</b> назвал ваш бренд в ответе"
         cards+=f'''<div class="ex"><span class="tag {tag[0]}">{tag[1]}</span>
@@ -438,7 +474,7 @@ def p_competitors(d):
         sub=("ваша текущая видимость" if is_you else f"{_gap_phrase(rate-ov)} · упомянут в {cnt} из {N} ответов")
         bars+=bar((esc(name)+" (вы)") if is_you else name, rate, sub, wl="150px", color=(ACCENTD if is_you else FAINT), you=is_you)
     ev="".join(f'''<div class="ex"><div class="q">{_comp_link(c)} · {c['rate']}%</div>
-          <div class="r">Упомянут в <b>{c['count']}</b> из <b>{c['total']}</b> ответов нейросетей по вашим запросам.</div></div>''' for c in d['competitors'])
+          <div class="r">Упомянут в <b>{c['count']}</b> из <b>{c['total']}</b> ответов нейросетей по вашим запросам{(" — " + esc(c["where"])) if c.get("where") else ""}.</div></div>''' for c in d['competitors'])
     names_join=_join([c['name'] for c in d['competitors']])
     max_c=max((c['rate'] for c in d['competitors']), default=0)
     if ov>0 and ov>=max_c:
@@ -634,7 +670,7 @@ def p_author(d):
 def build(data, out):
     d=compute(data)
     recs=d['recommendations']
-    pages=[p_cover(d), p_summary(d), p_engines(d), p_matrix(d), p_groups(d), p_examples(d)]
+    pages=[p_cover(d), p_summary(d), p_engines(d), p_matrix(d)] + p_query_detail(d) + [p_groups(d), p_examples(d)]
     if d.get('competitors'):                  # блок конкурентов только если есть подтверждённые (>=2)
         pages.append(p_competitors(d))
     pages.append(p_works(d))

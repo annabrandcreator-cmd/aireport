@@ -50,6 +50,8 @@ def init_db():
         cols = [r[1] for r in c.execute("PRAGMA table_info(orders)").fetchall()]
         if "tg_chat_id" not in cols:
             c.execute("ALTER TABLE orders ADD COLUMN tg_chat_id TEXT")
+        if "prep" not in cols:
+            c.execute("ALTER TABLE orders ADD COLUMN prep TEXT")   # JSON: запросы + контекст для подтверждения
 init_db()
 
 def cache_hit(site):
@@ -167,6 +169,56 @@ def deliver(o, pdf):
         except Exception as e: print("[mail] ошибка:", e)
     return sent
 
+# ───────────────────────── подтверждение запросов ───────────────────
+def _do_review(oid):
+    """Готовит запросы (есть LLM-вызовы, потому фоном) и отправляет клиенту на подтверждение."""
+    with db() as c:
+        o = c.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
+    if not o: return
+    try:
+        prep = engine.prepare(o["site"], o["niche"], o["city"], fallback_brand=o["brand_short"] or o["brand"])
+    except Exception as e:
+        print("[review] ошибка prepare:", e, flush=True)
+        with db() as c: c.execute("UPDATE orders SET status='paid' WHERE id=?", (oid,))
+        return
+    with db() as c:
+        c.execute("UPDATE orders SET prep=?, brand=?, brand_short=?, niche=? WHERE id=?",
+                  (json.dumps(prep, ensure_ascii=False), prep["brand"], prep["brand_short"], prep["niche"], oid))
+    if o["tg_chat_id"]:
+        qlist = "\n".join(f"{i}. {q['q']}" for i, q in enumerate(prep["queries"], 1))
+        tg_send_message(o["tg_chat_id"],
+            "Спасибо за оплату! Перед проверкой подтвердите запросы.\n\n"
+            f"Бренд: {prep['brand']}\nНиша: {prep['niche']}\n\n"
+            f"Проверим вашу видимость по этим запросам:\n\n{qlist}\n\n"
+            "Если всё подходит, ответьте: ОК.\n"
+            "Чтобы изменить, пришлите свой список запросов, каждый с новой строки. Я заменю набор и запущу проверку.")
+
+def maybe_start_review(oid):
+    """После оплаты: готовим запросы и просим подтвердить. Защита от двойного старта."""
+    with db() as c:
+        o = c.execute("SELECT status, tg_chat_id FROM orders WHERE id=?", (oid,)).fetchone()
+        if not o or o["status"] != "paid":
+            return False
+        c.execute("UPDATE orders SET status='reviewing' WHERE id=?", (oid,))
+    threading.Thread(target=_do_review, args=(oid,), daemon=True).start()
+    return True
+
+def start_generation(oid, edited_queries=None):
+    """Запуск анализа по подтверждённому (или отредактированному) набору запросов."""
+    with db() as c:
+        o = c.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
+    if not o or not o["prep"]: return False
+    prep = json.loads(o["prep"])
+    if edited_queries:
+        prep["queries"] = [{"q": q, "group": engine._classify_query(q)} for q in edited_queries]
+    with db() as c:
+        c.execute("UPDATE orders SET prep=?, status='processing' WHERE id=?",
+                  (json.dumps(prep, ensure_ascii=False), oid))
+    if o["tg_chat_id"]:
+        tg_send_message(o["tg_chat_id"], "Принято! Запускаю проверку по нейросетям, пришлю готовый отчёт сюда через несколько минут.")
+    threading.Thread(target=generate, args=(oid,), daemon=True).start()
+    return True
+
 # ───────────────────────── генерация отчёта ──────────────────────────
 def generate(order_id):
     with db() as c:
@@ -174,37 +226,19 @@ def generate(order_id):
     if not o: return
     print(f"[generate] старт order={order_id} site={o['site']}", flush=True)
     try:
-        cached = cache_hit(o["site"])
-        if cached:
-            pdf = cached
-        else:
-            data = engine.run(o["brand"], o["site"], o["niche"], o["city"], brand_short=o["brand_short"])
-            pdf = os.path.join(REPORTS, f"{order_id}.pdf")
-            build_report.build(data, pdf)
+        prep = json.loads(o["prep"]) if o["prep"] else None
+        data = engine.run(prep=prep) if prep else engine.run(o["brand"], o["site"], o["niche"], o["city"], brand_short=o["brand_short"])
+        pdf = os.path.join(REPORTS, f"{order_id}.pdf")
+        build_report.build(data, pdf)
         with db() as c:
             c.execute("UPDATE orders SET status='done', pdf=? WHERE id=?", (pdf, order_id))
             o = c.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
-        sent = deliver(o, pdf)   # Telegram (если клиент уже нажал Старт) + опционально почта
+        sent = deliver(o, pdf)
         print(f"[generate] готово order={order_id} pdf_ok={os.path.exists(pdf)} отправлен_в_tg={sent}", flush=True)
     except Exception as e:
         print("[generate] ошибка:", e, flush=True)
         with db() as c:
             c.execute("UPDATE orders SET status='error' WHERE id=?", (order_id,))
-
-def maybe_start_generation(oid):
-    """Запускает движок только если заказ оплачен (status='paid'). Защита от двойного старта."""
-    with db() as c:
-        o = c.execute("SELECT status, tg_chat_id FROM orders WHERE id=?", (oid,)).fetchone()
-        if not o or o["status"] != "paid":
-            return False
-        c.execute("UPDATE orders SET status='processing' WHERE id=?", (oid,))
-    if o["tg_chat_id"]:
-        tg_send_message(o["tg_chat_id"],
-            "Спасибо за оплату! Ваш отчёт о видимости в нейросетях уже формируется. "
-            "Я пришлю его сюда, в чат, в течение 10 минут. Можно закрыть страницу оплаты, "
-            "я сообщу, как только всё будет готово.")
-    threading.Thread(target=generate, args=(oid,), daemon=True).start()
-    return True
 
 # ───────────────────────── маршруты ──────────────────────────────────
 ORDER_FORM = """<!doctype html><html lang=ru><head><meta charset=utf-8>
@@ -392,8 +426,8 @@ def tbank_notify():
         if o and o["status"] in ("new", "pending"):
             with db() as c:
                 c.execute("UPDATE orders SET status='paid' WHERE id=?", (oid,))   # фиксируем оплату, движок пока НЕ запускаем
-            if o["tg_chat_id"]:           # клиент уже нажал Старт раньше оплаты -> запускаем сразу
-                maybe_start_generation(oid)
+            if o["tg_chat_id"]:           # клиент уже нажал Старт раньше оплаты -> показываем запросы на подтверждение
+                maybe_start_review(oid)
     return "OK"
 
 @app.get("/thanks")
@@ -408,7 +442,9 @@ def tg_webhook():
     msg = upd.get("message") or {}
     chat = (msg.get("chat") or {}).get("id")
     text = (msg.get("text") or "").strip()
-    if chat and text.startswith("/start"):
+    if not chat:
+        return "OK"
+    if text.startswith("/start"):
         parts = text.split(maxsplit=1)
         oid = parts[1].strip() if len(parts) > 1 else ""
         if oid:
@@ -421,9 +457,11 @@ def tg_webhook():
                 if st == "done" and o["pdf"] and os.path.exists(o["pdf"]):
                     try: tg_send_report(chat, o["pdf"], o)
                     except Exception as e: print("[tg] ошибка:", e)
-                elif st == "paid":      # оплачено -> запускаем движок именно сейчас
-                    tg_send_message(chat, "Оплата подтверждена. Формирую отчёт по 7 нейросетям, пришлю сюда через несколько минут.")
-                    maybe_start_generation(oid)
+                elif st == "paid":      # оплачено -> готовим запросы и просим подтвердить
+                    tg_send_message(chat, "Оплата подтверждена. Готовлю запросы для проверки, пришлю их сюда на подтверждение.")
+                    maybe_start_review(oid)
+                elif st == "reviewing":
+                    tg_send_message(chat, "Запросы для проверки — в сообщении выше. Ответьте ОК, чтобы запустить, или пришлите свой список.")
                 elif st == "processing":
                     tg_send_message(chat, "Отчёт уже формируется, пришлю его сюда через пару минут.")
                 elif st == "new":       # создаём платёж и шлём кнопку оплаты прямо в чат
@@ -442,6 +480,31 @@ def tg_webhook():
                     tg_send_message(chat, "Кнопка оплаты выше. После оплаты отчёт придёт сюда автоматически.")
                 return "OK"
         tg_send_message(chat, "Здравствуйте! Чтобы получить отчёт, перейдите по кнопке после оплаты на сайте.")
+        return "OK"
+    # свободный текст: ответ на подтверждение запросов
+    if text:
+        with db() as c:
+            o = c.execute("SELECT * FROM orders WHERE tg_chat_id=? AND status='reviewing' ORDER BY created DESC LIMIT 1",
+                          (str(chat),)).fetchone()
+        if o:
+            if not o["prep"]:
+                tg_send_message(chat, "Секунду, ещё готовлю запросы — пришлю их сюда.")
+                return "OK"
+            low = text.lower().strip(" .!…")
+            if low in ("ок","ok","да","да.","подтверждаю","запуск","поехали","go","ага","верно","всё верно","все верно","norma","норм"):
+                start_generation(o["id"])
+            else:
+                qs = []
+                for l in text.splitlines():
+                    l = re.sub(r"^\s*\d+[.)]\s*", "", l).strip(" -–—•\t").strip()
+                    if len(l) >= 6:
+                        qs.append(l)
+                qs = qs[:12]
+                if len(qs) >= 3:
+                    start_generation(o["id"], edited_queries=qs)
+                else:
+                    tg_send_message(chat, "Чтобы заменить запросы, пришлите их списком — каждый с новой строки, минимум 3. Или ответьте ОК, чтобы запустить по предложенному набору.")
+        return "OK"
     return "OK"
 
 @app.get("/fail")

@@ -303,7 +303,7 @@ def revise_queries(oid, edited):
     prep["queries"] = [{"q": q, "group": engine._classify_query(q)} for q in edited]
     with db() as c:                                   # возвращаем в reviewing (если заказ был error/done) — ждём подтверждения
         c.execute("UPDATE orders SET prep=?, status='reviewing' WHERE id=?", (json.dumps(prep, ensure_ascii=False), oid))
-    note = (f"Вы прислали больше {cap} — взял первые {cap}.\n\n" if extra else "")
+    note = (f"⚠️ Вы прислали больше {cap} — взял первые {cap}.\n\n" if extra else _count_note(len(edited), cap))
     _send_review(o["tg_chat_id"], oid, prep, edited=True, prefix=note)
     return True
 
@@ -564,6 +564,14 @@ def _plural_q(n):
     if 2 <= d <= 4 and not 12 <= dd <= 14: return "запроса"
     return "запросов"
 
+def _count_note(n, tariff):
+    """Предупреждение, если запросов меньше, чем доступно по тарифу (но запускать всё равно можно)."""
+    if tariff and n < tariff:
+        need = tariff - n
+        return (f"⚠️ Вы прислали {n} из {tariff}. По вашему тарифу доступно до {tariff} {_plural_q(tariff)} — "
+                f"добавьте ещё {need} {_plural_q(need)}, чтобы использовать проверку полностью, или подтвердите текущий набор.\n\n")
+    return ""
+
 def _parse_query_list(text):
     """Список запросов из текста клиента: чистим нумерацию, маркеры, короткие строки."""
     qs = []
@@ -606,7 +614,10 @@ def _addon_collect_queries(oid, qs):
     with db() as c:
         o = c.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
     if not o: return
-    n = o["qn"] or len(qs); qs = engine.fix_queries(qs[:n])   # ограничиваем оплаченным числом и правим опечатки
+    paid = o["qn"] or len(qs); raw_n = len(qs)
+    qs = engine.fix_queries(qs[:paid])                        # ограничиваем оплаченным числом и правим опечатки
+    over = raw_n > paid
+    note = (f"⚠️ Вы прислали больше {paid} — взял первые {paid}.\n\n" if over else _count_note(len(qs), paid))
     parent_prep = None
     if o["parent"]:
         with db() as c:
@@ -617,7 +628,7 @@ def _addon_collect_queries(oid, qs):
     with db() as c:
         c.execute("UPDATE orders SET prep=?, status='reviewing', awaiting=NULL WHERE id=?",
                   (json.dumps(prep, ensure_ascii=False), oid))
-    _send_review(o["tg_chat_id"], oid, prep, edited=False)
+    _send_review(o["tg_chat_id"], oid, prep, edited=False, prefix=note)
 
 def _handle_callback(cq):
     data = cq.get("data") or ""
@@ -770,9 +781,8 @@ def tg_webhook():
                 start_generation(o["id"])
             else:
                 qs = _parse_query_list(text)
-                min_q = 1 if (o["kind"] == "addon") else 3
-                if len(qs) >= min_q:
-                    revise_queries(o["id"], qs)  # заменяем и показываем обновлённый список на повторное «ОК»
+                if len(qs) >= 1:                  # принимаем любой непустой список; если меньше тарифа — предупредим на подтверждении
+                    revise_queries(o["id"], qs)   # заменяем и показываем обновлённый список на повторное «ОК»
                 else:
                     tg_send_message(chat, "Чтобы заменить запросы, пришлите их списком — каждый с новой строки. Или ответьте ОК, чтобы запустить по показанному набору.")
             return "OK"

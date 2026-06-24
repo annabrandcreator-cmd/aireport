@@ -176,6 +176,9 @@ h2 .num{{color:{ACCENT};margin-right:7px}}
 .ec-fill{{height:8.5mm;border-radius:5px;min-width:3px}}
 .ec-pct{{flex:none;width:13mm;text-align:right;font-size:13pt;font-weight:800}}
 .ec-sub{{font-size:8.5pt;color:{MUTED};margin:0 0 3mm 34mm}}
+.dn-row{{display:flex;justify-content:space-around;align-items:flex-start;gap:6mm;padding:1mm 4mm 3mm;border-bottom:1px solid {BORDER};margin-bottom:3.5mm}}
+.dn{{display:flex;flex-direction:column;align-items:center;gap:1.5mm}}
+.dn-name{{font-size:9pt;font-weight:600;color:{INK};text-align:center;line-height:1.2}}
 /* cards / stats */
 .card{{background:{CARD};border:1px solid {BORDER};border-radius:13px;padding:6mm;box-shadow:0 1px 3px rgba(20,16,12,.05)}}
 .grid3{{display:flex;gap:5mm}} .grid3>*{{flex:1}}
@@ -359,8 +362,29 @@ def engine_chart(d):
                    f'<div class="ec-sub">{e["mentions"]} упоминаний в {e["answers"]} ответах · {esc(e["note"])}</div>')
     return f'<div class="ec"><div class="ec-scale"><span>0%</span><span>50%</span><span>100%</span></div>{rows}</div>'
 
+def _donut(pct, col, center):
+    """Круглая диаграмма (donut) одной нейросети: кольцо-прогресс на pct% с числом в центре."""
+    R=15.5; C=2*math.pi*R; arc=C*max(min(pct,100),0)/100
+    prog=(f'<circle cx="18" cy="18" r="{R}" fill="none" stroke="{col}" stroke-width="3.6" stroke-linecap="round" '
+          f'stroke-dasharray="{arc:.2f} {C-arc:.2f}" transform="rotate(-90 18 18)"/>') if pct>0 else ''
+    return (f'<svg viewBox="0 0 36 36" width="58" height="58">'
+            f'<circle cx="18" cy="18" r="{R}" fill="none" stroke="{TRACK}" stroke-width="3.6"/>'
+            f'{prog}'
+            f'<text x="18" y="20.5" text-anchor="middle" font-size="9.5" font-weight="700" fill="{col}">{center}</text></svg>')
+
+def engine_donuts(d):
+    """Ряд круглых диаграмм по нейросетям — для наглядности рядом со столбчатой."""
+    items=""
+    for e in d['engines']:
+        if e.get('rate') is None:
+            items+=f'<div class="dn">{_donut(0, FAINT, "—")}<div class="dn-name">{esc(e["name"])}</div></div>'
+        else:
+            r=e['rate']; col=lvl(r)
+            items+=f'<div class="dn">{_donut(r, col, f"{r}%")}<div class="dn-name">{esc(e["name"])}</div></div>'
+    return f'<div class="dn-row">{items}</div>'
+
 def p_engines(d):
-    bars=engine_chart(d)
+    bars=engine_donuts(d)+engine_chart(d)
     me=d.get('mentioned_engines',[]); ze=d.get('zero_engines',[]); ans=d['engines'][0]['answers']; b=d['brand_short']
     total=d['total_answers']
     if not me:

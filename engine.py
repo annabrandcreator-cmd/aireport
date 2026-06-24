@@ -1494,6 +1494,33 @@ def _role_directive(site_info, niche=""):
         base += " Это прямой исполнитель услуг (агентство, студия, подрядчик). Пиши от первого лица как тот, кто сам делает работу, а не подбирает подрядчиков."
     return base
 
+def _reco_review(niche, brand_short, site_info=None):
+    """Один реальный отзыв под бизнес (если основной разбор примеров его не дал). '' = откат на общий."""
+    if os.environ.get("TEST_MODE") == "1":
+        return ""
+    ask = _first_keyed_adapter()
+    if not ask or not niche:
+        return ""
+    role = _biz_role(site_info, niche)
+    s = site_info or {}
+    desc = " ".join(filter(None, [s.get("title"), s.get("description")]))[:200]
+    if role in ("shop", "manufacturer"):
+        what = "отзыв покупателя: что купил или заказал, как качество и подошло ли, доставка"
+    elif role == "place":
+        what = "отзыв посетителя: что делал или заказывал, что понравилось, сервис"
+    else:
+        what = "отзыв клиента: какая услуга, что сделали, результат"
+    prompt = (f"Компания «{brand_short}», ниша «{niche}». {('Чем занимается: ' + desc) if desc else ''}\n"
+              f"Напиши ОДИН короткий готовый {what}. 1–2 предложения, конкретно и правдоподобно, как реальный отзыв на сайте. "
+              "Без штампов «всё отлично, рекомендую». НЕ выдумывай точные цифры (срок, цена) — неизвестное помечай [указать]. "
+              "Без кавычек и пояснений, только текст отзыва.")
+    try:
+        raw = ask(prompt)
+    except Exception:
+        return ""
+    r = re.sub(r"\s+", " ", (raw or "").strip().strip('«»"\'')).strip()
+    return r if 20 <= len(r) <= 400 else ""
+
 def _reco_examples(niche, brand_short, queries=None, site_info=None):
     """Готовые конкретные примеры под нишу/услуги/запросы компании (страница, кейс, отзыв). {} = откат на общие.
     Жёсткие правила: не выдумывать факты (сроки, цены, объёмы, география и т.п.) — неизвестное помечать [указать]."""
@@ -1583,6 +1610,10 @@ def _reco_examples(niche, brand_short, queries=None, site_info=None):
     if _biz_role(site_info, niche) in ("shop", "manufacturer", "place") and sec.get("project"):
         sec["project"] = re.split(r"(?im)^\s*(?:H1|Абзац|Состав|PRODUCTPAGE|SERVICES)\s*:", sec["project"])[0].strip()  # карточка/описание — только связный текст
     out = {k: v for k, v in sec.items() if v and len(v) >= 12}
+    if not out.get("review"):                                # отзыв не распарсился — добираем отдельным запросом, чтобы был реальный пример
+        rv = _reco_review(niche, brand_short, site_info)
+        if rv:
+            out["review"] = rv
     return out
 
 def _recommendations(queries, groups, total, site_info=None, brand_short="бренд", niche=""):

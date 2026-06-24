@@ -1509,24 +1509,26 @@ def _biz_role(site_info, niche=""):
     if re.search(r"(собственн\w*\s+производств|наш\w*\s+(?:производств|фабрик|цех)|мы\s+(?:производим|шь[её]м|выпускаем|изготавлива)|"
                  r"\bфабрик|\bзавод|\bцех\b|пошив|швейн|производственн|manufactur|own\s+factory)", txt):
         return "manufacturer"
-    if (types & {"product","offer","aggregateoffer","store","onlinestore","productgroup"}) or s.get("product_pages") \
-       or re.search(r"(интернет-?магазин|добавить в корзин|каталог товаров|купить.{0,20}доставк|маркетплейс)", txt):
-        return "shop"
+    # ВАЖНО: «место/заведение» проверяем ДО магазина — у отелей и ресторанов бывает Offer/Product (бронь, меню),
+    # но это не магазин товаров.
     place_types = {"lodgingbusiness","hotel","resort","hostel","restaurant","cafeorcoffeeshop","bakery","barorpub",
                    "foodestablishment","medicalbusiness","medicalclinic","hospital","dentist","physician",
                    "healthandbeautybusiness","beautysalon","hairsalon","nailsalon","dayspa","sportsactivitylocation",
                    "exercisegym","healthclub","daycare","preschool","school","educationalorganization",
                    "touristattraction","travelagency","eventvenue","nightclub","autorepair","autowash"}
     if (types & place_types) or re.search(
-            r"(отел|гостиниц|хостел|ресторан|кафе|кофейн|\bбар\b|\bпаб\b|столов|пиццери|кондитерск|"
+            r"(отел|гостиниц|хостел|парк-?отел|глэмпинг|ресторан|кафе|кофейн|\bбар\b|\bпаб\b|столов|пиццери|кондитерск|"
             r"салон красоты|парикмахер|барбершоп|маникюр|педикюр|косметолог|\bспа\b|массаж|солярий|эпиляц|"
-            r"клиник|стоматолог|медцентр|медицинск|поликлиник|"
+            r"клиник|стоматолог|медцентр|медицинск|поликлиник|санатори|"
             r"фитнес|тренаж|\bйог|пилатес|бассейн|"
             r"\bшкол|\bкурс|репетитор|детский сад|автошкол|"
-            r"\bтур\b|туристическ|турагент|туроператор|турфирм|экскурс|санатори|база отдыха|глэмпинг|"
-            r"фотограф|фотостуди|праздник|банкет|аренда зал|"
+            r"\bтур\b|туристическ|турагент|туроператор|турфирм|экскурс|база отдыха|проживани|номер|"
+            r"фотограф|фотостуди|праздник|банкет|свадьб|аренда зал|"
             r"автосервис|шиномонтаж|автомойк|детейлинг|химчистк|клининг|груминг|ветеринар|ветклиник)", txt):
         return "place"
+    if (types & {"product","offer","aggregateoffer","store","onlinestore","productgroup"}) or s.get("product_pages") \
+       or re.search(r"(интернет-?магазин|добавить в корзин|каталог товаров|купить.{0,20}доставк|маркетплейс)", txt):
+        return "shop"
     return "service"
 
 def _role_directive(site_info, niche=""):
@@ -1701,8 +1703,8 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
     types = {str(x).lower() for x in (s.get("schema") or [])}
     has_products = bool(types & {"product", "offer", "aggregateoffer", "store", "onlinestore", "productgroup"})  # есть ли товары/магазин
     role = _biz_role(site_info, niche)
-    product_biz = has_products or role in ("shop", "manufacturer")   # товарный бизнес: товары, а не «проекты/кейсы»
-    place_biz = role == "place"                                       # заведение/место: услуги-направления и отзывы посетителей, а не проекты
+    product_biz = role in ("shop", "manufacturer")   # тексты карточек по РОЛИ (у отеля бывает Offer, но это не магазин)
+    place_biz = role == "place"                       # заведение/место: услуги-направления и отзывы посетителей, а не проекты
     recs = []
 
     # 1. Контент: понятные страницы товаров (магазин/производитель) или услуг
@@ -1733,7 +1735,7 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
                     ("Связать похожие услуги и направления внутренними ссылками" if place_biz else "Поставить ссылки на подходящие проекты и смежные услуги")]
     recs.append({
         "kind": "content",
-        "title": c1_title,
+        "title": "Сделать страницы товаров и услуг понятнее для нейросетей и клиентов",  # универсально для всех ниш
         "plain": svc_plain,
         "steps": c1_steps,
         "example": (f"Готовый вариант для вашей ниши:\n{rex['services']}"
@@ -1787,7 +1789,7 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
                  else "Готовая структура для вашей ниши:")
     recs.append({
         "kind": "content",
-        "title": proj_title,
+        "title": "Усилить страницы товаров и услуг и собрать отзывы под запросы клиентов",  # универсально для всех ниш
         "plain": proj_plain,
         "steps": proj_steps,
         "example": (f"{proj_wrap}\n{rex['project']}" if rex.get('project') else proj_ex_fb),

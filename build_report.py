@@ -167,6 +167,15 @@ h2 .num{{color:{ACCENT};margin-right:7px}}
 .bar-track{{flex:1;height:16px;background:{TRACK};border-radius:9px;overflow:hidden}}
 .bar-fill{{height:16px;border-radius:9px}} .bar-v{{flex:none;width:64px;text-align:right;font-weight:700}}
 .bar-sub{{font-size:8.5pt;color:{MUTED};margin-top:2px}}
+/* наглядная диаграмма по нейросетям (блок 02) */
+.ec{{margin:1mm 0 2mm}}
+.ec-scale{{display:flex;justify-content:space-between;font-size:7.5pt;color:{FAINT};margin:0 13mm 1.5mm 34mm}}
+.ec-row{{display:flex;align-items:center;gap:3mm;margin-bottom:1mm}}
+.ec-name{{flex:none;width:31mm;font-size:10.5pt;font-weight:700;color:{INK}}}
+.ec-track{{flex:1;height:8.5mm;background:{TRACK};border-radius:5px;overflow:hidden}}
+.ec-fill{{height:8.5mm;border-radius:5px;min-width:3px}}
+.ec-pct{{flex:none;width:13mm;text-align:right;font-size:13pt;font-weight:800}}
+.ec-sub{{font-size:8.5pt;color:{MUTED};margin:0 0 3mm 34mm}}
 /* cards / stats */
 .card{{background:{CARD};border:1px solid {BORDER};border-radius:13px;padding:6mm;box-shadow:0 1px 3px rgba(20,16,12,.05)}}
 .grid3{{display:flex;gap:5mm}} .grid3>*{{flex:1}}
@@ -332,8 +341,26 @@ def _engine_bar(e):
                 f'<div class="bar-sub" style="padding-left:160px">нейросеть не ответила (ошибка доступа к API); в расчёт видимости не входит</div></div>')
     return bar(e['name'], e['rate'], f"{e['mentions']} упоминаний в {e['answers']} ответах · {esc(e['note'])}", wl="150px")
 
+def engine_chart(d):
+    """Наглядная диаграмма: горизонтальные столбцы по нейросетям с процентами и шкалой 0–100%."""
+    rows=""
+    for e in d['engines']:
+        nm=esc(e['name'])
+        if e.get('rate') is None:
+            rows+=(f'<div class="ec-row"><div class="ec-name">{nm}</div>'
+                   f'<div class="ec-track"><div class="ec-fill" style="width:0"></div></div>'
+                   f'<div class="ec-pct" style="color:{FAINT}">—</div></div>'
+                   f'<div class="ec-sub">не удалось проверить: нейросеть не ответила (ошибка API), в расчёт видимости не входит</div>')
+        else:
+            r=e['rate']; col=lvl(r)
+            rows+=(f'<div class="ec-row"><div class="ec-name">{nm}</div>'
+                   f'<div class="ec-track"><div class="ec-fill" style="width:{max(r,1.5)}%;background:{col}"></div></div>'
+                   f'<div class="ec-pct" style="color:{col}">{r}%</div></div>'
+                   f'<div class="ec-sub">{e["mentions"]} упоминаний в {e["answers"]} ответах · {esc(e["note"])}</div>')
+    return f'<div class="ec"><div class="ec-scale"><span>0%</span><span>50%</span><span>100%</span></div>{rows}</div>'
+
 def p_engines(d):
-    bars="".join(_engine_bar(e) for e in d['engines'])
+    bars=engine_chart(d)
     me=d.get('mentioned_engines',[]); ze=d.get('zero_engines',[]); ans=d['engines'][0]['answers']; b=d['brand_short']
     total=d['total_answers']
     if not me:

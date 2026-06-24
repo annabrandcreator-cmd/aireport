@@ -276,9 +276,48 @@ def _do_review(oid):
         print("[review] ошибка prepare:", e, flush=True)
         with db() as c: c.execute("UPDATE orders SET status='paid' WHERE id=?", (oid,))
         return
+    if prep.get("niche_unknown") or not prep.get("queries"):   # нишу не определили -> спрашиваем у клиента, а не выдумываем
+        with db() as c:
+            c.execute("UPDATE orders SET prep=?, brand=?, brand_short=?, status='await_niche' WHERE id=?",
+                      (json.dumps(prep, ensure_ascii=False), prep["brand"], prep["brand_short"], oid))
+        _ask_niche(o["tg_chat_id"], o["site"])
+        return
     with db() as c:
         c.execute("UPDATE orders SET prep=?, brand=?, brand_short=?, niche=?, status='reviewing' WHERE id=?",
                   (json.dumps(prep, ensure_ascii=False), prep["brand"], prep["brand_short"], prep["niche"], oid))
+    _send_review(o["tg_chat_id"], oid, prep, edited=False)
+
+def _ask_niche(chat, site):
+    """Не удалось определить нишу по сайту -> просим клиента написать её одной фразой."""
+    host = engine._host(site) if site else "вашему сайту"
+    tg_send_force_reply(chat,
+        f"Не удалось автоматически определить, чем занимается компания по сайту {host}. "
+        "Напишите одной фразой вашу нишу — чем вы занимаетесь, какие услуги или товары "
+        "(например: загородный отель в Подмосковье, стоматология, интернет-магазин косметики, производство мебели). "
+        "Я подберу запросы под неё.",
+        "Ваша ниша одной фразой")
+
+def _set_niche(oid, niche_text):
+    """Клиент прислал нишу вручную -> пересобираем запросы и показываем на подтверждение."""
+    with db() as c:
+        o = c.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
+    if not o: return
+    niche = (niche_text or "").strip()[:120]
+    try:
+        prep = engine.prepare(o["site"], niche, o["city"], fallback_brand=o["brand_short"] or o["brand"])
+    except Exception as e:
+        print("[niche] ошибка prepare:", e, flush=True)
+        prep = {"site": o["site"], "city": o["city"], "niche": niche, "brand": o["brand"], "brand_short": o["brand_short"], "queries": []}
+    prep["niche"] = niche; prep["niche_unknown"] = False
+    if not prep.get("queries"):                              # на всякий случай — соберём по введённой нише
+        try:
+            qs = engine.generate_queries(niche, o["city"], prep.get("site_info"))
+            prep["queries"] = [{"q": x["q"], "group": x["group"]} for x in qs]
+        except Exception as e:
+            print("[niche] ошибка generate:", e, flush=True)
+    with db() as c:
+        c.execute("UPDATE orders SET prep=?, niche=?, status='reviewing', awaiting=NULL WHERE id=?",
+                  (json.dumps(prep, ensure_ascii=False), niche, oid))
     _send_review(o["tg_chat_id"], oid, prep, edited=False)
 
 def maybe_start_review(oid):
@@ -734,6 +773,8 @@ def tg_webhook():
                 elif st == "await_queries":   # дозакупка оплачена -> ждём запросы клиента
                     n = o["qn"] or 1
                     tg_send_message(chat, f"Жду ваши {n} {_plural_q(n)} для проверки — каждый с новой строки.")
+                elif st == "await_niche":     # ждём нишу: сайт не разобрался автоматически
+                    _ask_niche(chat, o["site"])
                 elif st == "processing":
                     tg_send_message(chat, "Отчёт уже формируется, пришлю его сюда через пару минут.")
                 elif st == "error":     # прошлая проверка упала -> повтор по сохранённым запросам + кнопка в поддержку
@@ -765,6 +806,12 @@ def tg_webhook():
         return "OK"
     # свободный текст
     if text:
+        with db() as c:                          # ждём нишу от клиента (сайт не разобрался автоматически)
+            nq = c.execute("SELECT id FROM orders WHERE tg_chat_id=? AND status='await_niche' ORDER BY created DESC LIMIT 1",
+                           (str(chat),)).fetchone()
+        if nq:
+            _set_niche(nq["id"], text)
+            return "OK"
         # принимаем правку запросов не только в reviewing, но и по упавшему заказу (error); админ может и по готовому (done) — для тестов
         admin = str(chat) == str(os.environ.get("ADMIN_CHAT_ID") or "")
         states = ("reviewing", "error", "done") if admin else ("reviewing", "error")

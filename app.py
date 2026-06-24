@@ -301,8 +301,8 @@ def revise_queries(oid, edited):
     edited = engine.fix_queries(edited[:cap])           # исправляем опечатки/грамматику
     prep = json.loads(o["prep"])
     prep["queries"] = [{"q": q, "group": engine._classify_query(q)} for q in edited]
-    with db() as c:                                   # статус остаётся reviewing — ждём подтверждения
-        c.execute("UPDATE orders SET prep=? WHERE id=?", (json.dumps(prep, ensure_ascii=False), oid))
+    with db() as c:                                   # возвращаем в reviewing (если заказ был error/done) — ждём подтверждения
+        c.execute("UPDATE orders SET prep=?, status='reviewing' WHERE id=?", (json.dumps(prep, ensure_ascii=False), oid))
     note = (f"Вы прислали больше {cap} — взял первые {cap}.\n\n" if extra else "")
     _send_review(o["tg_chat_id"], oid, prep, edited=True, prefix=note)
     return True
@@ -568,7 +568,7 @@ def _parse_query_list(text):
     """Список запросов из текста клиента: чистим нумерацию, маркеры, короткие строки."""
     qs = []
     for l in text.splitlines():
-        l = re.sub(r"^\s*\d+[.)]\s*", "", l).strip(" -–—•\t").strip()
+        l = re.sub(r"^\s*\d+[.)]?\s+", "", l).strip(" -–—•\t").strip()   # «1.» «2)» и «10 » без точки
         if len(l) >= 6: qs.append(l)
     return qs[:12]
 
@@ -754,9 +754,13 @@ def tg_webhook():
         return "OK"
     # свободный текст
     if text:
+        # принимаем правку запросов не только в reviewing, но и по упавшему заказу (error); админ может и по готовому (done) — для тестов
+        admin = str(chat) == str(os.environ.get("ADMIN_CHAT_ID") or "")
+        states = ("reviewing", "error", "done") if admin else ("reviewing", "error")
+        ph = ",".join("?" * len(states))
         with db() as c:
-            o = c.execute("SELECT * FROM orders WHERE tg_chat_id=? AND status='reviewing' ORDER BY created DESC LIMIT 1",
-                          (str(chat),)).fetchone()
+            o = c.execute(f"SELECT * FROM orders WHERE tg_chat_id=? AND status IN ({ph}) ORDER BY created DESC LIMIT 1",
+                          (str(chat), *states)).fetchone()
         if o:                                  # подтверждение или правка запросов
             if not o["prep"]:
                 tg_send_message(chat, "Секунду, ещё готовлю запросы — пришлю их сюда.")

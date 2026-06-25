@@ -26,8 +26,8 @@ DB = os.environ.get("DB_PATH") or os.path.join(APP_DIR, "orders.db")
 REPORTS = os.environ.get("REPORTS_DIR") or os.path.join(APP_DIR, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
-VERSION = "v55"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
-TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO")
+VERSION = "v56"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
+TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO").strip()  # .strip() — от случайных пробелов/переноса при вставке
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
 if BASE_URL and not BASE_URL.startswith("http"):
@@ -105,7 +105,7 @@ def _receipt_on():
     return os.environ.get("TBANK_RECEIPT", "").strip().lower() in ("1", "true", "yes", "on")
 
 def tbank_init(order_id, email, amount=None, description=None, with_receipt=None):
-    password = os.environ["TBANK_PASSWORD"]  # из секрета, не из кода
+    password = os.environ["TBANK_PASSWORD"].strip()  # из секрета, не из кода; .strip() от случайных пробелов/переноса
     rub = amount if amount is not None else PRICE
     payload = {
         "TerminalKey": TERMINAL,
@@ -600,7 +600,7 @@ def create_payment():
 @app.post("/tbank/notify")
 def tbank_notify():
     data = request.get_json(force=True, silent=True) or {}
-    password = os.environ.get("TBANK_PASSWORD", "")
+    password = os.environ.get("TBANK_PASSWORD", "").strip()
     got = data.get("Token", "")
     ok = tbank_token(data, password) == got
     print(f"[notify] order={data.get('OrderId')} status={data.get('Status')} success={data.get('Success')} token_ok={ok}", flush=True)
@@ -988,11 +988,16 @@ def tbank_selftest():
     oid = "rcpttest" + uuid.uuid4().hex[:8]
     email = request.args.get("email", os.environ.get("TBANK_RECEIPT_EMAIL", "test@example.com"))
     sent = tbank_receipt(email, PRICE, None)
+    raw_pw = os.environ.get("TBANK_PASSWORD", "")
+    # безопасная диагностика пары терминал/пароль (сам пароль НЕ показываем):
+    diag = {"terminal": TERMINAL, "password_set": bool(raw_pw),
+            "password_len": len(raw_pw.strip()),
+            "password_had_spaces": raw_pw != raw_pw.strip()}
     try:
         res = tbank_init(oid, email, with_receipt=True)   # принудительно с чеком — это и тестируем
     except Exception as e:
-        return jsonify(ok=False, error=str(e), sent_receipt=sent), 200
-    return jsonify(ok=bool(res.get("Success")), terminal=TERMINAL, order_id=oid,
+        return jsonify(ok=False, error=str(e), diag=diag, sent_receipt=sent), 200
+    return jsonify(ok=bool(res.get("Success")), order_id=oid, diag=diag,
                    receipt_enabled_in_payments=_receipt_on(),
                    error_code=res.get("ErrorCode"), message=res.get("Message"), details=res.get("Details"),
                    payment_url=res.get("PaymentURL"), sent_receipt=sent), 200

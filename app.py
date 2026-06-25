@@ -26,13 +26,14 @@ DB = os.environ.get("DB_PATH") or os.path.join(APP_DIR, "orders.db")
 REPORTS = os.environ.get("REPORTS_DIR") or os.path.join(APP_DIR, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
-VERSION = "v56"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
+VERSION = "v57"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
 TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO").strip()  # .strip() — от случайных пробелов/переноса при вставке
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
 if BASE_URL and not BASE_URL.startswith("http"):
     BASE_URL = "https://" + BASE_URL      # подстраховка: добавим схему, если её забыли
 TBANK_INIT = "https://securepay.tinkoff.ru/v2/Init"
+TBANK_CANCEL = "https://securepay.tinkoff.ru/v2/Cancel"   # возврат/отмена (для чека возврата, тест-кейс №8)
 def tg_token(): return os.environ.get("TELEGRAM_BOT_TOKEN", "")            # читаем live при каждом вызове
 def tg_bot():   return os.environ.get("TELEGRAM_BOT_USERNAME", "").lstrip("@")
 
@@ -1001,6 +1002,39 @@ def tbank_selftest():
                    receipt_enabled_in_payments=_receipt_on(),
                    error_code=res.get("ErrorCode"), message=res.get("Message"), details=res.get("Details"),
                    payment_url=res.get("PaymentURL"), sent_receipt=sent), 200
+
+@app.get("/tbank/refund")
+def tbank_refund():
+    """Возврат с чеком (тест-кейс №8 «чек возврата»). Делает Cancel по оплаченному заказу с объектом Receipt.
+    Заказ должен быть оплачен (есть payment_id). Доступ: /tbank/refund?key=ADMIN_TOKEN&order=<id>[&amount=<руб>]."""
+    if not _admin_ok(): abort(403)
+    oid = (request.args.get("order") or "").strip()
+    with db() as c:
+        if oid:
+            o = c.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
+        else:   # без параметра order — берём последний оплаченный заказ (удобно для теста №8)
+            o = c.execute("SELECT * FROM orders WHERE payment_id IS NOT NULL AND payment_id<>'' "
+                          "ORDER BY created DESC LIMIT 1").fetchone()
+    if not o:
+        return jsonify(ok=False, error="нет заказа с оплатой (payment_id). Сначала проведи тестовую оплату."), 200
+    pid = (o["payment_id"] if "payment_id" in o.keys() else None)
+    if not pid:
+        return jsonify(ok=False, error="у заказа нет payment_id — по нему не было оплаты"), 200
+    rub = int(request.args.get("amount") or _order_amount(o))
+    password = os.environ["TBANK_PASSWORD"].strip()
+    payload = {"TerminalKey": TERMINAL, "PaymentId": str(pid), "Amount": rub * 100}
+    payload["Receipt"] = tbank_receipt(o["email"], rub, "Возврат: отчёт о видимости бренда в нейросетях")
+    payload["Token"] = tbank_token(payload, password)
+    try:
+        req = urllib.request.Request(TBANK_CANCEL, data=json.dumps(payload).encode(),
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            res = json.loads(r.read().decode())
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 200
+    return jsonify(ok=bool(res.get("Success")), order_id=oid, payment_id=str(pid),
+                   error_code=res.get("ErrorCode"), message=res.get("Message"),
+                   status=res.get("Status"), details=res.get("Details")), 200
 
 @app.get("/admin")
 def admin():

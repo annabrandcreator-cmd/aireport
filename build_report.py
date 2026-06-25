@@ -184,7 +184,7 @@ h2 .num{{color:{ACCENT};margin-right:7px}}
 .grid3{{display:flex;gap:5mm}} .grid3>*{{flex:1}}
 .stat{{background:{CARD};border:1px solid {BORDER};border-radius:12px;padding:4.5mm;box-shadow:0 1px 3px rgba(20,16,12,.05)}}
 .stat .n{{font-size:19pt;font-weight:700;color:{ACCENT};line-height:1}} .stat .l{{font-size:9pt;color:{MUTED};margin-top:2mm;line-height:1.4}}
-.box{{border:1px solid {BORDER};border-radius:12px;padding:5mm;margin-top:4mm;background:{CARD};box-shadow:0 1px 3px rgba(20,16,12,.05)}}
+.box{{border:1px solid {BORDER};border-radius:12px;padding:5mm;margin-top:4mm;background:{CARD};box-shadow:0 1px 3px rgba(20,16,12,.05);break-inside:avoid}}
 .box.cream{{background:{CREAM};border:none;box-shadow:none}}
 .box h4{{font-size:10pt;font-weight:700;color:{ACCENTD};margin-bottom:2mm;text-transform:uppercase;letter-spacing:.6px}}
 .box p{{font-size:10pt;color:{INK};line-height:1.5}}
@@ -205,7 +205,7 @@ table.mx th.q{{text-align:left}}
 .st--a{{background:rgba(193,53,37,.12);color:{RED}}} .st--p{{background:rgba(201,121,26,.14);color:{AMBER}}}
 .st--u{{background:rgba(94,86,74,.12);color:{MUTED}}}
 /* examples */
-.ex{{border:1px solid {BORDER};border-radius:12px;padding:6mm;margin-bottom:4.5mm;background:{CARD};box-shadow:0 1px 3px rgba(20,16,12,.05)}}
+.ex{{border:1px solid {BORDER};border-radius:12px;padding:6mm;margin-bottom:4.5mm;background:{CARD};box-shadow:0 1px 3px rgba(20,16,12,.05);break-inside:avoid}}
 .ex .q{{font-size:11pt;font-weight:700;margin-bottom:2.5mm}}
 .ex .r{{font-size:10pt;color:{MUTED};line-height:1.65}} .ex .r b{{color:{INK}}}
 .ex .tag{{display:inline-block;font-size:7.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.5px;padding:3px 9px;border-radius:20px;margin-bottom:3mm}}
@@ -279,7 +279,7 @@ table.mt td{{font-size:9.5pt;font-weight:700;color:{INK};padding:5px 6px}}
 /* план: роли */
 .prole{{margin:1.8mm 0 0}} .prole .pr{{font-size:8pt;font-weight:700;color:{FAINT};text-transform:uppercase;letter-spacing:.5px;margin-bottom:.5mm}}
 /* разбор по запросам */
-.qd{{padding-bottom:2.6mm;margin-bottom:2.6mm;border-bottom:1px solid {BORDER}}}
+.qd{{padding-bottom:2.6mm;margin-bottom:2.6mm;border-bottom:1px solid {BORDER};break-inside:avoid}}
 .qd:last-child{{border-bottom:none;margin-bottom:0;padding-bottom:0}}
 .qd-q{{font-size:10pt;font-weight:700;color:{INK};margin-bottom:1.4mm;line-height:1.3}}
 .qd-q .grp{{font-weight:500;color:{FAINT};font-size:8.5pt}}
@@ -458,7 +458,7 @@ def p_query_detail(d):
         badge='<span class="qd-badge">✓ бренд появился</span>' if hit else ''
         cards.append(f'<div class="{cls}"><div class="qd-q">{i}. {esc(q["q"])}<span class="grp"> · {esc(q["group"])}</span>{badge}</div>{rows}</div>')
     legend=" · ".join(f'{esc(e["short"])} — {esc(e["name"])}' for e in eng)
-    pages=[]; per=6
+    pages=[]; per=max(3, min(6, 40 // (len(eng) + 3)))     # карточек на страницу по числу нейросетей (7 сетей -> 4), чтобы не резало
     for idx in range(0, len(cards), per):
         first=(idx==0)
         head=('<h2><span class="num">04</span>По каким вопросам бренд появляется и кого называют нейросети</h2>' if first

@@ -12,7 +12,7 @@
   PERPLEXITY_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY,
   DEEPSEEK_API_KEY, GIGACHAT_API_KEY, YANDEX_API_KEY, YANDEX_FOLDER_ID
 """
-import os, re, json, time, hashlib, datetime, urllib.request, urllib.error, ssl, uuid
+import os, re, json, time, hashlib, datetime, urllib.request, urllib.error, ssl, uuid, threading
 from concurrent.futures import ThreadPoolExecutor
 
 RUNS = max(2, int(os.environ.get("RUNS", "2") or 2))  # прогонов на каждый запрос (для стабильности можно 3-5)
@@ -213,7 +213,21 @@ def generate_queries(niche, city, site_info=None, aliases=None):
         filtered = [q for q in qs if not any(a in q["q"].lower() for a in al)]
         if len(filtered) >= 5:
             qs = filtered
-    return qs
+    # дедуп по тексту + гарантированно ровно 10 (после фильтров может остаться меньше -> добиваем шаблонами)
+    seen, uniq = set(), []
+    for q in qs:
+        k = re.sub(r"\s+", " ", (q["q"] or "").lower()).strip()
+        if k and k not in seen:
+            seen.add(k); uniq.append(q)
+    qs = uniq
+    if len(qs) < 10:
+        for t in generate_queries_tpl(niche, city):
+            k = re.sub(r"\s+", " ", t["q"].lower()).strip()
+            if k not in seen:
+                seen.add(k); qs.append({"q": _depersonalize(t["q"]), "group": t["group"]})
+            if len(qs) >= 10:
+                break
+    return qs[:10]
 
 def generate_queries_tpl(niche, city):
     n = clean_niche(niche)
@@ -360,18 +374,18 @@ def generate_queries_llm(niche, city, site_info=None):
                 ("СЕГМЕНТ — ДОСТУПНЫЙ. Не пиши про люкс, премиум, эксклюзив и элитность.\n" if seg == "budget" else ""))
     prompt = (
         "Помоги собрать запросы, по которым можно проверить, рекомендуют ли нейросети конкретную компанию. "
-        f"Составь 10 запросов на русском, которые реальный КЛИЕНТ задаёт нейросети (ChatGPT, Алиса, GigaChat), "
+        f"Составь 12 запросов на русском (с запасом, потом отберём лучшие 10), которые реальный КЛИЕНТ задаёт нейросети (ChatGPT, Алиса, GigaChat), "
         f"когда выбирает, где заказать, к кому обратиться или куда поехать в нише: «{niche}».{loc}{ctx}\n"
         "\nГЛАВНОЕ — ФОРМУЛИРОВКА. Это живые вопросы, которые человек вводит в нейросеть, а НЕ SEO-ключи и НЕ рекламные слоганы. "
         "Начинай каждый запрос как безличный вопрос: «Какие компании…», «Кто делает…», «Кто продаёт…», «Где сделать…», «Где заказать…», "
         "«На каком сайте купить…», «В какой клинике/салоне хорошо делают…», «Какую … выбрать для…», «Куда пойти за…», «Хорошая … в …». "
-        "Минимум 8 из 10 — полноценные вопросы со знаком вопроса.\n"
+        "Большинство — полноценные вопросы со знаком вопроса.\n"
         "ОБРАЩЕНИЕ. Допустимо неформальное «ты»: «Посоветуй хороший…», «Подскажи, где…» — так люди и пишут. "
         "НЕ обращайся на «вы»: запрещены формы «Посоветуйте», «Подскажите», «Найдите», «Порекомендуйте», «Помогите» — звучит неестественно.\n"
         f"ОДНА НИША. ВСЕ 10 запросов — про ОДНУ и ту же компанию и нишу «{niche}». КАТЕГОРИЧЕСКИ нельзя смешивать разные сферы "
         "(например клиники, двери, окна, ножи, бельё, потолки, реклама в одном наборе) — это грубая ошибка. "
         "Если ниша не ясна — не выдумывай случайные сферы.\n"
-        "СПИСОК ИГРОКОВ — САМОЕ ВАЖНОЕ: минимум 7 из 10 запросов сформулируй так, чтобы нейросеть в ответ ВЫДАЛА СПИСОК конкретных "
+        "СПИСОК ИГРОКОВ — САМОЕ ВАЖНОЕ: большинство запросов сформулируй так, чтобы нейросеть в ответ ВЫДАЛА СПИСОК конкретных "
         "компаний, клиник, салонов, магазинов или сайтов: «Какие…», «Кто делает/продаёт…», «Где сделать/заказать/купить…», "
         "«На каком сайте купить…», «В какой клинике…», «В каких магазинах…». По таким запросам видно, кого нейросеть называет, а кого нет. "
         "Запросы, на которые отвечают общим советом без названий («как выбрать…», «на что смотреть…»), — максимум 1–2.\n"
@@ -955,10 +969,26 @@ def ask_deepseek(prompt):
                    {"model": "deepseek-chat", "messages": [{"role": "user", "content": prompt}]})
     return j["choices"][0]["message"]["content"]
 
+# Gemini на бесплатном тарифе лимитирован по запросам в минуту (flash-lite ~30/мин).
+# Отчёт шлёт ~20 запросов пачкой -> равномерно разносим их во времени, чтобы не ловить 429.
+_GEMINI_LOCK = threading.Lock()
+_GEMINI_NEXT = [0.0]                                         # самое раннее время следующего вызова
+def _gemini_pace():
+    gap = float(os.environ.get("GEMINI_MIN_GAP", "2.2") or 0)  # сек между вызовами Gemini; 0 = выключить
+    if gap <= 0:
+        return
+    with _GEMINI_LOCK:                                       # держим интервал между запросами ко всем потокам
+        now = time.time()
+        wait = _GEMINI_NEXT[0] - now
+        if wait > 0:
+            time.sleep(wait); now = time.time()
+        _GEMINI_NEXT[0] = now + gap
+
 def ask_gemini(prompt):
     key = os.environ["GEMINI_API_KEY"]
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")      # актуальная модель; сменить переменной
+    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")  # lite доступнее обычной flash (меньше «high demand»); сменить переменной
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+    _gemini_pace()                                           # пауза перед запросом -> укладываемся в лимит RPM
     j = _post_json(url, {"Content-Type": "application/json"},
                    {"contents": [{"parts": [{"text": prompt}]}]})
     return j["candidates"][0]["content"]["parts"][0]["text"]
@@ -1053,7 +1083,7 @@ def _queries_cache_path(site):
     d = os.environ.get("QUERIES_DIR") or os.environ.get("REPORTS_DIR") or "/tmp"
     return os.path.join(d, "qset_" + re.sub(r"[^a-z0-9.]", "_", host) + ".json")
 
-_QSET_VER = "11"  # бамп при изменении промпта запросов -> старый кэш игнорируется и набор пересобирается
+_QSET_VER = "12"  # бамп при изменении промпта запросов -> старый кэш игнорируется и набор пересобирается
 
 def _load_query_set(site):
     try:
@@ -1078,17 +1108,20 @@ def _save_query_set(site, queries):
 # ───────────────────────── оркестрация ───────────────────────
 _TRANSIENT = re.compile(r"(429|500|502|503|504|high demand|temporar|timed out|timeout|unavailable|overload|rate.?limit|"
                         r"connection|reset|disconnect|broken pipe|\bssl\b|eof occurred|remote end)", re.I)
+_RATELIMIT = re.compile(r"429|resource.?exhausted|quota|rate.?limit|too many requests", re.I)
 def _ask_one(prompt, eid, run, brand, test):
     if test or not has_key(eid):
         try: return ask_mock(prompt, eid, run, brand)
         except Exception: return None
-    for attempt in (1, 2):                                  # один повтор при временном сбое (503/429 у Gemini и пр.)
+    max_try = 4 if eid == "gemini" else 2                   # Gemini чаще ловит лимит RPM/«high demand» -> больше попыток
+    for attempt in range(1, max_try + 1):                   # повтор при временном сбое (503/429/обрыв и пр.)
         try:
             return REAL_ADAPTERS[eid](prompt)
         except Exception as e:
             print(f"[ask] {eid} ошибка (попытка {attempt}): {type(e).__name__}: {str(e)[:120]}", flush=True)
-            if attempt == 1 and _TRANSIENT.search(str(e)):
-                time.sleep(1.5); continue
+            if attempt < max_try and _TRANSIENT.search(str(e)):
+                # упёрлись в лимит запросов -> ждём дольше (лимит считается за минуту), иначе короткая пауза
+                time.sleep((5.0 if _RATELIMIT.search(str(e)) else 1.2) * attempt); continue
             return None                                     # стойкая ошибка (ключ/квота/сеть) -> не «0%», а «не удалось проверить»
 
 def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=None, aliases=None, queries=None):

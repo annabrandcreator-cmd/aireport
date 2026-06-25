@@ -26,6 +26,7 @@ DB = os.environ.get("DB_PATH") or os.path.join(APP_DIR, "orders.db")
 REPORTS = os.environ.get("REPORTS_DIR") or os.path.join(APP_DIR, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
+VERSION = "v50"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
 TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO")
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
@@ -889,7 +890,7 @@ def health():
                       "err": (last["err"] or "")[-1200:]} if last else None
     except Exception as e:
         orders, last_order = {"err": str(e)}, None
-    return jsonify(ok=True, terminal=TERMINAL, price=PRICE, base_url=BASE_URL,
+    return jsonify(ok=True, version=VERSION, terminal=TERMINAL, price=PRICE, base_url=BASE_URL,
                    notify_url=f"{BASE_URL}/tbank/notify", test_mode=os.environ.get("TEST_MODE") == "1",
                    telegram=bool(tg_token()), bot=tg_bot(), admin=bool(os.environ.get("ADMIN_CHAT_ID")),
                    orders=orders, last_order=last_order, keys=keys)

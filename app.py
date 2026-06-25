@@ -26,7 +26,7 @@ DB = os.environ.get("DB_PATH") or os.path.join(APP_DIR, "orders.db")
 REPORTS = os.environ.get("REPORTS_DIR") or os.path.join(APP_DIR, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
-VERSION = "v50"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
+VERSION = "v51"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
 TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO")
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
@@ -370,6 +370,11 @@ def generate(order_id):
         data = engine.run(prep=prep) if prep else engine.run(o["brand"], o["site"], o["niche"], o["city"], brand_short=o["brand_short"])
         pdf = os.path.join(REPORTS, f"{order_id}.pdf")
         build_report.build(data, pdf)
+        failed_nets = data.get("failed_engines") or []
+        if failed_nets:                       # сеть не ответила даже после спасательного прохода -> сигнал Анне
+            admin_notify("⚠️ В отчёте не ответили нейросети: " + ", ".join(failed_nets) + "\n"
+                         f"Заказ: {order_id} · {o['site']}\n"
+                         "Клиент получил отчёт без них. Проверь /selftest и при необходимости перегенерируй заказ.")
         with db() as c:
             c.execute("UPDATE orders SET status='done', pdf=? WHERE id=?", (pdf, order_id))
             o = c.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()

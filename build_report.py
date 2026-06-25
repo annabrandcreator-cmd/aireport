@@ -543,8 +543,8 @@ def _comp_where(c):
     """Все запросы (и нейросети), где назван конкурент — чтобы «N из M» было видно по чему именно."""
     ms=c.get("mentions") or []
     if not ms: return ""
-    parts=[f"«{esc(m['q'])}» ({esc(', '.join(m['engines']))})" for m in ms[:4]]
-    more=f" и ещё {len(ms)-4}" if len(ms)>4 else ""
+    parts=[f"«{esc(m['q'])}» ({esc(', '.join(m['engines']))})" for m in ms[:2]]
+    more=f" и ещё {len(ms)-2}" if len(ms)>2 else ""
     word="запросу" if len(ms)==1 else "запросам"
     return f" Назван по {word}: " + "; ".join(parts) + more + "."
 
@@ -559,13 +559,22 @@ def p_competitors(d):
     N=d['total_answers']; bc=d.get('total_mentions',0); ov=d['overall']
     rows=[(d['brand_short'], ov, bc, True)] + [(c['name'], c['rate'], c['count'], False) for c in d['competitors']]
     rows.sort(key=lambda r:-r[1])
+    # Высота секции зависит от числа компаний и длины их названий/запросов и может быть любой.
+    # Поэтому: страница 1 — рейтинг (столбцы) + вывод (всегда влезает); подробные карточки по
+    # каждой компании выносим на страницы-продолжения и разбиваем порциями, чтобы ничего не обрезалось.
+    MAXBARS=11                               # рейтинг компактный; бренд показываем всегда
+    _bars_more=0
+    if len(rows)>MAXBARS:
+        _bars_more=len(rows)-MAXBARS
+        keep=[r for r in rows if r[3]] + [r for r in rows if not r[3]][:MAXBARS-1]
+        rows=sorted(keep, key=lambda r:-r[1])
     bars=""
     for name,rate,cnt,is_you in rows:
         sub=("ваша текущая видимость" if is_you else f"{_gap_phrase(rate-ov)} · упомянут в {cnt} из {N} ответов")
         bars+=bar((esc(name)+" (вы)") if is_you else name, rate, sub, wl="150px", color=(ACCENTD if is_you else FAINT), you=is_you)
-    ev="".join(f'''<div class="ex"><div class="q">{_comp_link(c)} · {c['rate']}%</div>
-          <div class="r">Упомянут в <b>{c['count']}</b> из <b>{c['total']}</b> ответов нейросетей по вашим запросам.{_comp_where(c)}</div></div>''' for c in d['competitors'])
-    names_join=_join([c['name'] for c in d['competitors']])
+    if _bars_more>0:
+        bars+=f'<div class="note" style="margin-top:1mm">…и ещё {_bars_more} компаний с меньшей видимостью.</div>'
+    names_join=_join([c['name'] for c in d['competitors']][:6])
     max_c=max((c['rate'] for c in d['competitors']), default=0)
     if ov>0 and ov>=max_c:
         lead=f"«{esc(d['brand_short'])}» упомянут в {bc} из {N} ответов — чаще найденных компаний"
@@ -576,12 +585,25 @@ def p_competitors(d):
         takeaway=(f"По вашим запросам нейросети называют {names_join}, а {who}. "
                   "Чаще всего дело в количестве согласованных упоминаний во внешних источниках (карты, отзывы, каталоги, публикации) и в понятных страницах под запросы. "
                   "С чего начать, чтобы появляться рядом с ними, — в рекомендациях дальше в отчёте.")
-    return f'''<div class="page"><h2><span class="num">06</span>Какие компании ещё встречаются в ответах</h2>
+    page1=f'''<div class="page"><h2><span class="num">06</span>Какие компании ещё встречаются в ответах</h2>
       <div class="sec-intro">Компании, которые нейросети называли в ответах на ваши запросы. Где удалось определить сайт, имя кликабельно и ведёт прямо на него. Процент считается так же, как ваш: доля из {N} ответов, где встретилось название.</div>
       <div class="card">{bars}</div>
-      <div style="margin-top:4mm">{ev}</div>
       <div class="box cream"><h4>Что это значит</h4><p>{takeaway}</p></div>
       {footer(d)}</div>'''
+    # Подробные карточки по каждой компании — на страницах-продолжениях, порциями (защита от обрезки).
+    comps=d['competitors']
+    def _ev_card(c):
+        return (f'<div class="ex"><div class="q">{_comp_link(c)} · {c["rate"]}%</div>'
+                f'<div class="r">Упомянут в <b>{c["count"]}</b> из <b>{c["total"]}</b> ответов нейросетей по вашим запросам.{_comp_where(c)}</div></div>')
+    PER=3                                     # с запасом: даже длинные карточки (длинные имена + запросы) помещаются
+    pages=[page1]
+    for i in range(0, len(comps), PER):
+        ev="".join(_ev_card(c) for c in comps[i:i+PER])
+        intro=('<div class="sec-intro">Подробнее по каждой компании: в скольких ответах и по каким запросам её называли нейросети.</div>' if i==0 else '')
+        pages.append(f'''<div class="page"><h2>Какие компании ещё встречаются · продолжение</h2>
+      {intro}<div style="margin-top:2mm">{ev}</div>
+      {footer(d)}</div>''')
+    return "".join(pages)
 
 def p_sources(d):
     bars="".join(bar(s['name'], s['share'], "", wl="175px", color=ACCENT if i==0 else "#C98A72", val=f"{s['share']}%") for i,s in enumerate(d['sources']))

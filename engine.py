@@ -1143,6 +1143,26 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
     workers = max(1, min(int(os.environ.get("CONCURRENCY", "5")), len(tasks) or 1))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         answers = list(pool.map(lambda t: _ask_one(t[2], t[1], t[3], brand, test), tasks))
+    # ── «спасательный» проход ──────────────────────────────────────────
+    # Если сеть в параллельной пачке провалила большинство вызовов — частая причина
+    # это упор в лимит запросов в минуту (особенно Gemini на бесплатном тарифе).
+    # Повторяем её запросы ПОСЛЕДОВАТЕЛЬНО (с паузами) — так укладываемся в лимит и
+    # добираем ответы. Но если повтор не помогает с первой же попытки — ошибка стойкая
+    # (ключ/квота/модель), и мы не тратим время на остальные.
+    if not test:
+        f_tot = {}; f_err = {}
+        for (qi, eid, _q, _run), ans in zip(tasks, answers):
+            f_tot[eid] = f_tot.get(eid, 0) + 1
+            if ans is None: f_err[eid] = f_err.get(eid, 0) + 1
+        for eid in [e for e in f_tot if f_err.get(e, 0) >= (f_tot[e] + 1) // 2]:
+            idxs = [i for i, t in enumerate(tasks) if t[1] == eid and answers[i] is None]
+            print(f"[rescue] {eid}: повторяю {len(idxs)} запросов последовательно", flush=True)
+            for n, i in enumerate(idxs):
+                _qi, _eid, q, run = tasks[i]
+                answers[i] = _ask_one(q, eid, run, brand, test)
+                if answers[i] is None and n == 0:
+                    print(f"[rescue] {eid}: повтор не помог — сеть недоступна, прекращаю", flush=True)
+                    break                       # стойкая ошибка -> не мучаем остальные
     all_answers = []
     eng_err = {e["id"]: 0 for e in engines}; eng_tot = {e["id"]: 0 for e in engines}
     for (qi, eid, _q, _run), ans in zip(tasks, answers):

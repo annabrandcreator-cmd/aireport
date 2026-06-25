@@ -26,7 +26,7 @@ DB = os.environ.get("DB_PATH") or os.path.join(APP_DIR, "orders.db")
 REPORTS = os.environ.get("REPORTS_DIR") or os.path.join(APP_DIR, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
-VERSION = "v58"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
+VERSION = "v59"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
 TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO").strip()  # .strip() — от случайных пробелов/переноса при вставке
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
@@ -934,10 +934,23 @@ def health():
                       "err": (last["err"] or "")[-1200:]} if last else None
     except Exception as e:
         orders, last_order = {"err": str(e)}, None
+    # готовность к боевому запуску — видно одним взглядом
+    readiness = {
+        "engines_with_keys": sum(1 for v in keys.values() if v),     # сколько из 7 нейросетей подключено
+        "live_terminal": "DEMO" not in (TERMINAL or "").upper(),     # False = ещё тестовый терминал
+        "receipt_on": _receipt_on(),                                  # чек 54-ФЗ включён
+        "taxation": os.environ.get("TBANK_TAXATION", "usn_income"),
+        "tbank_password_set": bool(os.environ.get("TBANK_PASSWORD")),
+        "admin_token_set": bool(os.environ.get("ADMIN_TOKEN")),
+        "admin_chat_set": bool(os.environ.get("ADMIN_CHAT_ID")),
+        "telegram_set": bool(tg_token()),
+        "base_url_https": (BASE_URL or "").startswith("https://"),
+        "test_mode_off": os.environ.get("TEST_MODE") != "1",
+    }
     return jsonify(ok=True, version=VERSION, terminal=TERMINAL, price=PRICE, base_url=BASE_URL,
                    notify_url=f"{BASE_URL}/tbank/notify", test_mode=os.environ.get("TEST_MODE") == "1",
                    telegram=bool(tg_token()), bot=tg_bot(), admin=bool(os.environ.get("ADMIN_CHAT_ID")),
-                   orders=orders, last_order=last_order, keys=keys)
+                   readiness=readiness, orders=orders, last_order=last_order, keys=keys)
 
 @app.get("/selftest")
 def selftest():

@@ -26,7 +26,7 @@ DB = os.environ.get("DB_PATH") or os.path.join(APP_DIR, "orders.db")
 REPORTS = os.environ.get("REPORTS_DIR") or os.path.join(APP_DIR, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
-VERSION = "v54"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
+VERSION = "v55"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
 TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO")
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
@@ -101,7 +101,10 @@ def tbank_receipt(email, rub, name=None):
     else:         rcpt["Email"] = "noreply@" + ((BASE_URL.split("//")[-1] or "example.ru").split("/")[0])
     return rcpt
 
-def tbank_init(order_id, email, amount=None, description=None):
+def _receipt_on():
+    return os.environ.get("TBANK_RECEIPT", "").strip().lower() in ("1", "true", "yes", "on")
+
+def tbank_init(order_id, email, amount=None, description=None, with_receipt=None):
     password = os.environ["TBANK_PASSWORD"]  # из секрета, не из кода
     rub = amount if amount is not None else PRICE
     payload = {
@@ -114,7 +117,11 @@ def tbank_init(order_id, email, amount=None, description=None):
         "SuccessURL": f"{BASE_URL}/thanks?order={order_id}",   # обычная веб-страница, не t.me
         "FailURL": f"{BASE_URL}/fail?order={order_id}",
     }
-    payload["Receipt"] = tbank_receipt(email, rub, payload["Description"])   # 54-ФЗ: фискальный чек
+    # Чек (54-ФЗ) добавляем, только если онлайн-касса реально подключена к терминалу:
+    # включается флагом TBANK_RECEIPT=1. Иначе ТБанк отклонит Init и оплата не создастся.
+    # /tbank/selftest зовёт с with_receipt=True, чтобы протестировать чек, не трогая боевую оплату.
+    if with_receipt if with_receipt is not None else _receipt_on():
+        payload["Receipt"] = tbank_receipt(email, rub, payload["Description"])
     payload["Token"] = tbank_token(payload, password)
     req = urllib.request.Request(TBANK_INIT, data=json.dumps(payload).encode(),
                                  headers={"Content-Type": "application/json"}, method="POST")
@@ -822,6 +829,8 @@ def tg_webhook():
                                 c.execute("UPDATE orders SET status='pending', payment_id=? WHERE id=?", (res.get("PaymentId"), oid))
                             tg_send_payment_button(chat, res["PaymentURL"], o["brand"])
                         else:
+                            admin_notify("⚠️ Init вернул отказ\nЗаказ: " + str(oid) +
+                                         f"\nErrorCode: {res.get('ErrorCode')} · {res.get('Message')} · {res.get('Details')}")
                             tg_send_message(chat, "Не удалось создать оплату. Напишите нам, поможем оформить.")
                     except Exception as e:
                         print("[pay] ошибка:", e)
@@ -980,10 +989,11 @@ def tbank_selftest():
     email = request.args.get("email", os.environ.get("TBANK_RECEIPT_EMAIL", "test@example.com"))
     sent = tbank_receipt(email, PRICE, None)
     try:
-        res = tbank_init(oid, email)
+        res = tbank_init(oid, email, with_receipt=True)   # принудительно с чеком — это и тестируем
     except Exception as e:
         return jsonify(ok=False, error=str(e), sent_receipt=sent), 200
     return jsonify(ok=bool(res.get("Success")), terminal=TERMINAL, order_id=oid,
+                   receipt_enabled_in_payments=_receipt_on(),
                    error_code=res.get("ErrorCode"), message=res.get("Message"), details=res.get("Details"),
                    payment_url=res.get("PaymentURL"), sent_receipt=sent), 200
 

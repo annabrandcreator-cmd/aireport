@@ -990,16 +990,24 @@ def _giga_token():
     return _GIGA_TOKEN["val"]
 
 def ask_gigachat(prompt):
-    tok = _giga_token()
-    req = urllib.request.Request(
-        "https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
-        data=json.dumps({"model": os.environ.get("GIGACHAT_MODEL", "GigaChat"),
-                         "messages": [{"role": "user", "content": prompt}]}).encode(),
-        method="POST",
-        headers={"Authorization": "Bearer " + tok, "Content-Type": "application/json", "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=40, context=_giga_ctx()) as r:
-        j = json.loads(r.read().decode())
-    return j["choices"][0]["message"]["content"]
+    last = None
+    for attempt in (1, 2):                                  # GigaChat нестабилен: протухший токен/обрыв TLS -> сброс токена и повтор
+        try:
+            tok = _giga_token()
+            req = urllib.request.Request(
+                "https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
+                data=json.dumps({"model": os.environ.get("GIGACHAT_MODEL", "GigaChat"),
+                                 "messages": [{"role": "user", "content": prompt}]}).encode(),
+                method="POST",
+                headers={"Authorization": "Bearer " + tok, "Content-Type": "application/json", "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=40, context=_giga_ctx()) as r:
+                return json.loads(r.read().decode())["choices"][0]["message"]["content"]
+        except Exception as e:
+            last = e
+            _GIGA_TOKEN["val"] = ""; _GIGA_TOKEN["exp"] = 0.0   # сбрасываем токен -> на повторе перелогинимся
+            if attempt == 1:
+                time.sleep(1.2); continue
+            raise last
 
 def ask_yandex(prompt):
     key = os.environ["YANDEX_API_KEY"]; folder = os.environ.get("YANDEX_FOLDER_ID", "").strip()
@@ -1068,7 +1076,8 @@ def _save_query_set(site, queries):
         pass
 
 # ───────────────────────── оркестрация ───────────────────────
-_TRANSIENT = re.compile(r"(429|500|502|503|504|high demand|temporar|timed out|timeout|unavailable|overload|rate.?limit)", re.I)
+_TRANSIENT = re.compile(r"(429|500|502|503|504|high demand|temporar|timed out|timeout|unavailable|overload|rate.?limit|"
+                        r"connection|reset|disconnect|broken pipe|\bssl\b|eof occurred|remote end)", re.I)
 def _ask_one(prompt, eid, run, brand, test):
     if test or not has_key(eid):
         try: return ask_mock(prompt, eid, run, brand)

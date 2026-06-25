@@ -26,7 +26,7 @@ DB = os.environ.get("DB_PATH") or os.path.join(APP_DIR, "orders.db")
 REPORTS = os.environ.get("REPORTS_DIR") or os.path.join(APP_DIR, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
-VERSION = "v59"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
+VERSION = "v61"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
 TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO").strip()  # .strip() — от случайных пробелов/переноса при вставке
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
@@ -179,8 +179,8 @@ def tg_send_document(chat_id, pdf_path, caption=""):
 
 def tg_send_payment_button(chat_id, pay_url, brand):
     _tg("sendMessage", {"chat_id": chat_id,
-        "text": f"Заказ на отчёт о видимости «{brand}» в нейросетях принят.\n\nНажмите кнопку, чтобы оплатить 1290 ₽. Сразу после оплаты я пришлю готовый отчёт сюда, в этот чат.",
-        "reply_markup": {"inline_keyboard": [[{"text": "Оплатить 1290 ₽", "url": pay_url}]]}})
+        "text": f"Заказ на отчёт о видимости «{brand}» в нейросетях принят.\n\nНажмите кнопку, чтобы оплатить {PRICE} ₽. Сразу после оплаты я пришлю готовый отчёт сюда, в этот чат.",
+        "reply_markup": {"inline_keyboard": [[{"text": f"Оплатить {PRICE} ₽", "url": pay_url}]]}})
 
 def tg_send_buttons(chat_id, text, keyboard):
     if tg_token(): _tg("sendMessage", {"chat_id": chat_id, "text": text, "reply_markup": {"inline_keyboard": keyboard}})
@@ -430,32 +430,81 @@ def generate(order_id):
                 _error_kb(order_id))
 
 # ───────────────────────── маршруты ──────────────────────────────────
-ORDER_FORM = """<!doctype html><html lang=ru><head><meta charset=utf-8>
-<meta name=viewport content="width=device-width,initial-scale=1">
-<title>Отчёт о видимости в нейросетях</title><style>
-*{box-sizing:border-box}body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#141210;color:#fff;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:24px}
-.card{width:100%;max-width:440px}
-.ey{display:inline-block;font-size:11px;font-weight:700;letter-spacing:1.6px;text-transform:uppercase;color:#DE4A2C;border:1px solid rgba(222,74,44,.4);border-radius:30px;padding:6px 14px;margin-bottom:18px}
-h1{font-size:25px;line-height:1.15;margin:0 0 10px}
-p.sub{color:rgba(255,255,255,.6);font-size:15px;line-height:1.5;margin:0 0 20px}
-label{display:block;font-size:13px;color:rgba(255,255,255,.7);margin:14px 0 6px}
-input{width:100%;padding:13px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.05);color:#fff;font-size:15px}
-input:focus{outline:none;border-color:#DE4A2C}
-button{width:100%;margin-top:22px;padding:15px;border:0;border-radius:30px;background:#DE4A2C;color:#fff;font-size:16px;font-weight:700;cursor:pointer}
-.note{font-size:12px;color:rgba(255,255,255,.45);margin-top:14px;line-height:1.5}
-</style></head><body><div class=card>
-<div class=ey>AI-видимость · отчёт</div>
-<h1>Проверим ваш бизнес в 7 нейросетях</h1>
-<p class=sub>Введите сайт. Проверим по 10 коммерческим запросам в ChatGPT, Яндекс Нейро и ещё 5 AI-сервисах. Готовый отчёт придёт в Telegram.</p>
-<form method=post action=/create-payment>
-  <label>Адрес сайта *</label><input name=site placeholder="example.ru" required>
-  <label>Ниша, чем занимаетесь</label><input name=niche placeholder="мебель на заказ">
-  <label>Город</label><input name=city placeholder="Москва">
-  <label>E-mail (необязательно)</label><input name=email type=email placeholder="вы@почта.ру">
-  <button type=submit>Получить отчёт за 1290 ₽ &rarr;</button>
-</form>
-<p class=note>После оплаты вы перейдёте в Telegram-бот, нажмёте «Старт», и отчёт придёт в чат за несколько минут.</p>
-</div></body></html>"""
+ORDER_FORM = """<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Отчёт о видимости бизнеса в нейросетях · __PRICE__ ₽ · Анна Курбатова</title>
+<meta name="description" content="Проверим, рекомендуют ли вас нейросети: ChatGPT, Яндекс Нейро и ещё 5 AI-сервисов по 10 коммерческим запросам. Отчёт с конкурентами и планом действий придёт в Telegram.">
+<meta name="theme-color" content="#DE4A2C">
+<meta property="og:title" content="Отчёт о видимости бизнеса в нейросетях">
+<meta property="og:description" content="Проверим ваш бизнес по 10 запросам в 7 нейросетях. Кого рекомендуют вместо вас и что изменить. Отчёт придёт в Telegram.">
+<style>
+@font-face{font-family:"Gilroy";src:url("/fonts/Gilroy-Regular.ttf") format("truetype");font-weight:400;font-display:swap}
+@font-face{font-family:"Gilroy";src:url("/fonts/Gilroy-Medium.ttf") format("truetype");font-weight:500;font-display:swap}
+@font-face{font-family:"Gilroy";src:url("/fonts/Gilroy-Semibold.ttf") format("truetype");font-weight:600;font-display:swap}
+@font-face{font-family:"Gilroy";src:url("/fonts/Gilroy-Bold.ttf") format("truetype");font-weight:700;font-display:swap}
+:root{--bg:#FFFFFF;--ink:#141210;--ink-soft:#403B34;--muted:#857F74;--line-strong:#D6CFC2;--coral:#DE4A2C;--coral-deep:#BE3A20;--pad:clamp(22px,5vw,84px);--ease:cubic-bezier(.22,.61,.36,1)}
+*{margin:0;padding:0;box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{font-family:"Gilroy",system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--ink);line-height:1.6;-webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none}
+::selection{background:var(--coral);color:#fff}
+.nav{position:fixed;top:0;left:0;right:0;z-index:20;display:flex;align-items:center;justify-content:space-between;padding:18px var(--pad);transition:background .4s var(--ease),box-shadow .4s var(--ease)}
+.nav.solid{background:rgba(255,255,255,.86);backdrop-filter:blur(10px);box-shadow:0 1px 0 rgba(20,18,16,.06)}
+.wm{display:flex;flex-direction:column;line-height:1.05}
+.wm-name{font-size:17px;font-weight:600;letter-spacing:-.01em}
+.wm-name .dot{color:var(--coral)}
+.wm-desc{font-size:10px;font-weight:600;letter-spacing:.24em;text-transform:uppercase;color:var(--muted);margin-top:3px}
+.nav-cta{display:inline-flex;align-items:center;gap:.55em;font-size:14px;font-weight:600;color:#fff;background:var(--ink);padding:11px 20px;border-radius:6px;transition:background .3s var(--ease),transform .3s var(--ease)}
+.nav-cta:hover{background:var(--coral);transform:translateY(-1px)}
+.nav-cta svg{width:16px;height:16px}
+#ord{max-width:940px;margin:0 auto;padding:clamp(112px,14vh,150px) var(--pad) clamp(56px,8vh,96px);min-height:100vh;min-height:100svh;display:flex;flex-direction:column;justify-content:center}
+.ord-head{text-align:center;margin-bottom:8px}
+.ord-eyebrow{display:inline-flex;align-items:center;gap:.7em;font-size:12px;font-weight:600;letter-spacing:.2em;text-transform:uppercase;color:var(--muted);margin-bottom:18px}
+.ord-eyebrow::before{content:"";width:30px;height:2px;background:var(--coral);display:inline-block}
+.ord-title{font-weight:500;font-size:clamp(30px,4.4vw,52px);line-height:1.05;letter-spacing:-.024em;margin:0}
+.ord-title b{color:var(--coral);font-weight:500}
+.ord-sub{font-size:clamp(16px,1.4vw,20px);line-height:1.5;color:var(--ink-soft);max-width:62ch;margin:18px auto 0}
+.ord-form{max-width:480px;margin:34px auto 0;display:flex;flex-direction:column;gap:12px;width:100%}
+.ord-form label{text-align:left;font-size:13px;color:var(--muted);margin:6px 0 -4px 2px}
+.ord-form input{background:#fff;border:1.5px solid var(--line-strong);border-radius:12px;color:var(--ink);font-family:inherit;font-size:16px;padding:15px 16px;outline:0;transition:border-color .25s var(--ease);width:100%}
+.ord-form input:focus{border-color:var(--ink)}
+.ord-form input::placeholder{color:var(--muted)}
+.ord-btn{margin-top:8px;border:0;cursor:pointer;font-family:inherit;font-size:16.5px;font-weight:600;border-radius:12px;padding:17px;color:#fff;background:var(--coral);box-shadow:0 14px 32px -14px rgba(222,74,44,.7);transition:background .25s var(--ease),transform .2s var(--ease)}
+.ord-btn:hover{background:var(--coral-deep);transform:translateY(-1px)}
+.ord-badges{display:flex;justify-content:center;flex-wrap:wrap;gap:8px 20px;margin-top:22px;color:var(--ink-soft);font-size:13.5px}
+.ord-badges span{display:inline-flex;align-items:center;gap:7px}
+.ord-badges b{color:var(--ink);font-weight:600}
+.ord-hint{text-align:center;color:var(--muted);font-size:13.5px;margin-top:16px;line-height:1.55;max-width:480px;margin-left:auto;margin-right:auto}
+.footer{border-top:1px solid var(--line-strong);padding:26px var(--pad);display:flex;flex-wrap:wrap;gap:6px 18px;justify-content:center;text-align:center;color:var(--muted);font-size:12.5px}
+.footer a{color:var(--muted);text-decoration:underline;text-underline-offset:2px}
+.footer a:hover{color:var(--ink)}
+</style></head><body>
+<nav class="nav">
+  <a class="wm" href="https://annakurbatova.ru/"><span class="wm-name">Анна&nbsp;Курбатова<span class="dot">°</span></span><span class="wm-desc">AI для бизнеса</span></a>
+  <a class="nav-cta" href="https://t.me/anna_kurbatova" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M21 3 10.5 13.5M21 3l-6.5 18-4-8-8-4z"/></svg><span>Обсудить задачу</span></a>
+</nav>
+<main><div id="ord">
+  <div class="ord-head">
+    <span class="ord-eyebrow">AI-видимость · отчёт</span>
+    <h1 class="ord-title">Узнайте, рекомендуют&nbsp;ли вас <b>нейросети</b></h1>
+    <p class="ord-sub">Проверим ваш бизнес по 10 коммерческим запросам в ChatGPT, Яндекс&nbsp;Нейро и ещё 5 AI-сервисах. Покажем, кого советуют вместо вас и что изменить. Готовый отчёт придёт в Telegram.</p>
+  </div>
+  <form class="ord-form" method="post" action="/create-payment">
+    <label for="ordSite">Адрес вашего сайта</label>
+    <input type="text" id="ordSite" name="site" placeholder="ваш-сайт.ру" required>
+    <label for="ordNiche">Чем вы занимаетесь</label>
+    <input type="text" id="ordNiche" name="niche" placeholder="коротко опишите вашу нишу" required>
+    <button class="ord-btn" type="submit">Получить отчёт за __PRICE__ ₽ &rarr;</button>
+  </form>
+  <div class="ord-badges"><span><b>7</b> нейросетей</span><span><b>140</b> проверок</span><span>отчёт за <b>10 минут</b></span></div>
+  <div class="ord-hint">Оплата картой или через СБП в ТBank. После оплаты вы перейдёте в Telegram-бот, нажмёте «Старт», и отчёт придёт в чат.</div>
+</div></main>
+<footer class="footer">
+  <span>© 2026 Анна Курбатова</span><span>ИНН 504508244657</span>
+  <a href="https://annakurbatova.ru/privacy.html" target="_blank" rel="noopener">Политика конфиденциальности</a>
+</footer>
+<script>(function(){var n=document.querySelector('.nav');if(!n)return;var f=function(){n.classList.toggle('solid',window.scrollY>40)};f();window.addEventListener('scroll',f,{passive:true})})();</script>
+</body></html>"""
 
 SITE = "https://annakurbatova.ru"
 THANKS_PAGE = """<!doctype html><html lang=ru><head><meta charset=utf-8>
@@ -573,7 +622,13 @@ def err_page(msg, code=502):
 
 @app.get("/")
 def home():
-    return ORDER_FORM
+    return ORDER_FORM.replace("__PRICE__", str(PRICE))        # цена на витрине из PRICE_RUB
+
+@app.get("/fonts/<fn>")
+def fonts(fn):                                                # отдаём шрифты Gilroy того же домена (без CORS-проблем)
+    if not re.fullmatch(r"Gilroy-(Regular|Medium|Semibold|Bold)\.ttf", fn or ""):
+        abort(404)
+    return send_file(os.path.join(APP_DIR, "fonts", fn), mimetype="font/ttf", max_age=2592000)
 
 @app.post("/create-payment")
 def create_payment():

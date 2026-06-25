@@ -26,7 +26,7 @@ DB = os.environ.get("DB_PATH") or os.path.join(APP_DIR, "orders.db")
 REPORTS = os.environ.get("REPORTS_DIR") or os.path.join(APP_DIR, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
-VERSION = "v52"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
+VERSION = "v54"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
 TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO")
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
@@ -79,6 +79,28 @@ def tbank_token(params, password):
                       for k in sorted(flat))
     return hashlib.sha256(concat.encode("utf-8")).hexdigest()
 
+def tbank_receipt(email, rub, name=None):
+    """Объект чека (54-ФЗ) для метода Init. СНО и НДС зависят от системы налогообложения —
+    задаются переменными окружения (по умолчанию УСН-доходы, без НДС, услуга).
+    В подпись (Token) чек не входит — ТБанк его не учитывает."""
+    item = {
+        "Name": (name or "Отчёт о видимости бренда в нейросетях")[:128],
+        "Price": rub * 100,
+        "Quantity": 1,
+        "Amount": rub * 100,                                 # = Price * Quantity
+        "Tax": os.environ.get("TBANK_VAT", "none"),          # НДС: none — для УСН/без НДС
+        "PaymentMethod": "full_payment",                     # полный расчёт
+        "PaymentObject": os.environ.get("TBANK_PAYMENT_OBJECT", "service"),  # услуга
+        "MeasurementUnit": "шт",                             # обязателен для ФФД 1.2; в 1.05 игнорируется
+    }
+    rcpt = {"Taxation": os.environ.get("TBANK_TAXATION", "usn_income"), "Items": [item]}
+    em = (email or os.environ.get("TBANK_RECEIPT_EMAIL", "")).strip()
+    phone = os.environ.get("TBANK_RECEIPT_PHONE", "").strip()
+    if em:        rcpt["Email"] = em[:64]                    # чек уйдёт сюда; обязателен Email ИЛИ Phone
+    elif phone:   rcpt["Phone"] = phone
+    else:         rcpt["Email"] = "noreply@" + ((BASE_URL.split("//")[-1] or "example.ru").split("/")[0])
+    return rcpt
+
 def tbank_init(order_id, email, amount=None, description=None):
     password = os.environ["TBANK_PASSWORD"]  # из секрета, не из кода
     rub = amount if amount is not None else PRICE
@@ -92,6 +114,7 @@ def tbank_init(order_id, email, amount=None, description=None):
         "SuccessURL": f"{BASE_URL}/thanks?order={order_id}",   # обычная веб-страница, не t.me
         "FailURL": f"{BASE_URL}/fail?order={order_id}",
     }
+    payload["Receipt"] = tbank_receipt(email, rub, payload["Description"])   # 54-ФЗ: фискальный чек
     payload["Token"] = tbank_token(payload, password)
     req = urllib.request.Request(TBANK_INIT, data=json.dumps(payload).encode(),
                                  headers={"Content-Type": "application/json"}, method="POST")
@@ -622,6 +645,7 @@ def _parse_query_list(text):
     qs = []
     for l in text.splitlines():
         l = re.sub(r"^\s*\d+[.)]?\s+", "", l).strip(" -–—•\t").strip()   # «1.» «2)» и «10 » без точки
+        if l.startswith("/"): continue                                   # команды (/selftest и пр.) — не запросы
         if len(l) >= 6: qs.append(l)
     return qs[:12]
 
@@ -812,6 +836,11 @@ def tg_webhook():
         return "OK"
     # свободный текст
     if text:
+        if text.startswith("/"):                 # /selftest, /health и т.п., набранные в чат — это команды, НЕ запросы.
+            # Никогда не трактуем их как нишу/запросы/правку — иначе случайная команда портит заказ.
+            tg_send_message(chat, "Это команда, а не запрос — на заказ она не влияет. "
+                                  "Чтобы открыть меню, отправьте /start. Чтобы изменить запросы — нажмите «Изменить запросы» под списком.")
+            return "OK"
         with db() as c:                          # ждём нишу от клиента (сайт не разобрался автоматически)
             nq = c.execute("SELECT id FROM orders WHERE tg_chat_id=? AND status='await_niche' ORDER BY created DESC LIMIT 1",
                            (str(chat),)).fetchone()
@@ -940,6 +969,23 @@ def _admin_ok():
 def _order_amount(r):
     try: return r["amount"] or (PRICE if (r["kind"] or "main") == "main" else 0)
     except Exception: return PRICE
+
+@app.get("/tbank/selftest")
+def tbank_selftest():
+    """Проверка формирования чека (54-ФЗ): делает Init на текущем терминале с объектом Receipt
+    и показывает ответ ТБанка. Пароль читается из TBANK_PASSWORD (env) — в коде и ответе не светится.
+    Доступ: /tbank/selftest?key=ADMIN_TOKEN  (можно &email=...)."""
+    if not _admin_ok(): abort(403)
+    oid = "rcpttest" + uuid.uuid4().hex[:8]
+    email = request.args.get("email", os.environ.get("TBANK_RECEIPT_EMAIL", "test@example.com"))
+    sent = tbank_receipt(email, PRICE, None)
+    try:
+        res = tbank_init(oid, email)
+    except Exception as e:
+        return jsonify(ok=False, error=str(e), sent_receipt=sent), 200
+    return jsonify(ok=bool(res.get("Success")), terminal=TERMINAL, order_id=oid,
+                   error_code=res.get("ErrorCode"), message=res.get("Message"), details=res.get("Details"),
+                   payment_url=res.get("PaymentURL"), sent_receipt=sent), 200
 
 @app.get("/admin")
 def admin():

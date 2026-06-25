@@ -974,7 +974,7 @@ def ask_deepseek(prompt):
 _GEMINI_LOCK = threading.Lock()
 _GEMINI_NEXT = [0.0]                                         # самое раннее время следующего вызова
 def _gemini_pace():
-    gap = float(os.environ.get("GEMINI_MIN_GAP", "2.2") or 0)  # сек между вызовами Gemini; 0 = выключить
+    gap = float(os.environ.get("GEMINI_MIN_GAP", "0") or 0)  # сек между вызовами Gemini; 0 = выкл (на платном тарифе пауза не нужна)
     if gap <= 0:
         return
     with _GEMINI_LOCK:                                       # держим интервал между запросами ко всем потокам
@@ -984,14 +984,30 @@ def _gemini_pace():
             time.sleep(wait); now = time.time()
         _GEMINI_NEXT[0] = now + gap
 
+# Одна модель Gemini в часы пик часто отдаёт 503 «high demand». Поэтому пробуем по очереди
+# несколько моделей: если первая перегружена — берём следующую. Список можно переопределить
+# переменной GEMINI_MODEL (через запятую). На перегрузку (503/overload) переходим к следующей,
+# на квоту/ключ (429/billing) — нет смысла, выходим сразу.
+_GEMINI_CAP = re.compile(r"503|unavailable|high demand|overload|deadline|exceeded.*deadline|temporar", re.I)
 def ask_gemini(prompt):
     key = os.environ["GEMINI_API_KEY"]
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")  # lite доступнее обычной flash (меньше «high demand»); сменить переменной
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
-    _gemini_pace()                                           # пауза перед запросом -> укладываемся в лимит RPM
-    j = _post_json(url, {"Content-Type": "application/json"},
-                   {"contents": [{"parts": [{"text": prompt}]}]})
-    return j["candidates"][0]["content"]["parts"][0]["text"]
+    models = [m.strip() for m in os.environ.get(
+        "GEMINI_MODEL", "gemini-2.5-flash,gemini-2.0-flash,gemini-2.5-flash-lite").split(",") if m.strip()]
+    _gemini_pace()
+    last = None
+    for i, model in enumerate(models):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+        try:
+            j = _post_json(url, {"Content-Type": "application/json"},
+                           {"contents": [{"parts": [{"text": prompt}]}]})
+            return j["candidates"][0]["content"]["parts"][0]["text"]
+        except Exception as e:
+            last = e
+            if i + 1 < len(models) and _GEMINI_CAP.search(str(e)):
+                print(f"[gemini] {model} перегружена ({str(e)[:60]}) -> пробую следующую модель", flush=True)
+                continue                                     # модель перегружена -> следующая в списке
+            raise
+    raise last
 
 # GigaChat: ключ из кабинета (Authorization Key, Basic) меняется на access token на 30 минут.
 # Сертификаты Минцифры в контейнере не ставим -> отключаем проверку TLS для доменов Сбера.
@@ -1117,7 +1133,7 @@ def _ask_one(prompt, eid, run, brand, test):
     if test or not has_key(eid):
         try: return ask_mock(prompt, eid, run, brand)
         except Exception: return None
-    max_try = 4 if eid == "gemini" else 2                   # Gemini чаще ловит лимит RPM/«high demand» -> больше попыток
+    max_try = 3 if eid == "gemini" else 2                   # Gemini чаще ловит «high demand» -> на попытку больше (добор — в спас.проходе)
     for attempt in range(1, max_try + 1):                   # повтор при временном сбое (503/429/обрыв и пр.)
         try:
             return REAL_ADAPTERS[eid](prompt)
@@ -1127,8 +1143,8 @@ def _ask_one(prompt, eid, run, brand, test):
             if _HARDFAIL.search(msg):
                 return None                                 # квота/биллинг/ключ -> повтор бесполезен, сразу выходим
             if attempt < max_try and _TRANSIENT.search(msg):
-                # упёрлись в лимит запросов -> ждём дольше (лимит считается за минуту), иначе короткая пауза
-                time.sleep((5.0 if _RATELIMIT.search(msg) else 1.2) * attempt); continue
+                # перегрузка/лимит -> пауза подольше (но умеренная, чтобы отчёт не тянулся), иначе короткая
+                time.sleep((3.0 if _RATELIMIT.search(msg) else 1.2) * attempt); continue
             return None                                     # стойкая ошибка (ключ/квота/сеть) -> не «0%», а «не удалось проверить»
 
 def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=None, aliases=None, queries=None):
@@ -1147,7 +1163,7 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
     # все вызовы ко всем сетям считаем параллельно (пачками), а не строго по очереди
     tasks = [(qi, e["id"], q["q"], run)
              for qi, q in enumerate(queries) for e in engines for run in range(RUNS)]
-    workers = max(1, min(int(os.environ.get("CONCURRENCY", "5")), len(tasks) or 1))
+    workers = max(1, min(int(os.environ.get("CONCURRENCY", "8")), len(tasks) or 1))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         answers = list(pool.map(lambda t: _ask_one(t[2], t[1], t[3], brand, test), tasks))
     # ── «спасательный» проход ──────────────────────────────────────────
@@ -1161,10 +1177,13 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
         for (qi, eid, _q, _run), ans in zip(tasks, answers):
             f_tot[eid] = f_tot.get(eid, 0) + 1
             if ans is None: f_err[eid] = f_err.get(eid, 0) + 1
+        resc_deadline = time.time() + float(os.environ.get("RESCUE_BUDGET", "75"))  # потолок на спасательный проход, чтобы отчёт не тянулся
         for eid in [e for e in f_tot if f_err.get(e, 0) >= (f_tot[e] + 1) // 2]:
             idxs = [i for i, t in enumerate(tasks) if t[1] == eid and answers[i] is None]
             print(f"[rescue] {eid}: повторяю {len(idxs)} запросов последовательно", flush=True)
             for n, i in enumerate(idxs):
+                if time.time() > resc_deadline:  # вышли за бюджет времени -> прекращаем добор (сеть пометится недоступной)
+                    print(f"[rescue] {eid}: лимит времени, останавливаю добор", flush=True); break
                 _qi, _eid, q, run = tasks[i]
                 answers[i] = _ask_one(q, eid, run, brand, test)
                 if answers[i] is None and n == 0:

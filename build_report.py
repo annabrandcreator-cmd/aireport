@@ -431,18 +431,29 @@ def p_matrix(d):
       <div class="note" style="margin-top:4mm">{legend}</div>
       {footer(d)}</div>'''
 
+def _qd_names(lst, n=3):
+    """Короткий список имён: не больше n, длинные имена режем, остальное -> «и др.».
+    Это держит высоту строки в 1-2 линии -> карточка запроса не переполняет страницу."""
+    out=[]
+    for x in lst:
+        x=str(x).strip()
+        if not x: continue
+        out.append(x if len(x)<=24 else x[:23].rstrip()+"…")
+        if len(out)>=n: break
+    tail=" и др." if len([x for x in lst if x])>len(out) else ""
+    return ", ".join(out)+tail
+
 def _qd_row(q, e):
     if e.get('failed'):
         return f'<div class="qd-e"><b>{esc(e["short"])}:</b> не удалось проверить (ошибка доступа к API)</div>'
     h=q['hits'].get(e['id'],0)
     ev=(q.get('evidence') or {}).get(e['id'],{})
-    comps=ev.get('comps',[])[:4]                              # подтверждённые нишевые конкуренты
-    others=[o for o in ev.get('others',[]) if o not in comps][:4]   # прочие названные игроки (площадки, домены, бренды)
-    named=(comps+others)[:5]
-    if h>=2:   t="назвал ваш бренд в обоих ответах (2/2)" + (", рядом назвал "+", ".join(named) if named else "")
-    elif h==1: t="назвал ваш бренд в одном ответе (1/2)" + (", рядом назвал "+", ".join(named) if named else "")
-    elif comps:t="назвал конкурентов: "+", ".join(comps)+(", "+", ".join(others) if others else "")+"; вашего бренда нет"
-    elif others:t="назвал других игроков: "+", ".join(others)+"; вашего бренда нет"
+    comps=ev.get('comps',[])                                  # подтверждённые нишевые конкуренты
+    others=[o for o in ev.get('others',[]) if o not in comps]  # прочие названные игроки (площадки, домены, бренды)
+    if h>=2:   t="назвал ваш бренд в обоих ответах (2/2)" + (", рядом назвал "+_qd_names(comps+others) if (comps or others) else "")
+    elif h==1: t="назвал ваш бренд в одном ответе (1/2)" + (", рядом назвал "+_qd_names(comps+others) if (comps or others) else "")
+    elif comps:t="назвал конкурентов: "+_qd_names(comps+others)+"; вашего бренда нет"
+    elif others:t="назвал других игроков: "+_qd_names(others)+"; вашего бренда нет"
     else:      t="общий ответ без названий компаний"
     cls=" qd-e--hit" if h>=1 else ""                          # строка движка зелёным, если бренд появился
     return f'<div class="qd-e{cls}"><b>{esc(e["short"])}:</b> {esc(t)}</div>'
@@ -458,7 +469,8 @@ def p_query_detail(d):
         badge='<span class="qd-badge">✓ бренд появился</span>' if hit else ''
         cards.append(f'<div class="{cls}"><div class="qd-q">{i}. {esc(q["q"])}<span class="grp"> · {esc(q["group"])}</span>{badge}</div>{rows}</div>')
     legend=" · ".join(f'{esc(e["short"])} — {esc(e["name"])}' for e in eng)
-    pages=[]; per=max(3, min(6, 40 // (len(eng) + 3)))     # карточек на страницу по числу нейросетей (7 сетей -> 4), чтобы не резало
+    # карточек на страницу по числу нейросетей: при 6-7 сетях строки длиннее -> берём 3, чтобы не резало
+    pages=[]; per=(3 if len(eng)>=6 else (4 if len(eng)>=4 else 6))
     for idx in range(0, len(cards), per):
         first=(idx==0)
         head=('<h2><span class="num">04</span>По каким вопросам бренд появляется и кого называют нейросети</h2>' if first

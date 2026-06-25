@@ -1108,7 +1108,11 @@ def _save_query_set(site, queries):
 # ───────────────────────── оркестрация ───────────────────────
 _TRANSIENT = re.compile(r"(429|500|502|503|504|high demand|temporar|timed out|timeout|unavailable|overload|rate.?limit|"
                         r"connection|reset|disconnect|broken pipe|\bssl\b|eof occurred|remote end)", re.I)
-_RATELIMIT = re.compile(r"429|resource.?exhausted|quota|rate.?limit|too many requests", re.I)
+_RATELIMIT = re.compile(r"resource.?exhausted|rate.?limit|too many requests|high demand|per.?minute", re.I)
+# Стойкие ошибки: исчерпана квота/нет биллинга/неверный ключ/доступ. Повторять и «спасать» бесполезно —
+# только жжём время и остатки квоты. Сразу помечаем сеть как недоступную (клиент увидит честно, Анна — алерт).
+_HARDFAIL = re.compile(r"quota|billing|exceeded your current quota|api[_ ]?key not valid|invalid.{0,4}api.?key|"
+                       r"permission denied|unauthor|\b401\b|\b403\b|\b404\b|not found", re.I)
 def _ask_one(prompt, eid, run, brand, test):
     if test or not has_key(eid):
         try: return ask_mock(prompt, eid, run, brand)
@@ -1118,10 +1122,13 @@ def _ask_one(prompt, eid, run, brand, test):
         try:
             return REAL_ADAPTERS[eid](prompt)
         except Exception as e:
-            print(f"[ask] {eid} ошибка (попытка {attempt}): {type(e).__name__}: {str(e)[:120]}", flush=True)
-            if attempt < max_try and _TRANSIENT.search(str(e)):
+            msg = str(e)
+            print(f"[ask] {eid} ошибка (попытка {attempt}): {type(e).__name__}: {msg[:120]}", flush=True)
+            if _HARDFAIL.search(msg):
+                return None                                 # квота/биллинг/ключ -> повтор бесполезен, сразу выходим
+            if attempt < max_try and _TRANSIENT.search(msg):
                 # упёрлись в лимит запросов -> ждём дольше (лимит считается за минуту), иначе короткая пауза
-                time.sleep((5.0 if _RATELIMIT.search(str(e)) else 1.2) * attempt); continue
+                time.sleep((5.0 if _RATELIMIT.search(msg) else 1.2) * attempt); continue
             return None                                     # стойкая ошибка (ключ/квота/сеть) -> не «0%», а «не удалось проверить»
 
 def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=None, aliases=None, queries=None):

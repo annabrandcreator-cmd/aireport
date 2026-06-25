@@ -15,7 +15,7 @@
   DEEPSEEK_API_KEY, GIGACHAT_API_KEY, YANDEX_API_KEY, YANDEX_FOLDER_ID  (по мере появления)
   TEST_MODE=1  -> движок в мок-режиме (без ключей, для проверки)
 """
-import os, json, time, hashlib, sqlite3, threading, smtplib, ssl, urllib.request, uuid, re, traceback
+import os, json, time, hashlib, sqlite3, threading, smtplib, ssl, urllib.request, uuid, re, traceback, html, csv, io
 from email.message import EmailMessage
 from flask import Flask, request, redirect, jsonify, send_file, abort
 
@@ -917,6 +917,94 @@ def selftest():
         except Exception as ex:
             out[eid] = {"ok": False, "ms": int((time.time()-t0)*1000), "error": f"{type(ex).__name__}: {str(ex)[:300]}"}
     return jsonify(prompt=prompt, test_mode=os.environ.get("TEST_MODE") == "1", engines=out)
+
+# ───────────────────────── мини-CRM (заказы и клиенты) ───────────────
+_ST_RU = {"new":"новый","pending":"ожидает оплаты","paid":"оплачен","preparing":"готовлю запросы",
+          "reviewing":"подтверждение","await_niche":"жду нишу","await_queries":"жду запросы",
+          "processing":"генерация","done":"готов","error":"ошибка"}
+_ST_COLOR = {"done":"#2E8B57","error":"#C13525","processing":"#C9791A","reviewing":"#C9791A",
+             "await_niche":"#C9791A","await_queries":"#C9791A","paid":"#2D5AA0","preparing":"#2D5AA0",
+             "pending":"#8a8a8a","new":"#8a8a8a"}
+_PAID_STATES = {"paid","preparing","reviewing","await_niche","await_queries","processing","done","error"}
+
+def _admin_ok():
+    token = os.environ.get("ADMIN_TOKEN")
+    return bool(token) and request.args.get("key") == token
+
+def _order_amount(r):
+    try: return r["amount"] or (PRICE if (r["kind"] or "main") == "main" else 0)
+    except Exception: return PRICE
+
+@app.get("/admin")
+def admin():
+    if not _admin_ok():
+        abort(403)
+    flt = (request.args.get("status") or "").strip()
+    with db() as c:
+        rows = c.execute("SELECT * FROM orders ORDER BY created DESC LIMIT 500").fetchall()
+    paid = [r for r in rows if r["status"] in _PAID_STATES]
+    revenue = sum(_order_amount(r) for r in paid)
+    rated = [r["rating"] for r in rows if r["rating"] is not None]
+    avg = round(sum(rated)/len(rated), 1) if rated else "—"
+    cards = [("Заказов всего", len(rows)), ("Оплачено", len(paid)),
+             ("Готово", sum(1 for r in rows if r["status"]=="done")),
+             ("Ошибок", sum(1 for r in rows if r["status"]=="error")),
+             ("Выручка, ₽", f"{revenue:,}".replace(",", " ")), ("Средняя оценка", avg)]
+    show = [r for r in rows if (not flt or r["status"] == flt)]
+    trs = ""
+    for r in show:
+        dt = time.strftime("%d.%m.%Y %H:%M", time.localtime(r["created"] or 0))
+        st = r["status"] or ""
+        kind = "доп" if (r["kind"] or "main") == "addon" else "основной"
+        site = html.escape(r["site"] or "")
+        rating = f'{r["rating"]}/5' if r["rating"] is not None else ""
+        fb = html.escape((r["feedback"] or "")[:120])
+        trs += (f'<tr><td class=dt>{dt}</td><td>{html.escape(r["brand"] or "")}</td>'
+                f'<td><a href="https://{site}" target=_blank>{site}</a></td>'
+                f'<td>{html.escape((r["niche"] or "")[:40])}</td><td>{kind}</td>'
+                f'<td><span class=st style="background:{_ST_COLOR.get(st,"#777")}">{_ST_RU.get(st, st)}</span></td>'
+                f'<td class=num>{_order_amount(r) if r["status"] in _PAID_STATES else ""}</td>'
+                f'<td>{html.escape(r["email"] or "")}</td><td class=num>{rating}</td><td class=fb>{fb}</td></tr>')
+    cardhtml = "".join(f'<div class=card><div class=cv>{v}</div><div class=cl>{l}</div></div>' for l, v in cards)
+    key = html.escape(request.args.get("key") or "")
+    filt = ("".join(f'<a href="?key={key}&status={s}" class="{"f on" if flt==s else "f"}">{_ST_RU[s]}</a>'
+                    for s in ("done","processing","reviewing","error","pending")))
+    return f"""<!doctype html><meta charset=utf-8><title>CRM · заказы</title>
+<style>body{{font-family:-apple-system,Segoe UI,Roboto,Arial;margin:0;background:#141210;color:#eee;padding:20px}}
+h1{{font-size:20px;margin:0 0 14px}} a{{color:#DE7A2C}}
+.cards{{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}}
+.card{{background:#1e1b18;border:1px solid #322d28;border-radius:12px;padding:12px 16px;min-width:120px}}
+.cv{{font-size:22px;font-weight:800}} .cl{{font-size:11px;color:#9a9088;margin-top:2px}}
+.bar{{margin:0 0 12px;font-size:13px}} .f{{display:inline-block;padding:4px 10px;margin-right:6px;border-radius:20px;background:#1e1b18;border:1px solid #322d28;color:#cbb;text-decoration:none}}
+.f.on{{background:#DE4A2C;color:#fff;border-color:#DE4A2C}}
+table{{width:100%;border-collapse:collapse;font-size:12.5px}}
+th,td{{text-align:left;padding:7px 9px;border-bottom:1px solid #2a2622;vertical-align:top}}
+th{{color:#9a9088;font-weight:600;position:sticky;top:0;background:#141210}}
+.dt{{white-space:nowrap;color:#b8aea4}} .num{{text-align:right;white-space:nowrap}}
+.st{{color:#fff;border-radius:20px;padding:2px 9px;font-size:11px;white-space:nowrap}} .fb{{color:#b8aea4;max-width:240px}}
+tr:hover td{{background:#1a1714}}</style>
+<h1>CRM · заказы и клиенты <a href="/admin/export.csv?key={key}" style="font-size:13px;float:right">Скачать CSV</a></h1>
+<div class=cards>{cardhtml}</div>
+<div class=bar>Фильтр: <a href="?key={key}" class="{'f on' if not flt else 'f'}">все</a>{filt}</div>
+<table><tr><th>Дата</th><th>Бренд</th><th>Сайт</th><th>Ниша</th><th>Тип</th><th>Статус</th><th>₽</th><th>Email</th><th>Оценка</th><th>Отзыв</th></tr>{trs}</table>"""
+
+@app.get("/admin/export.csv")
+def admin_export():
+    if not _admin_ok():
+        abort(403)
+    with db() as c:
+        rows = c.execute("SELECT * FROM orders ORDER BY created DESC").fetchall()
+    buf = io.StringIO(); w = csv.writer(buf)
+    w.writerow(["id","дата","бренд","сайт","ниша","город","тип","статус","сумма","email","telegram","оценка","отзыв","payment_id"])
+    for r in rows:
+        dt = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["created"] or 0))
+        w.writerow([r["id"], dt, r["brand"] or "", r["site"] or "", r["niche"] or "", r["city"] or "",
+                    ("доп" if (r["kind"] or "main")=="addon" else "основной"), r["status"] or "",
+                    (_order_amount(r) if r["status"] in _PAID_STATES else 0), r["email"] or "",
+                    r["tg_chat_id"] or "", (r["rating"] if r["rating"] is not None else ""),
+                    (r["feedback"] or "").replace("\n"," "), r["payment_id"] or ""])
+    return app.response_class(buf.getvalue(), mimetype="text/csv",
+                             headers={"Content-Disposition": "attachment; filename=orders.csv"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8000")))

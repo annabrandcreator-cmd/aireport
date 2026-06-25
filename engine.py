@@ -1068,14 +1068,19 @@ def _save_query_set(site, queries):
         pass
 
 # ───────────────────────── оркестрация ───────────────────────
+_TRANSIENT = re.compile(r"(429|500|502|503|504|high demand|temporar|timed out|timeout|unavailable|overload|rate.?limit)", re.I)
 def _ask_one(prompt, eid, run, brand, test):
-    try:
-        if test or not has_key(eid):
-            return ask_mock(prompt, eid, run, brand)
-        return REAL_ADAPTERS[eid](prompt)
-    except Exception as e:
-        print(f"[ask] {eid} ошибка: {type(e).__name__}", flush=True)
-        return None   # ошибка доступа к API (квота/ключ/сеть) -> движок не отвечает, это НЕ «0% видимости»
+    if test or not has_key(eid):
+        try: return ask_mock(prompt, eid, run, brand)
+        except Exception: return None
+    for attempt in (1, 2):                                  # один повтор при временном сбое (503/429 у Gemini и пр.)
+        try:
+            return REAL_ADAPTERS[eid](prompt)
+        except Exception as e:
+            print(f"[ask] {eid} ошибка (попытка {attempt}): {type(e).__name__}: {str(e)[:120]}", flush=True)
+            if attempt == 1 and _TRANSIENT.search(str(e)):
+                time.sleep(1.5); continue
+            return None                                     # стойкая ошибка (ключ/квота/сеть) -> не «0%», а «не удалось проверить»
 
 def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=None, aliases=None, queries=None):
     test = os.environ.get("TEST_MODE") == "1"

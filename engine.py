@@ -941,9 +941,10 @@ def ask_openai(prompt):
 
 def ask_claude(prompt):
     key = os.environ["ANTHROPIC_API_KEY"]
+    model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")   # актуальная лёгкая модель; сменить переменной
     j = _post_json("https://api.anthropic.com/v1/messages",
                    {"x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"},
-                   {"model": "claude-3-5-haiku-latest", "max_tokens": 700,
+                   {"model": model, "max_tokens": 700,
                     "messages": [{"role": "user", "content": prompt}]})
     return "".join(b.get("text", "") for b in j.get("content", []))
 
@@ -956,7 +957,8 @@ def ask_deepseek(prompt):
 
 def ask_gemini(prompt):
     key = os.environ["GEMINI_API_KEY"]
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}"
+    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")      # актуальная модель; сменить переменной
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
     j = _post_json(url, {"Content-Type": "application/json"},
                    {"contents": [{"parts": [{"text": prompt}]}]})
     return j["candidates"][0]["content"]["parts"][0]["text"]

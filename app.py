@@ -26,7 +26,7 @@ DB = os.environ.get("DB_PATH") or os.path.join(APP_DIR, "orders.db")
 REPORTS = os.environ.get("REPORTS_DIR") or os.path.join(APP_DIR, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
-VERSION = "v64"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
+VERSION = "v66"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
 TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO").strip()  # .strip() — от случайных пробелов/переноса при вставке
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
@@ -41,7 +41,14 @@ app = Flask(__name__)
 
 # ───────────────────────── хранилище заказов ─────────────────────────
 def db():
-    c = sqlite3.connect(DB); c.row_factory = sqlite3.Row; return c
+    # WAL + busy_timeout: чтобы одновременные заказы (две генерации в потоках) не падали на «database is locked»
+    c = sqlite3.connect(DB, timeout=15); c.row_factory = sqlite3.Row
+    try:
+        c.execute("PRAGMA journal_mode=WAL")
+        c.execute("PRAGMA busy_timeout=10000")
+    except Exception:
+        pass
+    return c
 
 def init_db():
     with db() as c:
@@ -95,11 +102,14 @@ def tbank_receipt(email, rub, name=None):
         "MeasurementUnit": "шт",                             # обязателен для ФФД 1.2; в 1.05 игнорируется
     }
     rcpt = {"Taxation": os.environ.get("TBANK_TAXATION", "usn_income"), "Items": [item]}
+    # E-mail для чека НЕ собираем сами (минимизация перс. данных) — его вводит покупатель
+    # на платёжной форме ТБанка, и сервис «Чеки» отправляет чек туда. Передаём контакт,
+    # только если он почему-то задан (резервная почта в окружении) — обычно нет.
     em = (email or os.environ.get("TBANK_RECEIPT_EMAIL", "")).strip()
     phone = os.environ.get("TBANK_RECEIPT_PHONE", "").strip()
-    if em:        rcpt["Email"] = em[:64]                    # чек уйдёт сюда; обязателен Email ИЛИ Phone
+    if em:        rcpt["Email"] = em[:64]
     elif phone:   rcpt["Phone"] = phone
-    else:         rcpt["Email"] = "noreply@" + ((BASE_URL.split("//")[-1] or "example.ru").split("/")[0])
+    # иначе Email/Phone не передаём — почту покупателя соберёт форма ТБанка
     return rcpt
 
 def _receipt_on():
@@ -493,11 +503,10 @@ a{color:inherit;text-decoration:none}
     <input type="text" name="site" placeholder="Адрес сайта — ваш-сайт.ру" aria-label="Адрес сайта" required>
     <input type="text" name="niche" placeholder="Чем занимаетесь — напр. стоматология" aria-label="Чем занимаетесь" required>
     <input type="text" name="city" placeholder="Город (если важен регион для поиска)" aria-label="Город">
-    <input type="email" name="email" placeholder="E-mail для чека" aria-label="E-mail для чека" required>
     <button class="ord-btn" type="submit">Получить отчёт за __PRICE__ ₽ &rarr;</button>
   </form>
   <div class="ord-badges"><span><b>7</b> нейросетей</span><span><b>140</b> проверок</span><span>отчёт за <b>10 минут</b></span></div>
-  <div class="ord-hint">Оплата картой или СБП. После оплаты — переход в Telegram-бот за отчётом.</div>
+  <div class="ord-hint">Оплата картой или СБП. После оплаты — переход в Telegram-бот за отчётом. Чек придёт на почту, которую укажете при оплате.</div>
 </div></main>
 <footer class="footer">
   <span>© 2026 Анна Курбатова</span><span>ИНН 504508244657</span>
@@ -771,11 +780,12 @@ def _handle_callback(cq):
         oid = data.split(":", 1)[1]
         with db() as c:
             o = c.execute("SELECT status, prep, pdf FROM orders WHERE id=?", (oid,)).fetchone()
-        if o and o["status"] in ("reviewing", "error") and o["prep"]:
+        st = o["status"] if o else None
+        if o and st in ("reviewing", "error") and o["prep"]:
             start_generation(oid)                 # error -> перезапуск по сохранённым запросам
-        elif o and o["status"] == "processing":
+        elif o and st == "processing":
             tg_send_message(chat, "Уже запускаю проверку, отчёт будет здесь через несколько минут.")
-        elif o and o["status"] == "done":
+        elif o and st == "done":
             if o["pdf"] and os.path.exists(o["pdf"]):
                 with db() as c:
                     full = c.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
@@ -783,6 +793,21 @@ def _handle_callback(cq):
                 except Exception as e: print("[tg] ошибка:", e)
             else:
                 tg_send_message(chat, "Этот отчёт уже готов.")
+        # ── промежуточные состояния не должны вести в тупик ──
+        elif o and st in ("paid", "preparing"):   # оплачено, запросы ещё готовятся -> мягко подождать и до-кикнуть подготовку
+            tg_send_message(chat, "Готовлю запросы для проверки — пришлю их сюда в течение минуты.")
+            try: maybe_start_review(oid)
+            except Exception as e: print("[go] maybe_start_review:", e)
+        elif o and st == "reviewing" and not o["prep"]:
+            tg_send_message(chat, "Секунду, ещё готовлю запросы — пришлю их сюда.")
+            try: maybe_start_review(oid)
+            except Exception: pass
+        elif o and st == "await_niche":
+            _ask_niche(chat, (o["site"] if "site" in o.keys() else "") or "")
+        elif o and st == "await_queries":
+            tg_send_message(chat, "Пришлите ваши запросы для проверки — каждый с новой строки.")
+        elif o and st in ("new", "pending"):
+            tg_send_message(chat, "Сначала нужно оплатить — кнопка оплаты выше. Если её не видно, нажмите /start.")
         else:
             tg_send_buttons(chat, "Не получилось продолжить по этому заказу. Можно сообщить в поддержку — мы увидим и поможем вручную.",
                             [[{"text": "✉️ Сообщить о проблеме в поддержку", "callback_data": f"problem:{oid}"}]])

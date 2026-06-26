@@ -26,7 +26,7 @@ DB = os.environ.get("DB_PATH") or os.path.join(APP_DIR, "orders.db")
 REPORTS = os.environ.get("REPORTS_DIR") or os.path.join(APP_DIR, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
-VERSION = "v68"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
+VERSION = "v69"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
 TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO").strip()  # .strip() — от случайных пробелов/переноса при вставке
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
@@ -140,6 +140,12 @@ def tbank_init(order_id, email, amount=None, description=None, with_receipt=None
         return json.loads(r.read().decode())
 
 # ───────────────────────── письма ───────────────────────────────────
+def report_filename(brand):
+    """Имя файла отчёта с названием компании: Отчёт-AI-видимость-<Компания>.pdf"""
+    b = re.sub(r'[«»"\'<>:/\\|?*\r\n\t]', "", (brand or "")).strip()
+    b = re.sub(r"\s+", " ", b)[:60].strip(" -–—.")
+    return f"Отчёт-AI-видимость-{b}.pdf" if b else "Отчёт-AI-видимость.pdf"
+
 def send_report_email(to, pdf_path, brand):
     host = os.environ.get("SMTP_HOST")
     if not host:
@@ -151,7 +157,7 @@ def send_report_email(to, pdf_path, brand):
     msg.set_content(f"Здравствуйте!\n\nГотов отчёт о видимости «{brand}» в нейросетях. Файл во вложении.\n\nАнна Курбатова · annakurbatova.ru")
     with open(pdf_path, "rb") as f:
         msg.add_attachment(f.read(), maintype="application", subtype="pdf",
-                           filename="Отчёт-AI-видимость.pdf")
+                           filename=report_filename(brand))
     port = int(os.environ.get("SMTP_PORT", "465"))
     if port == 465:
         with smtplib.SMTP_SSL(host, port, context=ssl.create_default_context()) as s:
@@ -182,10 +188,10 @@ def _tg(method, data=None, files=None):
 def tg_send_message(chat_id, text):
     if tg_token(): _tg("sendMessage", {"chat_id": chat_id, "text": text})
 
-def tg_send_document(chat_id, pdf_path, caption=""):
+def tg_send_document(chat_id, pdf_path, caption="", filename=None):
     with open(pdf_path, "rb") as f: content = f.read()
     return _tg("sendDocument", {"chat_id": str(chat_id), "caption": caption},
-               {"document": ("Отчёт-AI-видимость.pdf", content, "application/pdf")})
+               {"document": (filename or "Отчёт-AI-видимость.pdf", content, "application/pdf")})
 
 def tg_send_payment_button(chat_id, pay_url, brand):
     _tg("sendMessage", {"chat_id": chat_id,
@@ -243,7 +249,7 @@ def report_ready_text(o):
 
 def tg_send_report(chat_id, pdf_path, o):
     """Сначала файл (без подписи), затем текстовое сообщение под ним."""
-    tg_send_document(chat_id, pdf_path)            # файл без подписи
+    tg_send_document(chat_id, pdf_path, filename=report_filename(o["brand_short"] or o["brand"]))  # файл с названием компании
     tg_send_message(chat_id, report_ready_text(o)) # текст идёт ниже PDF
 
 def deliver(o, pdf):

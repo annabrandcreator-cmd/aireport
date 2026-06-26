@@ -26,7 +26,7 @@ DB = os.environ.get("DB_PATH") or os.path.join(APP_DIR, "orders.db")
 REPORTS = os.environ.get("REPORTS_DIR") or os.path.join(APP_DIR, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
-VERSION = "v66"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
+VERSION = "v67"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
 TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO").strip()  # .strip() — от случайных пробелов/переноса при вставке
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
@@ -503,10 +503,11 @@ a{color:inherit;text-decoration:none}
     <input type="text" name="site" placeholder="Адрес сайта — ваш-сайт.ру" aria-label="Адрес сайта" required>
     <input type="text" name="niche" placeholder="Чем занимаетесь — напр. стоматология" aria-label="Чем занимаетесь" required>
     <input type="text" name="city" placeholder="Город (если важен регион для поиска)" aria-label="Город">
+    <input type="email" name="email" placeholder="E-mail (для чека)" aria-label="E-mail для чека" required>
     <button class="ord-btn" type="submit">Получить отчёт за __PRICE__ ₽ &rarr;</button>
   </form>
   <div class="ord-badges"><span><b>7</b> нейросетей</span><span><b>140</b> проверок</span><span>отчёт за <b>10 минут</b></span></div>
-  <div class="ord-hint">Оплата картой или СБП. После оплаты — переход в Telegram-бот за отчётом. Чек придёт на почту, которую укажете при оплате.</div>
+  <div class="ord-hint">Оплата картой или СБП. После оплаты — переход в Telegram-бот за отчётом. Чек придёт на указанный e-mail.</div>
 </div></main>
 <footer class="footer">
   <span>© 2026 Анна Курбатова</span><span>ИНН 504508244657</span>

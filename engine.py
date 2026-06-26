@@ -259,6 +259,21 @@ def generate_queries_tpl(niche, city):
         return [{"q": q, "group": g} for q, g in items]
     n = clean_niche(niche)
     N = n[:1].upper() + n[1:]
+    if re.search(r"(магазин|снаряжен|экипировк|спорттовар|\bтовар|маркетплейс|обув|посуд|бытов\w* техник)", (niche or "").lower()):
+        # товарный бизнес — запросы как у покупателя готового товара (а не услуги «под ключ»)
+        items = [
+            (f"На каком сайте купить {n}{inc}?",                "Поиск компании"),
+            (f"Где купить {n} с доставкой{inc}?",              "Поиск компании"),
+            (f"Какие магазины продают {n}{inc}?",             "Сравнение компаний"),
+            (f"В каком интернет-магазине купить {n}?",          "Поиск компании"),
+            (f"Где заказать {n} онлайн{inc}?",                 "Поиск компании"),
+            (f"Посоветуй магазин: {n}{inc}",                   "Доверие к компании"),
+            (f"Где купить {n} хорошего качества{inc}?",        "Доверие к компании"),
+            (f"Какой бренд {n} выбрать?",                       "Сравнение компаний"),
+            (f"Сколько стоит {n} и где выгоднее купить?",       "Цена и сроки"),
+            (f"Где почитать отзывы о магазинах: {n}{inc}?",     "Отзывы и кейсы"),
+        ]
+        return [{"q": q, "group": g} for q, g in items]
     # естественные вопросы к ИИ, один нейтральный сегмент (без смешивания «недорого»/«премиум»)
     items = [
         (f"Где заказать {n}{inc}?",                            "Поиск компании"),
@@ -1139,7 +1154,7 @@ def _queries_cache_path(site):
     d = os.environ.get("QUERIES_DIR") or os.environ.get("REPORTS_DIR") or "/tmp"
     return os.path.join(d, "qset_" + re.sub(r"[^a-z0-9.]", "_", host) + ".json")
 
-_QSET_VER = "13"  # бамп при изменении промпта запросов -> старый кэш игнорируется и набор пересобирается
+_QSET_VER = "14"  # бамп при изменении промпта запросов -> старый кэш игнорируется и набор пересобирается
 
 def _load_query_set(site):
     try:
@@ -1610,13 +1625,16 @@ def _blockers(groups, zero, site_info=None, mentioned_engines=None, zero_engines
             blk.append("robots.txt закрывает доступ ИИ-ботам: " + ", ".join(s["robots_blocks_ai"]))
         _types = {str(x).lower() for x in (s.get("schema") or [])}
         _has_products = bool(_types & {"product","offer","aggregateoffer","store","onlinestore","productgroup"}) or s.get("product_pages")
+        _prod = bool(_has_products) or _biz_role(s, "") in ("shop", "manufacturer", "realty")
         if not sm["org"]:
             blk.append("Не найдена разметка организации (Organization)")
-        elif not _has_products and not sm["service"]:
+        elif _prod and not _has_products:
+            blk.append("Не найдена разметка товаров (Product/Offer)")
+        elif not _prod and not sm["service"]:
             blk.append("Не найдена разметка услуг (Service)")
-        if not _has_products and not s.get("service_pages"):
+        if not _prod and not s.get("service_pages"):
             blk.append("Не удалось обнаружить отдельные страницы услуг (если есть, дайте на них прямые ссылки в меню)")
-        if not _has_products and not s.get("case_pages") and _biz_role(s, "") == "service":
+        if not _prod and not s.get("case_pages") and _biz_role(s, "") == "service":
             blk.append("Не удалось обнаружить страницы кейсов или проектов (если они есть, дайте на них прямые ссылки в меню)")
     elif s and not s.get("ok"):
         blk.append("Сайт не удалось открыть для проверки: проверьте адрес и доступность")
@@ -1644,6 +1662,12 @@ def _biz_role(site_info, niche=""):
     if re.search(r"(собственн\w*\s+производств|наш\w*\s+(?:производств|фабрик|цех)|мы\s+(?:производим|шь[её]м|выпускаем|изготавлива)|"
                  r"\bфабрик|\bзавод|\bцех\b|пошив|швейн|производственн|manufactur|own\s+factory)", txt):
         return "manufacturer"
+    # ЯВНЫЙ магазин определяем ДО «места»: у магазина снаряжения встречается «туризм/туристическое»,
+    # но это товары, а не турагентство. Сигналов корзины/каталога/маркетплейса у отелей и клиник не бывает.
+    if (types & {"product","offer","aggregateoffer","store","onlinestore","productgroup"}) or re.search(
+            r"(интернет-?магазин|добавить в корзин|\bв корзину\b|оформить заказ|каталог товаров|"
+            r"маркетплейс|снаряжени|экипировк|спорттовар)", txt):
+        return "shop"
     # ВАЖНО: «место/заведение» проверяем ДО магазина — у отелей и ресторанов бывает Offer/Product (бронь, меню),
     # но это не магазин товаров.
     place_types = {"lodgingbusiness","hotel","resort","hostel","restaurant","cafeorcoffeeshop","bakery","barorpub",
@@ -1657,7 +1681,7 @@ def _biz_role(site_info, niche=""):
             r"клиник|стоматолог|медцентр|медицинск|поликлиник|санатори|"
             r"фитнес|тренаж|\bйог|пилатес|бассейн|"
             r"\bшкол|\bкурс|репетитор|детский сад|автошкол|"
-            r"\bтур\b|туристическ|турагент|туроператор|турфирм|экскурс|база отдыха|проживани|номер|"
+            r"\bтур\b|турагент|туроператор|турфирм|экскурс|база отдыха|проживани|номерной фонд|"
             r"фотограф|фотостуди|праздник|банкет|свадьб|аренда зал|"
             r"автосервис|шиномонтаж|автомойк|детейлинг|химчистк|клининг|груминг|ветеринар|ветклиник)", txt):
         return "place"
@@ -1667,7 +1691,8 @@ def _biz_role(site_info, niche=""):
        or _REALTY_RX.search(txt):
         return "realty"
     if (types & {"product","offer","aggregateoffer","store","onlinestore","productgroup"}) or s.get("product_pages") \
-       or re.search(r"(интернет-?магазин|добавить в корзин|каталог товаров|купить.{0,20}доставк|маркетплейс)", txt):
+       or re.search(r"(интернет-?магазин|\bмагазин|добавить в корзин|\bв корзин|оформить заказ|каталог товаров|купить.{0,20}доставк|"
+                    r"купить онлайн|маркетплейс|ассортимент|снаряжени|экипировк|спорттовар|товары для)", txt):
         return "shop"
     return "service"
 
@@ -2006,28 +2031,32 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
         else:
             status.append(("Разметка о компании (Organization)", "bad", "не найдена"))
             todo.append("Добавить разметку Organization: название, контакты, логотип, ссылки на профили")
-        # разметка услуг
-        if has_service:
-            status.append(("Разметка услуг (Service)", "ok", "есть"))
-        else:
-            status.append(("Разметка услуг (Service)", "bad", "не найдена"))
-            todo.append("Добавить разметку Service на страницы услуг")
-        # товары — только если у сайта есть товары
-        if has_products:
-            if has_product:
+        # Разметка ТОВАРОВ или УСЛУГ — по роли бизнеса (магазину не нужен Service, услуге не нужен Product)
+        prod_biz = product_biz or role == "realty" or has_products or bool(s.get("product_pages"))
+        if prod_biz:
+            if has_product or has_products:
                 status.append(("Разметка товаров (Product/Offer)", "ok", "есть"))
             else:
                 status.append(("Разметка товаров (Product/Offer)", "bad", "не найдена"))
-                todo.append("Добавить Product и Offer на страницы товаров и предложений")
+                todo.append("Добавить Product и Offer на страницы товаров и категорий")
+        else:
+            if has_service:
+                status.append(("Разметка услуг (Service)", "ok", "есть"))
+            else:
+                status.append(("Разметка услуг (Service)", "bad", "не найдена"))
+                todo.append("Добавить разметку Service на страницы услуг")
         # FAQ
         if has_faq:
             status.append(("Блок вопросов-ответов (FAQPage)", "ok", "есть"))
         else:
             status.append(("Блок вопросов-ответов (FAQPage)", "warn", "не найден"))
             todo.append("Добавить блок вопросов и ответов с разметкой FAQPage на ключевые страницы")
-        # отдельные страницы (без точных чисел — счёт по ссылкам с главной ненадёжен)
-        if has_products or s.get("product_pages"):
-            status.append(("Каталог товаров и категории", "ok", "есть"))
+        # отдельные страницы — каталог для магазина / страницы услуг для услуговых
+        if prod_biz:
+            if has_products or s.get("product_pages"):
+                status.append(("Каталог товаров и категории", "ok", "есть"))
+            else:
+                status.append(("Каталог товаров и категории", "bad", "не обнаружен"))
         elif s.get("service_pages"):
             status.append(("Отдельные страницы услуг", "ok", "есть"))
         else:

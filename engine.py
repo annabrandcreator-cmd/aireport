@@ -795,6 +795,29 @@ _RETAILERS = {
     "детский мир":"Детский мир","спортмастер":"Спортмастер","связной":"Связной","dns":"DNS",
 }
 _DOMAIN_RE = re.compile(r"\b([a-z0-9][a-z0-9-]{1,30}\.(?:ru|рф|com|by|kz|ua|net|org|store|shop|online))\b", re.I)
+# Официальные сайты известных площадок/ритейлеров — чтобы их имя в отчёте было кликабельным.
+_RETAILER_URLS = {
+    "Ozon":"https://www.ozon.ru","Wildberries":"https://www.wildberries.ru","Яндекс Маркет":"https://market.yandex.ru",
+    "Мегамаркет":"https://megamarket.ru","СберМегаМаркет":"https://megamarket.ru","Авито":"https://www.avito.ru",
+    "AliExpress":"https://aliexpress.ru","iHerb":"https://ru.iherb.com","Золотое яблоко":"https://goldapple.ru",
+    "Рив Гош":"https://rivegauche.ru","Лэтуаль":"https://www.letu.ru","Иль Де Ботэ":"https://iledebeaute.ru",
+    "Sephora":"https://www.sephora.com","Читай-город":"https://www.chitai-gorod.ru","М.Видео":"https://www.mvideo.ru",
+    "Эльдорадо":"https://www.eldorado.ru","Ситилинк":"https://www.citilink.ru","Леруа Мерлен":"https://leroymerlin.ru",
+    "Hoff":"https://hoff.ru","IKEA":"https://www.ikea.com/ru/ru/","Детский мир":"https://www.detmir.ru",
+    "Спортмастер":"https://www.sportmaster.ru","Связной":"https://www.svyaznoy.ru","DNS":"https://www.dns-shop.ru",
+}
+# Имя само по себе — домен? Тогда сразу даём прямую ссылку (1ps.ru, vc.ru, keys.so, tools.pixelplus.ru).
+_SELF_DOMAIN_RE = re.compile(r"^(?:https?://)?([a-z0-9][a-z0-9-]{1,30}(?:\.[a-z0-9-]{2,})?\.[a-z]{2,10})/?$", re.I)
+def _self_domain(name):
+    """Если имя игрока — это домен, вернуть прямой https-URL, иначе ''. """
+    s = (name or "").strip().strip("«»\"'·.,;: ").lower()
+    m = _SELF_DOMAIN_RE.match(s)
+    if not m:
+        return ""
+    dom = m.group(1)
+    if dom.split(".")[0] in ("www",):                # «www.» без второго уровня — пропускаем
+        return ""
+    return "https://" + dom
 _PLATFORM_DOMS = ("yandex.","ya.","google.","goo.","openai.","chatgpt.","sber.","gigachat.","perplexity.","bing.","wikipedia.")
 # мусор, который нейросети выдают как «названия», но это не компании
 _NAME_STOP = {"you","korea","official","сайт","официальный","купить","заказать","оптом","опт","доставка",
@@ -1487,12 +1510,31 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
             if engs:
                 mentions.append({"q": q["q"], "engines": engs})
         c["mentions"] = mentions
-    if comp_objs and os.environ.get("TEST_MODE") != "1":     # проверенные ссылки на сайты конкурентов
+    # ── Карта прямых ссылок на сайты ВСЕХ названных игроков (конкуренты + прочие площадки/бренды) ──
+    # Цель: в отчёте имя каждой компании кликабельно и ведёт прямо на её сайт.
+    link_map = {}
+    named_all = []
+    for n in ([c["name"] for c in comp_objs] + list(others_named)):
+        if n and n not in named_all:
+            named_all.append(n)
+    for n in named_all:                                       # 1) имя само по себе домен -> прямая ссылка
+        sd = _self_domain(n)
+        if sd:
+            link_map[n] = sd
+    for n in named_all:                                       # 2) известные площадки/ритейлеры -> их сайт
+        if n in link_map:
+            continue
+        url = _RETAILER_URLS.get(n) or _RETAILER_URLS.get(_RETAILERS.get(n.lower(), ""))
+        if url:
+            link_map[n] = url
+    missing = [n for n in named_all if n not in link_map]     # 3) остальные бренды -> домены спросим у нейросети
+    if missing and os.environ.get("TEST_MODE") != "1":
         try:
-            sites = _competitor_sites([c["name"] for c in comp_objs])
-            for c in comp_objs: c["site"] = sites.get(c["name"], "")
+            link_map.update(_competitor_sites(missing))
         except Exception as e:
-            print("[comp-sites]", e, flush=True)
+            print("[link-map]", e, flush=True)
+    for c in comp_objs:                                       # сайт подтверждённых конкурентов — из общей карты
+        c["site"] = link_map.get(c["name"], c.get("site", ""))
     data = {
         "brand": brand, "brand_short": brand_short, "site": _host(site),
         "niche": niche, "city": city, "date": datetime.datetime.now().strftime("%d.%m.%Y"),
@@ -1527,6 +1569,7 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
         },
         "examples": examples,
         "others_named": others_named[:6],
+        "link_map": link_map,
         "competitors": comp_objs,
         "sources": [
             {"name":"Карты и справочники","share":26},{"name":"Отзывы на площадках","share":24},
@@ -1598,7 +1641,9 @@ def _verify_site(name, domain):
             return (final or (scheme + domain)).split("?")[0].rstrip("/")
         except Exception:
             continue
-    return ""
+    # Сайт не ответил нашему серверу (блокировка/таймаут), но домен корректный —
+    # отдаём ссылку всё равно: у пользователя в браузере он, как правило, откроется.
+    return "https://" + domain
 
 def _competitor_sites(names):
     """Спрашиваем у нейросети домены конкурентов и проверяем каждый. {имя: https://сайт} только для подтверждённых."""

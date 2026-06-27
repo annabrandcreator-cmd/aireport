@@ -431,39 +431,65 @@ def p_matrix(d):
       <div class="note" style="margin-top:4mm">{legend}</div>
       {footer(d)}</div>'''
 
-def _qd_names(lst, n=3):
-    """Короткий список имён: не больше n, длинные имена режем, остальное -> «и др.».
+_SELF_DOM_RE=re.compile(r"^(?:https?://)?([a-z0-9][a-z0-9-]{1,30}(?:\.[a-z0-9-]{2,})?\.[a-z]{2,10})/?$", re.I)
+def _self_url(name):
+    """Имя само по себе домен -> прямой https-URL, иначе ''. """
+    s=str(name or "").strip().strip("«»\"'·.,;: ").lower()
+    m=_SELF_DOM_RE.match(s)
+    if not m: return ""
+    dom=m.group(1)
+    if dom.split(".")[0]=="www": return ""
+    return "https://"+dom
+
+def _comp_url(name, lm=None):
+    """URL сайта компании: из карты ссылок отчёта, иначе — если имя само домен."""
+    return (lm or {}).get(name) or _self_url(name)
+
+def _linkify(name, lm=None, maxlen=24):
+    """Имя компании -> кликабельная ссылка на её сайт (если URL известен), иначе просто текст."""
+    raw=str(name or "").strip()
+    if not raw: return ""
+    disp=raw if len(raw)<=maxlen else raw[:maxlen-1].rstrip()+"…"
+    url=_comp_url(raw, lm)
+    if url:
+        return f'<a href="{esc(url)}" style="color:{ACCENTD};text-decoration:none;font-weight:600">{esc(disp)} ↗</a>'
+    return esc(disp)
+
+def _qd_names(lst, lm=None, n=3):
+    """Короткий список имён-ссылок: не больше n, длинные имена режем, остальное -> «и др.».
     Это держит высоту строки в 1-2 линии -> карточка запроса не переполняет страницу."""
     out=[]
     for x in lst:
         x=str(x).strip()
         if not x: continue
-        out.append(x if len(x)<=24 else x[:23].rstrip()+"…")
+        out.append(_linkify(x, lm))
         if len(out)>=n: break
     tail=" и др." if len([x for x in lst if x])>len(out) else ""
     return ", ".join(out)+tail
 
-def _qd_row(q, e):
+def _qd_row(q, e, lm=None):
     if e.get('failed'):
         return f'<div class="qd-e"><b>{esc(e["short"])}:</b> не удалось проверить (ошибка доступа к API)</div>'
     h=q['hits'].get(e['id'],0)
     ev=(q.get('evidence') or {}).get(e['id'],{})
     comps=ev.get('comps',[])                                  # подтверждённые нишевые конкуренты
     others=[o for o in ev.get('others',[]) if o not in comps]  # прочие названные игроки (площадки, домены, бренды)
-    if h>=2:   t="назвал ваш бренд в обоих ответах (2/2)" + (", рядом назвал "+_qd_names(comps+others) if (comps or others) else "")
-    elif h==1: t="назвал ваш бренд в одном ответе (1/2)" + (", рядом назвал "+_qd_names(comps+others) if (comps or others) else "")
-    elif comps:t="назвал конкурентов: "+_qd_names(comps+others)+"; вашего бренда нет"
-    elif others:t="назвал других игроков: "+_qd_names(others)+"; вашего бренда нет"
+    # имена ниже уже HTML-экранированы и обёрнуты в ссылки внутри _qd_names -> t выводим как HTML
+    if h>=2:   t="назвал ваш бренд в обоих ответах (2/2)" + (", рядом назвал "+_qd_names(comps+others, lm) if (comps or others) else "")
+    elif h==1: t="назвал ваш бренд в одном ответе (1/2)" + (", рядом назвал "+_qd_names(comps+others, lm) if (comps or others) else "")
+    elif comps:t="назвал конкурентов: "+_qd_names(comps+others, lm)+"; вашего бренда нет"
+    elif others:t="назвал других игроков: "+_qd_names(others, lm)+"; вашего бренда нет"
     else:      t="общий ответ без названий компаний"
     cls=" qd-e--hit" if h>=1 else ""                          # строка движка зелёным, если бренд появился
-    return f'<div class="qd-e{cls}"><b>{esc(e["short"])}:</b> {esc(t)}</div>'
+    return f'<div class="qd-e{cls}"><b>{esc(e["short"])}:</b> {t}</div>'
 
 def p_query_detail(d):
     """Блок 04: каждый запрос отдельно — кто назвал бренд и кого из конкурентов, по каждой нейросети."""
     eng=d['engines']
+    lm=d.get('link_map')
     cards=[]
     for i,q in enumerate(d['queries'],1):
-        rows="".join(_qd_row(q,e) for e in eng)
+        rows="".join(_qd_row(q,e,lm) for e in eng)
         hit=any((q.get('hits') or {}).get(e['id'],0)>0 for e in eng if not e.get('failed'))   # бренд появился хотя бы в одной сети
         cls="qd qd--hit" if hit else "qd"
         badge='<span class="qd-badge">✓ бренд появился</span>' if hit else ''
@@ -503,13 +529,13 @@ def p_groups(d):
       {footer(d)}</div>'''
 
 def p_examples(d):
-    has_comp=bool(d.get('competitors')); b=esc(d['brand_short'])
+    has_comp=bool(d.get('competitors')); b=esc(d['brand_short']); lm=d.get('link_map')
     cards=""
     for ex in d['examples']:
         tag={'yes':('tag-yes','Бренд появился'),'no':('tag-no','Бренда нет'),'mid':('tag-mid','В одном из двух')}[ex['kind']]
         if ex['kind']=='no':
             if ex.get('named'):
-                eng_line=f"<b>{esc(ex['engine'])}:</b> назвал {esc(', '.join(ex['named']))}; вашего бренда в ответе нет"
+                eng_line=f"<b>{esc(ex['engine'])}:</b> назвал {', '.join(_linkify(x, lm) for x in ex['named'])}; вашего бренда в ответе нет"
             elif has_comp:
                 eng_line=f"<b>{esc(ex['engine'])}:</b> называет другие компании (см. раздел ниже), вашего бренда в ответе нет"
             else:
@@ -530,7 +556,7 @@ def p_examples(d):
             takeaway=("По этим вопросам нейросети уже называют другие компании (они в разделе ниже), но не ваш бренд. "
                       "Это и есть зона роста: появиться там, где сейчас показывают конкурентов. Что для этого усилить — в рекомендациях.")
         elif others:
-            takeaway=(f"По этим вопросам нейросети называют сторонние площадки и магазины (например, {esc(', '.join(others[:4]))}), но не ваш бренд. "
+            takeaway=(f"По этим вопросам нейросети называют сторонние площадки и магазины (например, {', '.join(_linkify(x, lm) for x in others[:4])}), но не ваш бренд. "
                       "Это и есть зона роста: попасть в ответ там, где сейчас показывают чужие площадки. Что для этого усилить — в рекомендациях.")
         else:
             takeaway=("По этим вопросам нейросети давали общий ответ без названий компаний: пока никто не занимает эти ответы. "
@@ -560,15 +586,16 @@ def _comp_where(c):
     word="запросу" if len(ms)==1 else "запросам"
     return f" Назван по {word}: " + "; ".join(parts) + more + "."
 
-def _comp_link(c):
+def _comp_link(c, lm=None):
     """Имя конкурента — прямая ссылка на его сайт. Если сайт определить не удалось — просто имя, без поисковой строки."""
     name=esc(c['name'])
-    if c.get('site'):
-        return f'<a href="{esc(c["site"])}" style="color:{ACCENTD};text-decoration:none;font-weight:700">{name} ↗</a>'
+    url=c.get('site') or _comp_url(c.get('name',''), lm)
+    if url:
+        return f'<a href="{esc(url)}" style="color:{ACCENTD};text-decoration:none;font-weight:700">{name} ↗</a>'
     return f'<span style="font-weight:700;color:{INK}">{name}</span>'
 
 def p_competitors(d):
-    N=d['total_answers']; bc=d.get('total_mentions',0); ov=d['overall']
+    N=d['total_answers']; bc=d.get('total_mentions',0); ov=d['overall']; lm=d.get('link_map')
     rows=[(d['brand_short'], ov, bc, True)] + [(c['name'], c['rate'], c['count'], False) for c in d['competitors']]
     rows.sort(key=lambda r:-r[1])
     # Высота секции зависит от числа компаний и длины их названий/запросов и может быть любой.
@@ -586,7 +613,7 @@ def p_competitors(d):
         bars+=bar((esc(name)+" (вы)") if is_you else name, rate, sub, wl="150px", color=(ACCENTD if is_you else FAINT), you=is_you)
     if _bars_more>0:
         bars+=f'<div class="note" style="margin-top:1mm">…и ещё {_bars_more} компаний с меньшей видимостью.</div>'
-    names_join=_join([c['name'] for c in d['competitors']][:6])
+    names_join=_join([_linkify(c['name'], lm) for c in d['competitors']][:6])
     max_c=max((c['rate'] for c in d['competitors']), default=0)
     if ov>0 and ov>=max_c:
         lead=f"«{esc(d['brand_short'])}» упомянут в {bc} из {N} ответов — чаще найденных компаний"
@@ -603,9 +630,9 @@ def p_competitors(d):
       <div class="box cream"><h4>Что это значит</h4><p>{takeaway}</p></div>
       {footer(d)}</div>'''
     # Подробные карточки по каждой компании — на страницах-продолжениях, порциями (защита от обрезки).
-    comps=d['competitors']
+    comps=d['competitors']; lm=d.get('link_map')
     def _ev_card(c):
-        return (f'<div class="ex"><div class="q">{_comp_link(c)} · {c["rate"]}%</div>'
+        return (f'<div class="ex"><div class="q">{_comp_link(c, lm)} · {c["rate"]}%</div>'
                 f'<div class="r">Упомянут в <b>{c["count"]}</b> из <b>{c["total"]}</b> ответов нейросетей по вашим запросам.{_comp_where(c)}</div></div>')
     PER=3                                     # с запасом: даже длинные карточки (длинные имена + запросы) помещаются
     pages=[page1]

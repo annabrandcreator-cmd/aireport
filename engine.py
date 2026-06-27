@@ -739,8 +739,9 @@ _GLOBAL_BRANDS = {"google","microsoft","amazon","apple","meta","facebook","insta
                   "slack","zoom","notion","figma","canva","shopify","wix","wordpress","atlassian","jira","asana",
                   "airbnb","uber","tesla","openai","anthropic","mailchimp","zendesk","workday","servicenow",
                   "tableau","aws","azure","alibaba","tencent","interbrand","landor","pentagram","ogilvy","wpp"}
-_PLATFORMS = {"яндекс", "яндекса", "google", "гугл", "chatgpt", "openai", "gigachat", "гигачат",
-              "сбер", "сбера", "deepseek", "perplexity", "gemini", "нейро", "ai", "ии"}
+_PLATFORMS = {"яндекс", "яндекса", "google", "гугл", "chatgpt", "openai", "gigachat", "гигачат", "claude", "клод",
+              "сбер", "сбера", "deepseek", "perplexity", "перплексити", "gemini", "джемини", "копайлот", "copilot",
+              "нейро", "ai", "ии", "yandexgpt", "алиса", "alice"}
 _COMMON = {"также","кроме","среди","лучшие","лучший","топ","это","этот","при","для","как","или","если","итак",
            "компания","компании","компаний","фирма","фирмы","сайт","сайты","отзыв","отзывы","услуга","услуги",
            "заказ","цена","цены","например","важно","совет","советы","вариант","варианты","способ","способы",
@@ -848,17 +849,55 @@ _CONCEPT_STOP = {
  "упоминания","упоминание","региональный","регионального","некорректная","некорректный","более","менее","полезный","полезная",
  "можно","сделать","узнать","проверить","повысить","специфика","специфики","инструменты","инструмент","сервисы","сервис",
  "сайта","сайте","сайтов","конкурент","конкуренты","конкурентов","конкурента","что","как","где","почему","зачем","нужно","стоит","также"}
+# Доп. набор: подзаголовки структурных ответов и обобщённые слова, которые нейросети дают
+# при информационных/«как сделать» вопросах. Без них «Вопрос», «Источник», «Ключевые слова»
+# попадали в конкуренты и набирали проценты просто потому, что это частые слова.
+_CONCEPT_STOP |= {
+ "вопрос","вопросы","вопроса","вопросов","ответ","ответы","ответа","ответов","источник","источники","источника","источников",
+ "ключевые","ключевое","ключевой","ключевая","слово","слова","слов","заголовок","заголовки","раздел","разделы","пункт","пункты",
+ "положительное","положительный","положительная","отрицательное","отрицательный","отрицательная","нейтральное","нейтральный",
+ "нейтральная","тональность","тональности","объективность","объективности","субъективность","контекст","контекста","контексте",
+ "доступность","доступности","актуальность","актуальности","полнота","полноты","точность","точности","частота","частоты",
+ "наличие","присутствие","отсутствует","присутствует","тестирование","тестирования","тест","тесты","проверка","проверки",
+ "реальное","реальный","реальная","реального","время","времени","прямое","прямой","прямая","прямого","косвенное","косвенный",
+ "ограничение","ограничения","ограничений","ограничены","ограниченный","ограниченные","модель","модели","моделей",
+ "релевантные","релевантный","релевантность","релевантности","конкретный","конкретные","конкретное","конкретно","конкретны",
+ "обновление","обновления","обновлений","обновлённый","свежесть","свежести","объём","объем","количество","качество","значение",
+ "мои","мой","моя","моё","мое","твои","ваши","ваш","ваша","его","их","делает","делаю","делать","просто","например","сначала",
+ "далее","затем","итак","кроме","помимо","использование","настройка","оформление","описание","описания","разбор","разборы",
+ "позиционирование","присутствия","вовлечённость","вовлеченность","охват","охвата","динамика","динамики","показатель","показатели"}
+# Императивы/инфинитивы — это инструкции из ответа, а не названия компаний.
+_INSTRUCTION = {
+ "сформулируйте","сформулировать","задайте","задавайте","задать","задавать","обратитесь","обращайтесь","обратиться",
+ "используйте","использовать","примените","применять","проверьте","проверять","проверить","создайте","создать","сравните",
+ "сравнивать","сравнить","уточните","уточнять","уточнить","добавьте","добавлять","добавить","спросите","спрашивайте","спросить",
+ "спрашивать","анализируйте","анализировать","проанализируйте","изучите","изучать","изучить","найдите","находить","найти",
+ "выберите","выбирать","выбрать","определите","определять","определить","оцените","оценивать","оценить","сделайте","сделать",
+ "напишите","написать","укажите","указать","опишите","описать","настройте","настроить","улучшите","улучшить","повысьте",
+ "повысить","соберите","собрать","составьте","составить","учитывайте","учитывать","смотрите","посмотрите","убедитесь","следите"}
+_CONCEPT_STOP |= _INSTRUCTION
 _FOREIGN_CONNECT = {"y","de","la","el","con","para","the","and","for","of","en","del","los","las","una","un","da","do"}
 _STOPCONN = {"в","на","с","по","и","или","для","до","от","как","что","это","не","без","к","о","об","за","при","из","у"}
 _ENG_COMMON = {"search","product","products","discovery","service","services","marketing","content","business","company",
  "solution","solutions","system","systems","data","analysis","optimization","tool","tools","digital","online","web","site",
  "brand","brands","group","media","agency","studio","global","local","best","top","review","reviews","price","support",
- "management","strategy","platform","software","app","apps","cloud","mobile","design","quality","approach"}
+ "management","strategy","platform","software","app","apps","cloud","mobile","design","quality","approach",
+ "domain","domains","source","sources","question","questions","answer","answers","keywords","keyword","example","examples",
+ "context","analysis","monitoring","tracking","prompt","prompts","query","queries","result","results","tips","summary"}
 # Частые испанские/иностранные слова-обрывки, которые нейросеть иногда выдаёт в ответе (не бренды).
 _FOREIGN_COMMON = {"clara","claro","contenido","contenidos","consultas","consulta","genericas","genericos","generica",
  "generico","servicios","servicio","calidad","negocio","negocios","empresa","empresas","diferenciacion","optimizacion",
  "busqueda","resultado","resultados","autor","autores","mejor","mejores","como","donde","porque","mas","sus","para",
- "entre","sobre","puede","tambien","analisis","estrategia","marca","cliente","clientes","competencia"}
+ "entre","sobre","puede","tambien","analisis","estrategia","marca","cliente","clientes","competencia",
+ "datos","entrenamiento","presencia","fuente","fuentes","pregunta","preguntas","respuesta","respuestas","palabras","clave",
+ "ejemplo","ejemplos","recomendacion","recomendaciones","factores","factor","ventajas","limitaciones","contexto","relevancia"}
+# Стемы общих слов (5 букв) — чтобы ловить падежные формы: «поиска»→«поиск», «запроса»→«запрос».
+# Применяется только когда ВСЕ слова фразы общие, поэтому реальные бренды («Дольче Мода») не страдают.
+_GENERIC_STEMS = {w[:5] for w in (_CONCEPT_STOP | _CATEGORY) if len(w) >= 5}
+def _generic_word(w):
+    return (w in _CONCEPT_STOP or w in _COMMON or w in _CATEGORY or w in _STOPCONN
+            or w in _ENG_COMMON or w in _FOREIGN_COMMON or len(w) <= 2
+            or (len(w) >= 5 and w[:5] in _GENERIC_STEMS))
 # Российский рынок: иностранные домены и мировые гиганты — не релевантные конкуренты для РФ-бизнеса.
 _RU_TLD = re.compile(r"\.(?:ru|рф|su|moscow|tatar)$", re.I)
 _FOREIGN_TLD = re.compile(r"\.(?:com|io|net|org|co|us|uk|de|fr|cn|in|eu|app|ai|dev|tech|store|shop|online|info|biz|me)$", re.I)
@@ -902,6 +941,9 @@ def _clean_named_list(names):
         if len(nl) < 3 or low in _NAME_STOP:
             continue
         words = nl.split()                                                  # оригинальный регистр — для проверки заглавных
+        _wl = [w.lower().strip(".,:;()") for w in words]
+        if low in _PLATFORMS or (_wl and _wl[0] in _PLATFORMS):             # сама нейросеть/платформа (Claude, ChatGPT Search, Gemini Pro) — не конкурент
+            continue
         has_dot = "." in nl                                                 # домен (iherb.com) — оставляем
         if not has_dot and not any(c.isupper() for c in nl):               # сплошь строчные и не домен — не бренд
             continue
@@ -926,10 +968,12 @@ def _clean_named_list(names):
             continue
         if len(words) == 1 and low in (_ENG_COMMON | _FOREIGN_COMMON):      # одиночное общее англ./исп. слово (Search, Clara, Contenido)
             continue
-        if low in _CONCEPT_STOP:                                            # концепт-слово (Результат, Автор, SEM…)
+        if low in _CONCEPT_STOP:                                            # концепт-слово (Результат, Автор, Вопрос, Источник…)
             continue
-        if not has_dot and all((w in _CONCEPT_STOP or w in _COMMON or w in _CATEGORY or w in _STOPCONN or len(w) <= 2) for w in ww):
-            continue                                                        # все слова общие/концептуальные — не компания
+        if not has_dot and ww and ww[0] in _INSTRUCTION:                    # фраза-инструкция («Анализировать ответы…», «Задайте запрос»)
+            continue
+        if not has_dot and all(_generic_word(w) for w in ww):              # все слова общие/концептуальные (с учётом падежей) — не компания
+            continue
         res.append(nl)
     return _dedupe_names(res)
 
@@ -952,7 +996,10 @@ def _named_in_answer(ans, own):
         if dl not in [f.lower() for f in found]:
             found.append(dl)
     for m in re.finditer(r"«([^»]{2,40})»|\*\*([^*\n]{2,40})\*\*", ans):   # 3) выделенные имена «…»/**…**
-        nm = _good_name_loose(next(g for g in m.groups() if g))
+        raw = next(g for g in m.groups() if g)
+        if raw.rstrip().endswith(":") or (ans[m.end():m.end()+1] == ":"):   # «**Вопрос:**», «**Источник**:» — это подзаголовок, не компания
+            continue
+        nm = _good_name_loose(raw)
         if nm and not _is_own(nm) and nm not in found:
             found.append(nm)
     for m in re.finditer(r"\b([A-Z][A-Za-z][A-Za-z0-9&'’.-]{1,}(?:\s[A-Z][A-Za-z0-9&'’.-]{1,}){0,2})", ans):  # 4) латиница-бренды (Medicube, Gold Apple)
@@ -999,7 +1046,12 @@ def _competitors_llm(answers, niche):
         "Apple, McKinsey, Accenture, Interbrand и подобные), если они не являются прямым конкурентом именно этой компании в её нише.\n"
         "- НЕ включай категории и каналы поиска (поисковые системы, сайты, форумы, маркетплейсы, выставки, каталоги, "
         "соцсети), разделы ответа, характеристики, города, страны, общие слова и названия самих нейросетей.\n"
-        "- Включай только то, что выглядит как название конкретной организации или бренда — реального конкурента.\n"
+        "- КАТЕГОРИЧЕСКИ НЕ включай подзаголовки и служебные слова из текста ответа: «Вопрос», «Ответ», «Источник», "
+        "«Ключевые слова», «Анализ», «Рекомендации», «Вывод», «Контекст», «Тональность», «Доступность», «Актуальность» и подобные.\n"
+        "- НЕ включай инструкции и советы (фразы вроде «Задайте запрос», «Сформулируйте вопрос», «Проверьте вручную», "
+        "«Прямое тестирование», «Анализировать ответы») — это действия, а не компании.\n"
+        "- Включай только то, что выглядит как название конкретной организации, бренда или продукта (например домен вида name.ru "
+        "или собственное имя сервиса), — реального конкурента.\n"
         "Каждое название с новой строки, по убыванию частоты, максимум 6. Если таких компаний нет, ответь одним словом: НЕТ."
     )
     try:
@@ -1018,9 +1070,14 @@ def _competitors_llm(answers, niche):
     return out
 
 def _clean_comp_name(n):
-    n = re.sub(r"\.(ru|com|рф|su|net|org|io|ai|pro|store|shop|moscow|spb)$", "", n.strip(), flags=re.I)  # убрать домен
+    n = n.strip()
+    # Убираем TLD только у явно «брендовых» доменов (zorini.ru -> Zorini). Короткие домены и домены с цифрами
+    # (1ps.ru, vc.ru, text.ru) оставляем как есть — так они узнаваемы и остаются кликабельными ссылками.
+    m = re.match(r"^([a-zA-Zа-яёА-ЯЁ-]+)\.(?:ru|com|рф|su|net|org|io|ai|pro|store|shop|moscow|spb)$", n, flags=re.I)
+    if m and len(m.group(1)) >= 5:
+        n = m.group(1)
     n = n.strip(" /\\")
-    if n and n.islower() and " " not in n:                # доменное «zorini» -> «Zorini»
+    if n and n.islower() and " " not in n and "." not in n:   # доменное «zorini» -> «Zorini»
         n = n[:1].upper() + n[1:]
     return n
 

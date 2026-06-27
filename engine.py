@@ -54,7 +54,12 @@ def _prep_city(city):
 
 def _decap(w):
     # короткие и аббревиатуры (AI, ИП, 3D) не трогаем, остальное со строчной
-    return w if (len(w) <= 3 or w.isupper()) else w[:1].lower() + w[1:]
+    if len(w) <= 3 or w.isupper():
+        return w
+    first = re.split(r"[\s/\-]", w, 1)[0]            # первый токен: «GEO» в «GEO-аудит», «SEO» в «SEO-продвижение»
+    if len(first) >= 2 and first.isupper():          # начинается с аббревиатуры -> регистр НЕ ломаем (иначе «gEO-аудит»)
+        return w
+    return w[:1].lower() + w[1:]
 
 def clean_niche(niche):
     """Из произвольной фразы (даже целого предложения) делает короткое ядро ниши."""
@@ -282,7 +287,7 @@ def generate_queries_tpl(niche, city):
         (f"Какой компании доверить {n}{inc}?",                 "Доверие к компании"),
         (f"Кому доверить {n} и на что смотреть при выборе?",   "Доверие к компании"),
         (f"Как выбрать исполнителя: {n}{inc}?",                "Сравнение компаний"),
-        (f"{N} под ключ — к кому обратиться{inc}?",            "Под ключ"),
+        (f"{N} под ключ: к кому обратиться{inc}?",             "Под ключ"),
         (f"Сколько стоит {n} и от чего зависит цена?",         "Цена и сроки"),
         (f"Где почитать отзывы о компаниях: {n}{inc}?",        "Отзывы и кейсы"),
         (f"Примеры работ и кейсы: {n}{inc}",                   "Отзывы и кейсы"),
@@ -741,7 +746,10 @@ _GLOBAL_BRANDS = {"google","microsoft","amazon","apple","meta","facebook","insta
                   "tableau","aws","azure","alibaba","tencent","interbrand","landor","pentagram","ogilvy","wpp"}
 _PLATFORMS = {"яндекс", "яндекса", "google", "гугл", "chatgpt", "openai", "gigachat", "гигачат", "claude", "клод",
               "сбер", "сбера", "deepseek", "perplexity", "перплексити", "gemini", "джемини", "копайлот", "copilot",
-              "нейро", "ai", "ии", "yandexgpt", "алиса", "alice"}
+              "нейро", "ai", "ии", "yandexgpt", "алиса", "alice",
+              "bing", "бинг", "wikipedia", "википедия", "reddit", "реддит", "trustpilot", "трастпилот", "sharegpt",
+              "quora", "квора", "dzen", "дзен", "telegram", "телеграм", "vk", "вконтакте", "youtube", "ютуб", "meta",
+              "yandex", "bingchat", "msn", "duckduckgo", "baidu", "you.com", "phind", "poe"}
 _COMMON = {"также","кроме","среди","лучшие","лучший","топ","это","этот","при","для","как","или","если","итак",
            "компания","компании","компаний","фирма","фирмы","сайт","сайты","отзыв","отзывы","услуга","услуги",
            "заказ","цена","цены","например","важно","совет","советы","вариант","варианты","способ","способы",
@@ -897,6 +905,25 @@ _CONCEPT_STOP |= {
  "мои","мой","моя","моё","мое","твои","ваши","ваш","ваша","его","их","делает","делаю","делать","просто","например","сначала",
  "далее","затем","итак","кроме","помимо","использование","настройка","оформление","описание","описания","разбор","разборы",
  "позиционирование","присутствия","вовлечённость","вовлеченность","охват","охвата","динамика","динамики","показатель","показатели"}
+# Ещё набор: концепты и подзаголовки из информационных/технических ответов (тон, страницы, индексируемость,
+# схема-разметка, сигналы доверия и т.п.). Они набирали проценты как «конкуренты», хотя это не компании.
+_CONCEPT_STOP |= {
+ "тон","тона","тоне","тону","тоном","тональный","страница","страницы","страниц","странице","страницу","страницам","страницах",
+ "нюанс","нюансы","нюанса","нюансов","важный","важная","важное","важные","важен","важно","пользователь","пользователи",
+ "пользователей","пользовательский","пользовательские","пользовательская","пользовательских","индексируемость","индексация",
+ "индексирование","индексируется","индекс","индекса","динамичность","нестабильность","стабильность","изменчивость","непостоянство",
+ "сигнал","сигналы","сигналов","сигнала","активность","активности","активностью","момент","моменты","моментов","момента",
+ "технический","техническая","технические","техническое","технических","техническим","предпочтение","предпочтения","предпочтений",
+ "ошибка","ошибки","ошибок","ошибке","ошибкой","доверие","доверия","доверию","доверием","разметка","разметки","разметку","разметке",
+ "аудит","аудита","аудиту","аудитом","аудите","аудиты","консультация","консультации","консультацию","консультант","консультанты",
+ "знакомый","знакомые","знакомых","знакомым","знакомого","предвзятость","предвзятости","непредвзятость","предвзятый","предвзятая",
+ "общий","общая","общее","общие","общих","общим","сниппет","сниппеты","сниппетов","система","системы","систем","системе","системах",
+ "поисковый","поисковая","поисковое","поисковые","поисковых","поисковой","поиском","рассмотрите","рассмотреть","рассмотрим",
+ "рассмотрение","характеристика","характеристики","характеристик","параметр","параметры","параметров","надёжность","надежность",
+ "надёжности","выбор","выбора","выборе","прямые","прямых","дополнительно","дополнительные","субъективные","субъективный",
+ "интерпретация","интерпретации","нестабильна","моменты","фрагмент","фрагменты","абзац","абзацы","раздел","разделы",
+ "бренд","бренда","бренды","брендов","бренде","брендом","эксперт","эксперта","экспертом","эксперты","экспертов","экспертам",
+ "экспертный","экспертная","специалистом","профи","нейроаудит","нейросеть","нейросети","нейросетей","нейросетях"}
 # Императивы/инфинитивы — это инструкции из ответа, а не названия компаний.
 _INSTRUCTION = {
  "сформулируйте","сформулировать","задайте","задавайте","задать","задавать","обратитесь","обращайтесь","обратиться",
@@ -905,7 +932,9 @@ _INSTRUCTION = {
  "спрашивать","анализируйте","анализировать","проанализируйте","изучите","изучать","изучить","найдите","находить","найти",
  "выберите","выбирать","выбрать","определите","определять","определить","оцените","оценивать","оценить","сделайте","сделать",
  "напишите","написать","укажите","указать","опишите","описать","настройте","настроить","улучшите","улучшить","повысьте",
- "повысить","соберите","собрать","составьте","составить","учитывайте","учитывать","смотрите","посмотрите","убедитесь","следите"}
+ "повысить","соберите","собрать","составьте","составить","учитывайте","учитывать","смотрите","посмотрите","убедитесь","следите",
+ "закажите","заказать","закажи","заказывайте","закажем","купите","купить","возьмите","посетите","выбирайте","рассмотрите",
+ "обращайтесь","свяжитесь","начните","начинайте","попробуйте","попробовать","сравнивайте","ищите","закажете"}
 _CONCEPT_STOP |= _INSTRUCTION
 _FOREIGN_CONNECT = {"y","de","la","el","con","para","the","and","for","of","en","del","los","las","una","un","da","do"}
 _STOPCONN = {"в","на","с","по","и","или","для","до","от","как","что","это","не","без","к","о","об","за","при","из","у"}
@@ -914,21 +943,44 @@ _ENG_COMMON = {"search","product","products","discovery","service","services","m
  "brand","brands","group","media","agency","studio","global","local","best","top","review","reviews","price","support",
  "management","strategy","platform","software","app","apps","cloud","mobile","design","quality","approach",
  "domain","domains","source","sources","question","questions","answer","answers","keywords","keyword","example","examples",
- "context","analysis","monitoring","tracking","prompt","prompts","query","queries","result","results","tips","summary"}
+ "context","analysis","monitoring","tracking","prompt","prompts","query","queries","result","results","tips","summary",
+ # схема-разметка и dev/SEO-инструменты, которые нейросети называют в «как сделать»-ответах (не конкуренты ниши)
+ "schema","markup","validator","pagespeed","insights","lighthouse","rich","webmaster","sitemap","robots","structured",
+ "json","jsonld","ld","article","howto","faq","faqpage","breadcrumb","breadcrumblist","org","organization","indexability",
+ "index","indexing","snippet","snippets","branding","deep","research","test","tests","checker","tester","crawl","crawler",
+ "page","pages","meta","score","scores","speed","ranking","rankings","rating","ratings","console","tool","tools","audit",
+ "brainstorming","pro","plus","premium","basic","free","lite","new","old","official","site","website","page","report"}
 # Частые испанские/иностранные слова-обрывки, которые нейросеть иногда выдаёт в ответе (не бренды).
 _FOREIGN_COMMON = {"clara","claro","contenido","contenidos","consultas","consulta","genericas","genericos","generica",
  "generico","servicios","servicio","calidad","negocio","negocios","empresa","empresas","diferenciacion","optimizacion",
  "busqueda","resultado","resultados","autor","autores","mejor","mejores","como","donde","porque","mas","sus","para",
  "entre","sobre","puede","tambien","analisis","estrategia","marca","cliente","clientes","competencia",
  "datos","entrenamiento","presencia","fuente","fuentes","pregunta","preguntas","respuesta","respuestas","palabras","clave",
- "ejemplo","ejemplos","recomendacion","recomendaciones","factores","factor","ventajas","limitaciones","contexto","relevancia"}
+ "ejemplo","ejemplos","recomendacion","recomendaciones","factores","factor","ventajas","limitaciones","contexto","relevancia",
+ "hay","fecha","corte","tono","paginas","pagina","tu","tus","nuestro","nuestra","sitio","sitios","tiempo","real","directo"}
+# Притяжательные плейсхолдеры из ответов: «Ваш бренд», «Ваша компания», «Мои данные» — это не названия.
+_POSSESS = {"ваш","ваша","ваше","ваши","вашего","вашей","вашу","ваших","вашим","вашими","наш","наша","наше","наши",
+            "нашего","нашей","мой","моя","моё","мое","мои","моего","моей","твой","твоя","твоё","твои","его","её","ее","их"}
+# Известные бренды из чужих ниш, которые нейросети любят приводить как ПРИМЕР (не конкуренты клиента).
+_EXAMPLE_BRANDS = {"vkusvill","вкусвилл","промагро","promagro","тинькофф","tinkoff","нетология","netology",
+                   "skyeng","скайенг","додо","dodo","аэрофлот","aeroflot","сбермаркет","самокат","delivery"}
 # Стемы общих слов (5 букв) — чтобы ловить падежные формы: «поиска»→«поиск», «запроса»→«запрос».
 # Применяется только когда ВСЕ слова фразы общие, поэтому реальные бренды («Дольче Мода») не страдают.
 _GENERIC_STEMS = {w[:5] for w in (_CONCEPT_STOP | _CATEGORY) if len(w) >= 5}
+def _g1(x):
+    return (x in _CONCEPT_STOP or x in _COMMON or x in _CATEGORY or x in _STOPCONN or x in _ENG_COMMON
+            or x in _FOREIGN_COMMON or x in _PLATFORMS or len(x) <= 2 or (len(x) >= 5 and x[:5] in _GENERIC_STEMS))
 def _generic_word(w):
-    return (w in _CONCEPT_STOP or w in _COMMON or w in _CATEGORY or w in _STOPCONN
-            or w in _ENG_COMMON or w in _FOREIGN_COMMON or len(w) <= 2
-            or (len(w) >= 5 and w[:5] in _GENERIC_STEMS))
+    w = w.lower().strip(".,:;()«»\"'")
+    if _g1(w):
+        return True
+    parts = [p for p in re.split(r"[.\-/]", w) if p]                  # «schema.org»→schema+org, «seo-инструменты»→seo+инструменты
+    if len(parts) > 1:
+        if all(_g1(p) for p in parts):
+            return True
+        if _g1(parts[-1]) and (len(parts[0]) <= 4 or _g1(parts[0])):  # головное слово общее, приставка короткая: «GEO-аудит», «SEO-инструменты»
+            return True
+    return False
 # Российский рынок: иностранные домены и мировые гиганты — не релевантные конкуренты для РФ-бизнеса.
 _RU_TLD = re.compile(r"\.(?:ru|рф|su|moscow|tatar)$", re.I)
 _FOREIGN_TLD = re.compile(r"\.(?:com|io|net|org|co|us|uk|de|fr|cn|in|eu|app|ai|dev|tech|store|shop|online|info|biz|me)$", re.I)
@@ -963,51 +1015,65 @@ def _dedupe_names(names):
         if not dup:
             out.append(n)
     return out
-def _clean_named_list(names):
-    """Чистит список названных игроков: выкидывает обрывки, общие слова и фразы-запросы, дедупит."""
+_NICHE_SELF = {"аудит","аудит сайта","сайт","сайта","seo-аудит","сео-аудит","geo-аудит","гео-аудит",
+               "seo аудит","geo аудит","аудит видимости","анализ сайта"}
+def _clean_named_list(names, niche=""):
+    """Чистит список названных игроков: выкидывает обрывки, общие слова, плейсхолдеры, сам сервис и фразы-запросы."""
     res = []
+    niche_core = re.sub(r"\s+", " ", (niche or "").strip().lower()).replace("-", " ")
     for n in names:
         nl = re.sub(r"\s+", " ", (n or "").strip(" .,:;()[]«»\"'")).strip()
         low = nl.lower()
         if len(nl) < 3 or low in _NAME_STOP:
             continue
-        words = nl.split()                                                  # оригинальный регистр — для проверки заглавных
-        _wl = [w.lower().strip(".,:;()") for w in words]
-        if low in _PLATFORMS or (_wl and _wl[0] in _PLATFORMS):             # сама нейросеть/платформа (Claude, ChatGPT Search, Gemini Pro) — не конкурент
-            continue
-        has_dot = "." in nl                                                 # домен (iherb.com) — оставляем
-        if not has_dot and not any(c.isupper() for c in nl):               # сплошь строчные и не домен — не бренд
-            continue
-        if any(w.lower().strip(".,") in _CATEGORY for w in words):          # содержит слово-категорию (выставки, поиск, производители…)
-            continue
-        if len(words) >= 2 and any(w.lower() in _NAME_STOP_WORDS for w in words):  # «купить Medicube», «официальный сайт …»
-            continue
-        if len(words) >= 4:                                                 # слишком длинно для названия
-            continue
-        if "…" in nl or "..." in nl:                                        # обрезанный фрагмент ответа
-            continue
-        if re.match(r"^\d+\s*[\.\)]", nl):                                  # пункт нумерованного списка «2. …»
-            continue
-        if re.search(r"[áéíóúñàèìòùâêîôûäëïöüç]", low):                       # иностранные диакритики (исп./фр.) — не РФ-бренд
-            continue
-        if len(words) == 1 and re.fullmatch(r"[A-Z]{2,5}", nl):              # одиночная аббревиатура (SEM, SEO, CRM)
-            continue
+        words = nl.split()
         ww = [w.lower().strip(".,:;()") for w in words]
-        if not has_dot and len(words) >= 2 and any(w in _FOREIGN_CONNECT for w in ww):   # иностранная фраза (SEO y Contenido)
+        if low in _PLATFORMS or (ww and ww[0] in _PLATFORMS):              # сама нейросеть/платформа (Bing, Claude, ChatGPT Search)
             continue
-        if not has_dot and len(words) >= 2 and all(re.fullmatch(r"[a-z]+", w) and w in _ENG_COMMON for w in ww):  # фраза из общих англ. слов
+        if ww and ww[0] in _POSSESS:                                       # плейсхолдер «Ваш бренд», «Ваша компания», «Мои данные»
             continue
-        if len(words) == 1 and low in (_ENG_COMMON | _FOREIGN_COMMON):      # одиночное общее англ./исп. слово (Search, Clara, Contenido)
+        core = low.replace("-", " ")
+        if core in _NICHE_SELF or (niche_core and core == niche_core):     # сам сервис/ниша как «конкурент» (GEO-аудит, Аудит сайта)
             continue
-        if low in _CONCEPT_STOP:                                            # концепт-слово (Результат, Автор, Вопрос, Источник…)
+        dom_label = low.split(".")[0]
+        if low in _EXAMPLE_BRANDS or dom_label in _EXAMPLE_BRANDS:         # бренд-пример из чужой ниши (ВкусВилл и т.п.)
             continue
-        if not has_dot and ww and ww[0] in _INSTRUCTION:                    # фраза-инструкция («Анализировать ответы…», «Задайте запрос»)
+        if "/" in nl and not re.search(r"https?://", low):                # «Semrush/Ahrefs» — склейка двух названий, не один бренд
             continue
-        if not has_dot and all(_generic_word(w) for w in ww):              # все слова общие/концептуальные (с учётом падежей) — не компания
+        is_domain = bool(re.fullmatch(r"[a-z0-9][a-z0-9-]{1,}\.(?:[a-z0-9-]+\.)?[a-zа-я]{2,10}", low))
+        if is_domain:                                                      # чистый домен (1ps.ru, fl.ru) — берём как есть
+            res.append(nl); continue
+        if not any(c.isupper() for c in nl):                               # сплошь строчные и не домен — не бренд
+            continue
+        if any(w in _CATEGORY for w in ww):                                # содержит слово-категорию (выставки, поиск, производители…)
+            continue
+        if len(words) >= 2 and any(w in _NAME_STOP_WORDS for w in ww):     # «купить Medicube», «официальный сайт …»
+            continue
+        if len(words) >= 4:                                                # слишком длинно для названия
+            continue
+        if "…" in nl or "..." in nl:                                       # обрезанный фрагмент ответа
+            continue
+        if re.match(r"^\d+\s*[\.\)]", nl):                                 # пункт нумерованного списка «2. …»
+            continue
+        if re.search(r"[áéíóúñàèìòùâêîôûäëïöüç]", low):                      # иностранные диакритики (исп./фр.) — не РФ-бренд
+            continue
+        if len(words) == 1 and re.fullmatch(r"[A-Z]{2,5}", nl):            # одиночная аббревиатура (SEM, SEO, CRM)
+            continue
+        if len(words) >= 2 and any(w in _FOREIGN_CONNECT for w in ww):     # иностранная фраза (SEO y Contenido)
+            continue
+        if low in _CONCEPT_STOP:                                           # концепт-слово (Тон, Страницы, Вопрос…)
+            continue
+        if ww and ww[0] in _INSTRUCTION:                                   # фраза-инструкция («Анализировать ответы…», «Задайте запрос»)
+            continue
+        if all(_generic_word(w) for w in ww):                             # все слова общие/концептуальные/платформенные/схемные — не компания
             continue
         res.append(nl)
     return _dedupe_names(res)
 
+_EXAMPLE_CTX = re.compile(r"(наприм|к\s+пример|в\s+качестве\s+пример|такие\s+как|так(их|ие)\s+\w+\s+как|скажем|вроде|типа\b|подобн\w*\s+как)", re.I)
+def _is_example(ans, start):
+    """Имя названо как ПРИМЕР («например, ВкусВилл»)? Тогда это не конкурент, а иллюстрация."""
+    return bool(_EXAMPLE_CTX.search(ans[max(0, start-40):start]))
 def _named_in_answer(ans, own):
     """Названные в ответе реальные игроки (ритейлеры, домены, выделенные имена), кроме самого бренда. Список (до 5)."""
     if not ans: return []
@@ -1019,9 +1085,10 @@ def _named_in_answer(ans, own):
     for k, disp in _RETAILERS.items():                       # 1) известные площадки/ритейлеры
         if k in low and not _is_own(disp) and disp not in found:
             found.append(disp)
-    for d in _DOMAIN_RE.findall(ans):                         # 2) домены сайтов
-        dl = d.lower()
+    for m in _DOMAIN_RE.finditer(ans):                       # 2) домены сайтов
+        dl = m.group(1).lower()
         if dl.startswith(_PLATFORM_DOMS) or _is_own(dl): continue
+        if _is_example(ans, m.start()): continue              # «например, vkusvill.ru» — пример, не конкурент
         label = dl.split(".")[0]                               # iherb.com -> iherb (чтобы не дублировать ритейлера)
         if any(label and label in f.lower().replace(" ", "") for f in found): continue
         if dl not in [f.lower() for f in found]:
@@ -1030,6 +1097,7 @@ def _named_in_answer(ans, own):
         raw = next(g for g in m.groups() if g)
         if raw.rstrip().endswith(":") or (ans[m.end():m.end()+1] == ":"):   # «**Вопрос:**», «**Источник**:» — это подзаголовок, не компания
             continue
+        if _is_example(ans, m.start()): continue
         nm = _good_name_loose(raw)
         if nm and not _is_own(nm) and nm not in found:
             found.append(nm)
@@ -1037,6 +1105,7 @@ def _named_in_answer(ans, own):
         tok = m.group(1)
         if not re.search(r"[a-z]", tok): continue                # пропускаем аббревиатуры (SEO, FAQ, HTML)
         if re.match(r"[áéíóúñàèìòùâêîôûäëïöüç]", (ans[m.end():m.end()+1] or ""), re.I): continue   # слово обрезано на иностранной букве (Diferenciación)
+        if _is_example(ans, m.start()): continue
         nm = _good_name_loose(tok)
         if nm and not _is_own(nm) and nm.lower() not in [f.lower() for f in found]:
             found.append(nm)
@@ -1101,14 +1170,11 @@ def _competitors_llm(answers, niche):
     return out
 
 def _clean_comp_name(n):
-    n = n.strip()
-    # Убираем TLD только у явно «брендовых» доменов (zorini.ru -> Zorini). Короткие домены и домены с цифрами
-    # (1ps.ru, vc.ru, text.ru) оставляем как есть — так они узнаваемы и остаются кликабельными ссылками.
-    m = re.match(r"^([a-zA-Zа-яёА-ЯЁ-]+)\.(?:ru|com|рф|su|net|org|io|ai|pro|store|shop|moscow|spb)$", n, flags=re.I)
-    if m and len(m.group(1)) >= 5:
-        n = m.group(1)
-    n = n.strip(" /\\")
-    if n and n.islower() and " " not in n and "." not in n:   # доменное «zorini» -> «Zorini»
+    n = n.strip().strip(" /\\")
+    # Домены оставляем как есть (1ps.ru, key-client.ru, zorini.ru): так они узнаваемы и КЛИКАБЕЛЬНЫ.
+    if re.fullmatch(r"[a-z0-9][a-z0-9-]*\.(?:[a-z0-9-]+\.)?[a-zа-я]{2,10}", n.lower()):
+        return n.lower()
+    if n and n.islower() and " " not in n and "." not in n:   # одиночное строчное слово -> «zorini» -> «Zorini»
         n = n[:1].upper() + n[1:]
     return n
 
@@ -1124,7 +1190,7 @@ def extract_competitors(answers, brand, brand_short, niche="", top=3, aliases=No
     names = _competitors_llm(answers, niche)
     if names is None:                       # ключа нет -> эвристический запас
         names = _competitors_regex(answers, own)
-    names = _clean_named_list(names)        # дедуп подстрок + чистка обрывков/фраз
+    names = _clean_named_list(names, niche)        # дедуп подстрок + чистка обрывков/фраз/плейсхолдеров
     names = [n for n in names if not _is_foreign(n)]   # российский рынок: без иностранных гигантов и доменов
     res, seen = [], set()
     for name in names:

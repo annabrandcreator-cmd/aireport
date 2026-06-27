@@ -957,7 +957,10 @@ _ENG_COMMON = {"search","product","products","discovery","service","services","m
  "page","pages","meta","score","scores","speed","ranking","rankings","rating","ratings","console","tool","tools","audit",
  "brainstorming","pro","plus","premium","basic","free","lite","new","old","official","site","website","page","report",
  "performance","knowledge","cutoff","cut","off","llm","llms","face","tracker","gpt","method","action","content",
- "standard","example","principle","note","notes","overview","guide","step","steps","feature","features","update"}
+ "standard","example","principle","note","notes","overview","guide","step","steps","feature","features","update",
+ "engine","engines","generation","generative","authority","specialist","specialists","large","language","models","model",
+ "listing","local","national","regional","optimisation","contradiction","relevance","accuracy","visibility",
+ "extended","map","maps","mapping","general","various","direct","indirect","manual","automatic","vector"}
 # Частые испанские/иностранные слова-обрывки, которые нейросеть иногда выдаёт в ответе (не бренды).
 _FOREIGN_COMMON = {"clara","claro","contenido","contenidos","consultas","consulta","genericas","genericos","generica",
  "generico","servicios","servicio","calidad","negocio","negocios","empresa","empresas","diferenciacion","optimizacion",
@@ -971,7 +974,8 @@ _POSSESS = {"ваш","ваша","ваше","ваши","вашего","вашей
             "нашего","нашей","мой","моя","моё","мое","мои","моего","моей","твой","твоя","твоё","твои","его","её","ее","их"}
 # Начало вопроса/утверждения/отрицания — это фраза из ответа, а не название: «Что реально поможет», «Нет стандарта».
 _QSTART = {"что","как","почему","зачем","где","когда","нет","не","какие","какой","какая","какое","каких","кто","чем","чей",
-           "сколько","куда","откуда","ли","разве","нужно","надо","стоит","можно","если","когда","да","или","но"}
+           "сколько","куда","откуда","ли","разве","нужно","надо","стоит","можно","если","когда","да","или","но",
+           "кому","кого","кем","чего","чему","чём","чьи","где-то","зачем-то","нельзя","есть","будет","может"}
 # Известные бренды из чужих ниш, которые нейросети любят приводить как ПРИМЕР (не конкуренты клиента).
 _EXAMPLE_BRANDS = {"vkusvill","вкусвилл","промагро","promagro","тинькофф","tinkoff","нетология","netology",
                    "skyeng","скайенг","додо","dodo","аэрофлот","aeroflot","сбермаркет","самокат","delivery"}
@@ -1001,8 +1005,9 @@ def _is_common_lowercase(corpus, name):
     cyr = [w.lower() for w in re.findall(r"[А-ЯЁ]?[а-яё]{3,}", name) if re.search(r"[а-яё]", w)]
     if not cyr:
         return False                                                  # латиница/домены не трогаем
-    for w in cyr:                                                      # ищем СТРОЧНОЕ вхождение (с коротким окончанием)
-        if not re.search(r"(?<![А-Яа-яЁёA-Za-z])" + re.escape(w) + r"[а-яё]{0,3}(?![А-Яа-яёЁA-Za-z])", corpus):
+    for w in cyr:                                                      # ищем СТРОЧНОЕ вхождение слова (по стему -> ловим падежи)
+        stem = re.escape(w[:5]) if len(w) >= 6 else re.escape(w)       # «проверка»/«проверку»/«проверки» -> общий стем «прове»
+        if not re.search(r"(?<![А-Яа-яЁёA-Za-z])" + stem + r"[а-яё]*(?![A-Za-z])", corpus):
             return False                                              # хотя бы одно слово не пишут строчным -> возможно, бренд
     return True
 # Российский рынок: иностранные домены и мировые гиганты — не релевантные конкуренты для РФ-бизнеса.
@@ -1028,18 +1033,25 @@ def _is_foreign(name):
     words = set(re.split(r"[\s/().]+", n))
     return n in _FOREIGN_NAMES or bool(words & _FOREIGN_NAMES)
 def _dedupe_names(names):
-    """Убирает дубли-подстроки: «Guerisson» при «Guerisson for You», «You» как отдельное слово."""
+    """Убирает дубли и варианты написания: «KeyClient»~«key-client.ru»~«Key Client», «Guerisson»~«Guerisson for You».
+    Сравнивает имена без TLD/дефисов/точек/пробелов (точное совпадение, НЕ подстрока — чтобы не склеить разные
+    компании вроде «Mention» и «Mentionlytics»). Из пары оставляет домен (кликабелен) или более полное имя."""
+    def _norm(s):
+        s = re.sub(r"\.(?:ru|рф|com|su|net|org|io|ai|pro|store|shop|me|co)$", "", s.lower().strip())   # убрать TLD
+        return re.sub(r"[\s\-._/]", "", s)                            # убрать разделители
     out = []
     for n in names:
         nl = n.lower().strip()
         if not nl:
             continue
+        nn = _norm(n)
         dup = False
         for i, m in enumerate(out):
             ml = m.lower()
-            if nl == ml or nl in ml.split() or ml in nl.split():     # совпало слово-в-словосочетании
-                if len(nl) > len(ml):
-                    out[i] = n                                       # оставляем более полное имя
+            if nl == ml or nl in ml.split() or ml in nl.split() or (len(nn) >= 4 and nn == _norm(m)):  # точное совпадение нормализованных
+                new_has_dot = "." in nl; old_has_dot = "." in ml
+                if (new_has_dot and not old_has_dot) or (new_has_dot == old_has_dot and len(nl) > len(ml)):
+                    out[i] = n                                       # домен важнее, иначе более полное имя
                 dup = True; break
         if not dup:
             out.append(n)
@@ -1062,7 +1074,10 @@ def _clean_named_list(names, niche=""):
                                   or (len(ww[-1]) <= 4 and re.fullmatch(r"[A-Za-z]{2,4}", words[-1]) and words[-1].isupper())):
             words.pop(); ww.pop()
         nl = " ".join(words); low = nl.lower()
-        if low in _PLATFORMS or (ww and ww[0] in _PLATFORMS):              # сама нейросеть/платформа (Bing, Claude, ChatGPT Search)
+        dom_label = low.split(".")[0]
+        if low in _PLATFORMS or (ww and ww[0] in _PLATFORMS) or dom_label in _PLATFORMS:   # платформа/её домен (Bing, Яндекс.Карты, Yandex.Maps)
+            continue
+        if "(" in nl or ")" in nl:                                         # обрывок со скобкой «B2B (Пром. оборудование», «Юридическая тематика (Э…»
             continue
         if ww and ww[0] in _POSSESS:                                       # плейсхолдер «Ваш бренд», «Ваша компания», «Мои данные»
             continue
@@ -1189,8 +1204,12 @@ def _competitors_llm(answers, niche):
         "«Ключевые слова», «Анализ», «Рекомендации», «Вывод», «Контекст», «Тональность», «Доступность», «Актуальность» и подобные.\n"
         "- НЕ включай инструкции и советы (фразы вроде «Задайте запрос», «Сформулируйте вопрос», «Проверьте вручную», "
         "«Прямое тестирование», «Анализировать ответы») — это действия, а не компании.\n"
+        "- НЕ включай отрасли, сегменты и тематики (например «B2B», «промышленное оборудование», «юридическая тематика», "
+        "«медицинские сайты», «недвижимость») — это сферы, а не отдельные компании.\n"
+        "- НЕ включай компании из других, не связанных с этой нишей отраслей (например ГИС-сервисы Esri, Mapbox, ArcGIS для "
+        "немаппинговой ниши, или налоговые/юридические фирмы для не-юридической ниши).\n"
         "- Включай только то, что выглядит как название конкретной организации, бренда или продукта (например домен вида name.ru "
-        "или собственное имя сервиса), — реального конкурента.\n"
+        "или собственное имя сервиса), — реального конкурента в этой нише.\n"
         "Каждое название с новой строки, по убыванию частоты, максимум 6. Если таких компаний нет, ответь одним словом: НЕТ."
     )
     try:
@@ -1466,6 +1485,47 @@ def _ask_one(prompt, eid, run, brand, test):
                 time.sleep((3.0 if _RATELIMIT.search(msg) else 1.2) * attempt); continue
             return None                                     # стойкая ошибка (ключ/квота/сеть) -> не «0%», а «не удалось проверить»
 
+def _companies_only(names, niche, corpus="", aliases=None):
+    """Единый смысловой фильтр кандидатов в конкуренты: оставить ТОЛЬКО реальные компании/бренды/сайты.
+    Подход вместо бесконечных стоп-списков: (1) детерминированно убираем кириллические концепт-слова
+    (которые встречаются в ответах со строчной буквы), (2) в проде дополнительно просим нейросеть убрать
+    отрасли/тематики/категории/концепты и компании из чужих ниш. Реальные домены и бренды из справочника
+    не отдаём на проверку — они точно остаются."""
+    names = [n for n in names if n]
+    if not names:
+        return names
+    det = [n for n in names if not _is_common_lowercase(corpus, n)]        # строчные концепты -> вон
+    if os.environ.get("TEST_MODE") == "1":
+        return det
+    def _sure(n):                                                          # точно компания: домен / справочник / ритейлер
+        nl = n.lower()
+        return bool(_SELF_DOMAIN_RE.match(nl) or nl in _BRAND_SITES or _RETAILERS.get(nl) or _RETAILER_URLS.get(n))
+    maybe = [n for n in det if not _sure(n)]
+    ask = _first_keyed_adapter()
+    if not ask or not maybe:
+        return det
+    prompt = (f"Ниша бизнеса клиента: «{niche or 'услуги'}».\n"
+              "Ниже список кандидатов в конкуренты, автоматически извлечённый из ответов нейросетей; в нём есть и реальные "
+              "компании, и мусор. Перечисли ПОСТРОЧНО только те строки, которые НЕ являются реальной отдельной "
+              "компанией, брендом, агентством или сайтом, а представляют собой: отрасль или тематику (например «B2B», "
+              "«юридическая тематика», «медицинские сайты», «промышленное оборудование»), категорию или тип игроков, общее "
+              "понятие, характеристику, подзаголовок, инструкцию, тип разметки, название нейросети или поисковика, либо "
+              "компанию из чужой, не связанной с этой нишей отрасли. Пиши строки ровно как во входе, по одной на строку, "
+              "без пояснений. Если убирать нечего — ответь «-».\n\n" + "\n".join(maybe))
+    try:
+        raw = ask(prompt) or ""
+    except Exception:
+        return det
+    bad = set()
+    for ln in raw.splitlines():
+        s = ln.strip().strip("-*•—\"«».").strip().lower()
+        if not s or s == "-":
+            continue
+        for n in maybe:
+            if n.lower() == s or (len(s) >= 5 and (s in n.lower() or n.lower() in s)):
+                bad.add(n)
+    return [n for n in det if n not in bad]
+
 def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=None, aliases=None, queries=None):
     test = os.environ.get("TEST_MODE") == "1"
     aliases = aliases or brand_aliases(site, site_info, brand, brand_short)
@@ -1520,10 +1580,12 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
             queries[qi]["hits"][eid] += 1
     failed = [eid for eid in eng_tot if eng_tot[eid] and eng_err[eid] >= (eng_tot[eid] + 1) // 2]   # большинство вызовов с ошибкой -> движок недоступен
     competitors = extract_competitors(all_answers, brand, brand_short, niche, aliases=aliases)
+    corpus = "\n".join(a for a in all_answers if a)
     # доказательная база по каждому запросу: какой движок назвал бренд и кого из конкурентов
     comp_names = [n for n, _ in competitors]
     comp_low = {n.lower() for n in comp_names}
     comp_words = {w for n in comp_names for w in n.lower().split()}   # слова имён конкурентов (чтобы не дублировать обрывком)
+    cand = set(comp_names)
     for q in queries:
         q["evidence"] = {e["id"]: {"brand": q["hits"][e["id"]] > 0, "comps": [], "others": []} for e in engines}
     for (qi, eid, _q, _run), ans in zip(tasks, answers):
@@ -1534,9 +1596,17 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
                 cell["comps"].append(n)
         for n in _named_in_answer(ans, aliases):              # прочие названные игроки (площадки, домены, бренды)
             nl = n.lower()
-            if nl in comp_low or nl in cell["others"]: continue
+            if nl in comp_low or nl in [o.lower() for o in cell["others"]]: continue
             if " " not in nl and nl in comp_words: continue   # «Guerisson» при «Guerisson for You» — не дублируем
-            cell["others"].append(n)
+            cell["others"].append(n); cand.add(n)
+    # ── ЕДИНЫЙ смысловой фильтр на всё: оставляем только реальные компании, режем отрасли/концепты/чужие ниши ──
+    good_low = {g.lower() for g in _companies_only(sorted(cand), niche, corpus, aliases)}
+    for q in queries:
+        for e in engines:
+            cell = q["evidence"][e["id"]]
+            cell["comps"] = [c for c in cell["comps"] if c.lower() in good_low]
+            cell["others"] = [o for o in cell["others"] if o.lower() in good_low]
+    competitors = [(n, c) for (n, c) in competitors if n.lower() in good_low]
     return queries, competitors, failed
 
 # ───────────────────────── сборка данных отчёта ───────────────────────
@@ -1724,6 +1794,29 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
                or _BRAND_SITES.get(nl) or _BRAND_SITES.get(re.sub(r"\.(ru|com|рф|io|org|net)$", "", nl)))
         if url:
             link_map[n] = url
+    # 2.5) сопоставляем имя бренда с РЕАЛЬНЫМ доменом, который нейросети назвали в ответах этого же отчёта:
+    #      «KeyClient»->key-client.ru, «Pixel»->pixelplus.ru. Это настоящий сайт конкурента (а не поиск/догадка).
+    report_domains = []
+    for q in queries:
+        for _eid, ev in (q.get("evidence") or {}).items():
+            for o in list(ev.get("others", [])) + list(ev.get("comps", [])):
+                dl = (o or "").lower().strip()
+                if _self_domain(dl) and dl not in report_domains:
+                    report_domains.append(dl)
+    def _label(s):
+        s = re.sub(r"\.[a-zа-я]{2,10}$", "", s.lower().strip())            # убрать TLD
+        return re.sub(r"[^a-zа-я0-9]", "", s)                              # только буквы/цифры
+    for n in named_all:
+        if n in link_map:
+            continue
+        nn = _label(n)
+        if len(nn) < 4:
+            continue
+        for d in report_domains:
+            dl = _label(d.split("/")[0])
+            if dl and (dl == nn or nn in dl or dl in nn):                  # «keyclient»==«keyclient», «pixel»⊂«pixelplus»
+                link_map[n] = _self_domain(d) or ("https://" + d)
+                break
     missing = [n for n in named_all if n not in link_map]     # 3) остальные бренды -> домены спросим у нейросети
     if missing and os.environ.get("TEST_MODE") != "1":
         try:

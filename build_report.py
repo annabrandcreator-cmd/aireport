@@ -442,7 +442,7 @@ def _self_url(name):
     return "https://"+dom
 
 def _comp_url(name, lm=None):
-    """URL сайта компании: из карты ссылок отчёта, иначе — если имя само домен."""
+    """URL сайта компании: 1) прямой сайт из карты ссылок отчёта, 2) имя само домен. Только реальные сайты, без поиска."""
     return (lm or {}).get(name) or _self_url(name)
 
 def _linkify(name, lm=None, maxlen=24):

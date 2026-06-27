@@ -807,6 +807,37 @@ _RETAILER_URLS = {
     "Hoff":"https://hoff.ru","IKEA":"https://www.ikea.com/ru/ru/","Детский мир":"https://www.detmir.ru",
     "Спортмастер":"https://www.sportmaster.ru","Связной":"https://www.svyaznoy.ru","DNS":"https://www.dns-shop.ru",
 }
+# Официальные сайты популярных сервисов/брендов (SEO, аналитика, мониторинг, контент, конструкторы) — чтобы
+# конкурент-бренд (не домен) сразу получал ПРЯМУЮ ссылку, без обращения к нейросети. Ключи — в нижнем регистре.
+_BRAND_SITES = {
+ # SEO и AI-видимость
+ "topvisor":"https://topvisor.com","топвизор":"https://topvisor.com","semrush":"https://semrush.com",
+ "семраш":"https://semrush.com","ahrefs":"https://ahrefs.com","серпстат":"https://serpstat.com","serpstat":"https://serpstat.com",
+ "keys.so":"https://keys.so","keyso":"https://keys.so","be1":"https://be1.ru","megaindex":"https://www.megaindex.ru",
+ "мегаиндекс":"https://www.megaindex.ru","rookee":"https://www.rookee.ru","руки":"https://www.rookee.ru",
+ "pixeltools":"https://tools.pixelplus.ru","pixel tools":"https://tools.pixelplus.ru","пиксель тулс":"https://tools.pixelplus.ru",
+ "pixelplus":"https://www.pixelplus.ru","rush analytics":"https://rush-analytics.ru","rush-analytics":"https://rush-analytics.ru",
+ "раш аналитикс":"https://rush-analytics.ru","arsenkin":"https://arsenkin.ru","арсенкин":"https://arsenkin.ru",
+ "just-magic":"https://just-magic.org","just magic":"https://just-magic.org","джаст мэджик":"https://just-magic.org",
+ "screaming frog":"https://www.screamingfrog.co.uk","similarweb":"https://www.similarweb.com","сsimilarweb":"https://www.similarweb.com",
+ "se ranking":"https://seranking.com","seranking":"https://seranking.com","sistrix":"https://www.sistrix.com",
+ "moz":"https://moz.com","allpositions":"https://allpositions.ru","line.pr":"https://line.pr",
+ # Контент и тексты
+ "text.ru":"https://text.ru","advego":"https://advego.com","адвего":"https://advego.com","etxt":"https://www.etxt.ru",
+ "главред":"https://glvrd.ru","glvrd":"https://glvrd.ru","тургенев":"https://turgenev.ashmanov.com",
+ "content watch":"https://content-watch.ru","content-watch":"https://content-watch.ru","miratext":"https://miratext.ru",
+ # Мониторинг упоминаний и PR
+ "brand analytics":"https://brandanalytics.ru","brandanalytics":"https://brandanalytics.ru","youscan":"https://youscan.io",
+ "ютускан":"https://youscan.io","медиалогия":"https://www.mlg.ru","mlg":"https://www.mlg.ru","mediascope":"https://mediascope.net",
+ "крибрум":"https://kribrum.ru","kribrum":"https://kribrum.ru","iqbuzz":"https://iqbuzz.ru","babkee":"https://babkee.ru",
+ "mention":"https://mention.com","brand24":"https://brand24.com","брендвотч":"https://www.brandwatch.com","brandwatch":"https://www.brandwatch.com",
+ # Аналитика и сквозная
+ "roistat":"https://roistat.com","ройстат":"https://roistat.com","calltouch":"https://www.calltouch.ru","comagic":"https://www.comagic.ru",
+ "owox":"https://www.owox.ru","power bi":"https://powerbi.microsoft.com",
+ # Конструкторы сайтов
+ "tilda":"https://tilda.cc","тильда":"https://tilda.cc","creatium":"https://creatium.io","craftum":"https://craftum.com",
+ "wix":"https://ru.wix.com","insales":"https://www.insales.ru","инсейлс":"https://www.insales.ru",
+}
 # Имя само по себе — домен? Тогда сразу даём прямую ссылку (1ps.ru, vc.ru, keys.so, tools.pixelplus.ru).
 _SELF_DOMAIN_RE = re.compile(r"^(?:https?://)?([a-z0-9][a-z0-9-]{1,30}(?:\.[a-z0-9-]{2,})?\.[a-z]{2,10})/?$", re.I)
 def _self_domain(name):
@@ -1578,10 +1609,12 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
         sd = _self_domain(n)
         if sd:
             link_map[n] = sd
-    for n in named_all:                                       # 2) известные площадки/ритейлеры -> их сайт
+    for n in named_all:                                       # 2) известные площадки/ритейлеры и сервисы -> их сайт
         if n in link_map:
             continue
-        url = _RETAILER_URLS.get(n) or _RETAILER_URLS.get(_RETAILERS.get(n.lower(), ""))
+        nl = n.lower().strip()
+        url = (_RETAILER_URLS.get(n) or _RETAILER_URLS.get(_RETAILERS.get(nl, ""))
+               or _BRAND_SITES.get(nl) or _BRAND_SITES.get(re.sub(r"\.(ru|com|рф|io|org|net)$", "", nl)))
         if url:
             link_map[n] = url
     missing = [n for n in named_all if n not in link_map]     # 3) остальные бренды -> домены спросим у нейросети
@@ -1707,8 +1740,9 @@ def _competitor_sites(names):
     ask = _first_keyed_adapter()
     if not ask or not names:
         return {}
-    prompt = ("Это реальные компании, которых называют нейросети. Для каждой укажи её официальный сайт (домен). "
-              "Постарайся дать домен по каждой, но если действительно не уверена — поставь «-», не выдумывай. "
+    prompt = ("Это реальные компании, которых называют нейросети. Для КАЖДОЙ укажи её официальный сайт (домен). "
+              "Дай наиболее вероятный официальный домен по каждой компании — даже если не уверена на 100%. "
+              "Ставь «-» только если это вообще не компания. Не пиши пояснений. "
               "Формат строго построчно: «Компания | домен» (например «Рога и Копыта | rogakopyta.ru»). Список:\n" + "\n".join(names))
     try:
         raw = ask(prompt)

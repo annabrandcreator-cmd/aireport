@@ -749,7 +749,9 @@ _PLATFORMS = {"яндекс", "яндекса", "google", "гугл", "chatgpt",
               "нейро", "ai", "ии", "yandexgpt", "алиса", "alice",
               "bing", "бинг", "wikipedia", "википедия", "reddit", "реддит", "trustpilot", "трастпилот", "sharegpt",
               "quora", "квора", "dzen", "дзен", "telegram", "телеграм", "vk", "вконтакте", "youtube", "ютуб", "meta",
-              "yandex", "bingchat", "msn", "duckduckgo", "baidu", "you.com", "phind", "poe", "giga", "сopilot", "грок", "grok"}
+              "yandex", "bingchat", "msn", "duckduckgo", "baidu", "you.com", "phind", "poe", "giga", "сopilot", "грок", "grok",
+              "bard", "бард", "yandexgpt", "яндексgpt", "яндексgpt", "gigachat", "deepseek", "дипсик", "kandinsky", "шедеврум",
+              "llama", "mistral", "qwen", "ernie", "wenxin", "sber", "сбер", "sgr", "scholar"}
 _COMMON = {"также","кроме","среди","лучшие","лучший","топ","это","этот","при","для","как","или","если","итак",
            "компания","компании","компаний","фирма","фирмы","сайт","сайты","отзыв","отзывы","услуга","услуги",
            "заказ","цена","цены","например","важно","совет","советы","вариант","варианты","способ","способы",
@@ -846,8 +848,13 @@ _BRAND_SITES = {
  "tilda":"https://tilda.cc","тильда":"https://tilda.cc","creatium":"https://creatium.io","craftum":"https://craftum.com",
  "wix":"https://ru.wix.com","insales":"https://www.insales.ru","инсейлс":"https://www.insales.ru",
 }
+# Реальные домены верхнего уровня. Важно: НЕ принимаем .txt/.xml/.json/.css и пр. — иначе «robots.txt» считается доменом.
+_TLD = (r"(?:ru|рф|su|moscow|tatar|com|net|org|io|ai|co|me|app|dev|store|shop|online|pro|biz|info|tech|site|space|"
+        r"by|kz|ua|uz|am|ge|tv|cc|us|uk|de|fr|cn|in|eu|gg|to|xyz|cloud|digital|agency|studio|team|group|"
+        r"so|ly|sh|fm|im|is|la|gd|ws|gl|cm|sc|id|club|world|life|pw|top|run)")
+_FILE_EXT_RE = re.compile(r"\.(?:txt|xml|json|csv|css|js|html?|php|aspx?|jsx?|ts|md|pdf|docx?|xlsx?|png|jpe?g|svg|webp|yml|yaml|ini|conf)$", re.I)
 # Имя само по себе — домен? Тогда сразу даём прямую ссылку (1ps.ru, vc.ru, keys.so, tools.pixelplus.ru).
-_SELF_DOMAIN_RE = re.compile(r"^(?:https?://)?([a-z0-9][a-z0-9-]{1,30}(?:\.[a-z0-9-]{2,})?\.[a-z]{2,10})/?$", re.I)
+_SELF_DOMAIN_RE = re.compile(r"^(?:https?://)?([a-z0-9][a-z0-9-]{1,30}(?:\.[a-z0-9-]{2,})*\." + _TLD + r")/?$", re.I)
 def _self_domain(name):
     """Если имя игрока — это домен, вернуть прямой https-URL, иначе ''. """
     s = (name or "").strip().strip("«»\"'·.,;: ").lower()
@@ -960,7 +967,10 @@ _ENG_COMMON = {"search","product","products","discovery","service","services","m
  "standard","example","principle","note","notes","overview","guide","step","steps","feature","features","update",
  "engine","engines","generation","generative","authority","specialist","specialists","large","language","models","model",
  "listing","local","national","regional","optimisation","contradiction","relevance","accuracy","visibility",
- "extended","map","maps","mapping","general","various","direct","indirect","manual","automatic","vector"}
+ "extended","map","maps","mapping","general","various","direct","indirect","manual","automatic","vector",
+ "social","organic","topic","topics","common","share","shares","experience","entity","trust","authority","engagement",
+ "reach","impressions","clicks","traffic","conversion","retention","awareness","sentiment","keyword","backlink","backlinks",
+ "user","users","agent","agents","useragent","share","sharing","topic","topics","organic","paid","comparison","overview"}
 # Частые испанские/иностранные слова-обрывки, которые нейросеть иногда выдаёт в ответе (не бренды).
 _FOREIGN_COMMON = {"clara","claro","contenido","contenidos","consultas","consulta","genericas","genericos","generica",
  "generico","servicios","servicio","calidad","negocio","negocios","empresa","empresas","diferenciacion","optimizacion",
@@ -1093,7 +1103,9 @@ def _clean_named_list(names, niche=""):
             continue
         if "/" in nl and not re.search(r"https?://", low):                # «Semrush/Ahrefs» — склейка двух названий, не один бренд
             continue
-        is_domain = bool(re.fullmatch(r"[a-z0-9][a-z0-9-]{1,}\.(?:[a-z0-9-]+\.)?[a-zа-я]{2,10}", low))
+        if _FILE_EXT_RE.search(low):                                       # технический файл, не компания: «robots.txt», «sitemap.xml»
+            continue
+        is_domain = bool(re.fullmatch(r"[a-z0-9][a-z0-9-]+(?:\.[a-z0-9-]+)*\." + _TLD, low))   # только реальные TLD (не .txt)
         if is_domain:                                                      # чистый домен (1ps.ru, fl.ru) — берём как есть
             res.append(nl); continue
         if not any(c.isupper() for c in nl):                               # сплошь строчные и не домен — не бренд

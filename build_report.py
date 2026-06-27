@@ -431,7 +431,10 @@ def p_matrix(d):
       <div class="note" style="margin-top:4mm">{legend}</div>
       {footer(d)}</div>'''
 
-_SELF_DOM_RE=re.compile(r"^(?:https?://)?([a-z0-9][a-z0-9-]{1,30}(?:\.[a-z0-9-]{2,})?\.[a-z]{2,10})/?$", re.I)
+_BR_TLD=(r"(?:ru|рф|su|moscow|tatar|com|net|org|io|ai|co|me|app|dev|store|shop|online|pro|biz|info|tech|site|space|"
+         r"by|kz|ua|uz|am|ge|tv|cc|us|uk|de|fr|cn|in|eu|gg|to|xyz|cloud|digital|agency|studio|team|group|"
+         r"so|ly|sh|fm|im|is|la|gd|ws|gl|cm|sc|id|club|world|life|pw|top|run)")
+_SELF_DOM_RE=re.compile(r"^(?:https?://)?([a-z0-9][a-z0-9-]{1,30}(?:\.[a-z0-9-]{2,})*\."+_BR_TLD+r")/?$", re.I)
 def _self_url(name):
     """Имя само по себе домен -> прямой https-URL, иначе ''. """
     s=str(name or "").strip().strip("«»\"'·.,;: ").lower()

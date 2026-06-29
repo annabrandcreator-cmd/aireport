@@ -496,7 +496,8 @@ def generate_queries_llm(niche, city, site_info=None):
         "Всегда указывай, ЧТО ищут. Не упоминай конкретные бренды и названия компаний. Без чисто справочных вопросов (что такое, как сделать самому).\n"
         "Верни только сами запросы, каждый с новой строки, без нумерации, кавычек и пояснений."
     )
-    raw = _ask_any(prompt)                                     # перебираем движки: если первый с ключом упал (402/429) — берём рабочий
+    # для запросов ставим «русскоязычные» движки вперёд, а DeepSeek (китайская модель, иногда вставляет иероглифы) — позже
+    raw = _ask_any(prompt, order=("perplexity", "claude", "yandex", "gemini", "gigachat", "deepseek", "chatgpt"))
     if not raw:
         return None
     seen, uniq = set(), []
@@ -504,7 +505,9 @@ def generate_queries_llm(niche, city, site_info=None):
         s = re.sub(r"^\s*(?:\d+[\).\.]?|[-*•—])\s*", "", ln).strip().strip('"«»').strip()
         if not (8 <= len(s) <= 130):
             continue
-        if not re.search(r"[A-Za-zА-Яа-яЁё]", s):
+        if not re.search(r"[А-Яа-яЁё]", s):                    # запрос должен быть на русском (кириллица обязательна)
+            continue
+        if re.search(r"[㐀-鿿぀-ヿ가-힯֐-׿؀-ۿ฀-๿]", s):  # иероглифы/кана/корейский/иврит/арабский/тайский — брак модели
             continue
         if s.endswith(":"):                                   # заголовок-преамбула «Вот запросы:»
             continue
@@ -1582,6 +1585,62 @@ def _companies_only(names, niche, corpus="", aliases=None):
                 bad.add(n)
     return [n for n in det if n not in bad]
 
+def _extract_real_companies(answers, niche, brand="", aliases=None):
+    """ОСНОВНОЙ способ: сильная нейросеть сама извлекает РЕАЛЬНЫЕ компании из ответов и даёт их сайты.
+    Работает в любой нише без стоп-листов и не выкидывает настоящие компании (модель знает, что МТС — компания,
+    а «ВИС»/«метод» — нет). Возвращает [{'name','site'}]; None = модель недоступна (тогда откат на старый способ)."""
+    corpus = "\n---\n".join(a for a in answers if a).strip()
+    if not corpus:
+        return []
+    own = ", ".join(sorted({str(x) for x in ([brand] + list(aliases or [])) if x and len(str(x)) >= 3}))
+    prompt = (
+        f"Ниша клиента: «{niche or 'услуги'}». Сам клиент (его НЕ включать в список): {own or brand or '—'}.\n\n"
+        "Ниже — ответы нейросетей на запросы клиентов в этой нише. Найди РЕАЛЬНЫЕ КОМПАНИИ (бренды, агентства, сервисы, "
+        "сайты), которых нейросети называют как игроков или исполнителей в этой нише, и для каждой укажи её официальный сайт.\n\n"
+        "ВКЛЮЧАЙ только настоящие, узнаваемые компании, которые реально существуют и относятся к этой нише.\n"
+        "НЕ ВКЛЮЧАЙ: общие слова и понятия; отрасли, сегменты и категории (например «B2B», «executive search firm», "
+        "«кадровые агентства» как класс); инструкции и советы; типы разметки и технические термины; технические файлы "
+        "(robots.txt); названия самих нейросетей и поисковиков; аббревиатуры, которые ты не можешь уверенно сопоставить "
+        "с конкретной реальной компанией; и самого клиента.\n"
+        "Сайт указывай ТОЛЬКО реальный и достоверный (домен компании). Если сайт не знаешь точно — поставь null, НЕ ВЫДУМЫВАЙ.\n"
+        "Если не уверена, что строка вообще реальная компания — НЕ включай её. Лучше пропустить сомнительное, чем выдать мусор.\n\n"
+        'Ответь СТРОГО в формате JSON-массива и ничего кроме него: '
+        '[{"name":"Название","site":"https://domain.ru"},{"name":"Другая","site":null}]\n\n'
+        "Ответы нейросетей:\n" + corpus[:8000]
+    )
+    raw = _ask_any(prompt)
+    if not raw:
+        return None                                                  # модель недоступна -> откат
+    m = re.search(r"\[.*\]", raw, re.S)
+    if not m:
+        return []
+    try:
+        arr = json.loads(m.group(0))
+    except Exception:
+        return []
+    own_low = {str(x).lower() for x in ([brand] + list(aliases or [])) if x}
+    out, seen = [], set()
+    for it in (arr if isinstance(arr, list) else []):
+        if not isinstance(it, dict):
+            continue
+        nm = re.sub(r"\s+", " ", str(it.get("name") or "").strip().strip("«»\"'·")).strip()
+        low = nm.lower()
+        if not nm or not (2 <= len(nm) <= 60) or low in seen:
+            continue
+        if re.search(r"[㐀-鿿぀-ヿ가-힯֐-׿؀-ۿ]", nm):           # иероглифы/кана/корейский/иврит/арабский — брак модели
+            continue
+        if low in own_low or any(a and len(a) >= 5 and (a in low or low in a) for a in own_low):
+            continue
+        if low in _PLATFORMS or _FILE_EXT_RE.search(low):            # лёгкая страховка: не сама нейросеть и не файл
+            continue
+        site = it.get("site")
+        site = "" if site in (None, "", "null", "None", "-") else str(site).strip()
+        if site and not re.match(r"^https?://", site):
+            site = "https://" + site.lstrip("/")
+        seen.add(low)
+        out.append({"name": nm, "site": site})
+    return out
+
 def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=None, aliases=None, queries=None):
     test = os.environ.get("TEST_MODE") == "1"
     aliases = aliases or brand_aliases(site, site_info, brand, brand_short)
@@ -1635,27 +1694,44 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
         if detect_mention(ans, aliases):
             queries[qi]["hits"][eid] += 1
     failed = [eid for eid in eng_tot if eng_tot[eid] and eng_err[eid] >= (eng_tot[eid] + 1) // 2]   # большинство вызовов с ошибкой -> движок недоступен
-    competitors = extract_competitors(all_answers, brand, brand_short, niche, aliases=aliases)
-    corpus = "\n".join(a for a in all_answers if a)
-    # доказательная база по каждому запросу: какой движок назвал бренд и кого из конкурентов
-    comp_names = [n for n, _ in competitors]
-    comp_low = {n.lower() for n in comp_names}
-    comp_words = {w for n in comp_names for w in n.lower().split()}   # слова имён конкурентов (чтобы не дублировать обрывком)
-    cand = set(comp_names)
+    # ── ОСНОВНОЙ путь: реальные компании + их сайты извлекает сама нейросеть (семантически, без стоп-листов) ──
+    real = None if test else _extract_real_companies(all_answers, niche, brand_short or brand, aliases)
+    comp_sites = {}
     for q in queries:
         q["evidence"] = {e["id"]: {"brand": q["hits"][e["id"]] > 0, "comps": [], "others": []} for e in engines}
+    if real:                                                          # модель вернула список реальных компаний
+        comp_sites = {c["name"]: c["site"] for c in real if c.get("site")}
+        names = [c["name"] for c in real]
+        freq = {n: sum(1 for a in all_answers if n.lower() in (a or "").lower()) for n in names}
+        comp_sorted = sorted([(n, freq[n]) for n in names if freq[n] >= 2], key=lambda x: (-x[1], -len(x[0])))
+        competitors = [(_clean_comp_name(n), c) for n, c in comp_sorted[:6]]   # подтверждённые (>=2 ответа)
+        comp_low = {n.lower() for n, _ in competitors}
+        for (qi, eid, _q, _run), ans in zip(tasks, answers):          # по каждому ответу: какие реальные компании в нём названы
+            low = (ans or "").lower(); cell = queries[qi]["evidence"][eid]
+            for n in names:
+                cn = _clean_comp_name(n)
+                if n.lower() in low and cn not in cell["comps"] and cn not in cell["others"]:
+                    (cell["comps"] if cn.lower() in comp_low else cell["others"]).append(cn)
+        # переносим сайты и на «очищенные» имена-домены (1ps.ru остаётся 1ps.ru и т.п.)
+        comp_sites = {_clean_comp_name(k): v for k, v in comp_sites.items()}
+        return queries, competitors, failed, comp_sites
+    # ── ОТКАТ: модель недоступна -> старый способ (regex + фильтры) ──
+    competitors = extract_competitors(all_answers, brand, brand_short, niche, aliases=aliases)
+    corpus = "\n".join(a for a in all_answers if a)
+    comp_names = [n for n, _ in competitors]
+    comp_low = {n.lower() for n in comp_names}
+    comp_words = {w for n in comp_names for w in n.lower().split()}
+    cand = set(comp_names)
     for (qi, eid, _q, _run), ans in zip(tasks, answers):
-        low = (ans or "").lower()
-        cell = queries[qi]["evidence"][eid]
-        for n in comp_names:                                  # подтверждённые нишевые конкуренты
+        low = (ans or "").lower(); cell = queries[qi]["evidence"][eid]
+        for n in comp_names:
             if n.lower() in low and n not in cell["comps"]:
                 cell["comps"].append(n)
-        for n in _named_in_answer(ans, aliases, niche):       # прочие названные игроки (площадки, домены, бренды)
+        for n in _named_in_answer(ans, aliases, niche):
             nl = n.lower()
             if nl in comp_low or nl in [o.lower() for o in cell["others"]]: continue
-            if " " not in nl and nl in comp_words: continue   # «Guerisson» при «Guerisson for You» — не дублируем
+            if " " not in nl and nl in comp_words: continue
             cell["others"].append(n); cand.add(n)
-    # ── ЕДИНЫЙ смысловой фильтр на всё: оставляем только реальные компании, режем отрасли/концепты/чужие ниши ──
     good_low = {g.lower() for g in _companies_only(sorted(cand), niche, corpus, aliases)}
     for q in queries:
         for e in engines:
@@ -1663,7 +1739,7 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
             cell["comps"] = [c for c in cell["comps"] if c.lower() in good_low]
             cell["others"] = [o for o in cell["others"] if o.lower() in good_low]
     competitors = [(n, c) for (n, c) in competitors if n.lower() in good_low]
-    return queries, competitors, failed
+    return queries, competitors, failed, {}
 
 # ───────────────────────── сборка данных отчёта ───────────────────────
 def _rates(queries):
@@ -1784,7 +1860,7 @@ def _plan30(site_info=None, niche=""):
         ]},
     ]
 
-def build_data(brand, brand_short, site, niche, city, queries, competitors, site_info=None, failed_engines=None):
+def build_data(brand, brand_short, site, niche, city, queries, competitors, site_info=None, failed_engines=None, comp_sites=None):
     eng = active_engines()
     failed_set = set(failed_engines or [])
     work = [e for e in eng if e["id"] not in failed_set] or eng   # рабочие движки (без ошибок API)
@@ -1838,7 +1914,13 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
     for n in ([c["name"] for c in comp_objs] + list(others_named)):
         if n and n not in named_all:
             named_all.append(n)
+    for n in named_all:                                       # 0) сайт, который дала сама нейросеть при извлечении компаний — высший приоритет
+        s = (comp_sites or {}).get(n) or (comp_sites or {}).get(_clean_comp_name(n))
+        if s:
+            link_map[n] = s
     for n in named_all:                                       # 1) имя само по себе домен -> прямая ссылка
+        if n in link_map:
+            continue
         sd = _self_domain(n)
         if sd:
             link_map[n] = sd
@@ -2569,10 +2651,10 @@ def run(brand=None, site=None, niche=None, city=None, brand_short=None, out=None
         prep = prepare(site, niche, city, fallback_brand=brand_short or brand or "")
     site_info = prep.get("site_info")
     aliases = set(prep.get("aliases") or [])
-    q, competitors, failed = analyze(prep["brand"], prep["brand_short"], prep["site"], prep["niche"], prep.get("city"),
-                                     site_info=site_info, aliases=aliases, queries=prep.get("queries"))
+    q, competitors, failed, comp_sites = analyze(prep["brand"], prep["brand_short"], prep["site"], prep["niche"], prep.get("city"),
+                                                 site_info=site_info, aliases=aliases, queries=prep.get("queries"))
     data = build_data(prep["brand"], prep["brand_short"], prep["site"], prep["niche"], prep.get("city"),
-                      q, competitors, site_info=site_info, failed_engines=failed)
+                      q, competitors, site_info=site_info, failed_engines=failed, comp_sites=comp_sites)
     if out:
         with open(out, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=1)
     return data

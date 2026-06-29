@@ -324,7 +324,7 @@ def fix_queries(items):
               "НЕ меняй смысл, формулировку, порядок и количество запросов; не добавляй и не убирай запросы. "
               "Верни тот же пронумерованный список, каждый запрос с новой строки, без пояснений:\n" + numbered)
     try:
-        raw = ask(prompt)
+        raw = _ask_any(prompt)
     except Exception:
         return items
     out = []
@@ -342,6 +342,21 @@ def _first_keyed_adapter():
             return REAL_ADAPTERS[eid]
     return None
 
+def _ask_any(prompt, order=("deepseek", "perplexity", "claude", "yandex", "gemini", "gigachat", "chatgpt")):
+    """Пробует движки по очереди и возвращает ПЕРВЫЙ непустой ответ. Устойчиво к упавшему API (биллинг/квота):
+    если GigaChat/ChatGPT дают 402/429 — берём следующий рабочий, а не падаем в тупой шаблон."""
+    for eid in order:
+        if not has_key(eid):
+            continue
+        try:
+            r = REAL_ADAPTERS[eid](prompt)
+            if r and r.strip():
+                return r
+        except Exception as e:
+            print(f"[ask_any] {eid}: {type(e).__name__}: {str(e)[:90]}", flush=True)
+            continue
+    return None
+
 def _site_offerings(site_info):
     """Реальный перечень услуг/товаров компании по сайту — жёсткий «белый список» для запросов. '' если не вышло."""
     s = site_info or {}
@@ -355,7 +370,7 @@ def _site_offerings(site_info):
               "Только то, чем занимается сама компания. НЕ добавляй смежные услуги, которые оказывают другие компании "
               "(для агентства недвижимости не добавляй дизайн, ремонт, стройку). Без пояснений, одной строкой.\n\n" + bits[:900])
     try:
-        raw = ask(prompt)
+        raw = _ask_any(prompt)
     except Exception:
         return ""
     line = re.sub(r"\s+", " ", (raw or "").strip()).strip().strip(".")
@@ -481,9 +496,8 @@ def generate_queries_llm(niche, city, site_info=None):
         "Всегда указывай, ЧТО ищут. Не упоминай конкретные бренды и названия компаний. Без чисто справочных вопросов (что такое, как сделать самому).\n"
         "Верни только сами запросы, каждый с новой строки, без нумерации, кавычек и пояснений."
     )
-    try:
-        raw = ask(prompt)
-    except Exception:
+    raw = _ask_any(prompt)                                     # перебираем движки: если первый с ключом упал (402/429) — берём рабочий
+    if not raw:
         return None
     seen, uniq = set(), []
     for ln in (raw or "").splitlines():
@@ -687,7 +701,7 @@ def brand_card(site, site_info, fallback=""):
               'Ответь строго в JSON без пояснений: {"brand":"каноническое имя","aliases":["вариант латиницей","вариант кириллицей","с доменом"]}. '
               "В aliases — только реальные варианты написания ЭТОГО ЖЕ бренда. Не включай товары, услуги, города, общие слова.\n\n" + bits)
     try:
-        raw = ask(prompt) or ""
+        raw = _ask_any(prompt) or ""
         obj = json.loads(re.search(r'\{.*\}', raw, re.S).group(0))
         canonical = _clean_brand(obj.get("brand") or "")
         if not (2 < len(canonical) <= 50):
@@ -717,7 +731,7 @@ def refine_niche(niche, site_info):
               "«дизайн», «ремонт», «декор»). Не выдумывай. Верни ОДНУ короткую фразу из 2–6 слов, близкую к введённой нише. Без пояснений и кавычек.\n\n"
               f"Введённая ниша: {niche}\nДанные сайта: {bits[:1000]}")
     try:
-        raw = ask(prompt)
+        raw = _ask_any(prompt)
     except Exception:
         return niche
     line = ((raw or "").strip().splitlines() or [""])[0]
@@ -850,6 +864,14 @@ _BRAND_SITES = {
  # Конструкторы сайтов
  "tilda":"https://tilda.cc","тильда":"https://tilda.cc","creatium":"https://creatium.io","craftum":"https://craftum.com",
  "wix":"https://ru.wix.com","insales":"https://www.insales.ru","инсейлс":"https://www.insales.ru",
+ # Кадровые/рекрутинговые агентства и job-площадки (частая B2B-ниша)
+ "ancor":"https://ancor.ru","анкор":"https://ancor.ru","antal":"https://antalrussia.ru","антал":"https://antalrussia.ru",
+ "hays":"https://hays.ru","хейс":"https://hays.ru","kelly":"https://www.kellyservices.ru","kelly services":"https://www.kellyservices.ru",
+ "manpower":"https://www.manpower.ru","манпауэр":"https://www.manpower.ru","adecco":"https://adecco.ru","адекко":"https://adecco.ru",
+ "korn ferry":"https://www.kornferry.com","kornferry":"https://www.kornferry.com","корн ферри":"https://www.kornferry.com",
+ "headhunter":"https://hh.ru","хедхантер":"https://hh.ru","хэдхантер":"https://hh.ru","headhunt":"https://hh.ru","superjob":"https://www.superjob.ru",
+ "суперджоб":"https://www.superjob.ru","michael page":"https://www.michaelpage.ru","unity":"https://www.unity.ru","юнити":"https://www.unity.ru",
+ "контакт":"https://www.kontakt.ru","kontakt intersearch":"https://www.kontakt.ru","авито работа":"https://www.avito.ru/rabota",
 }
 # Реальные домены верхнего уровня. Важно: НЕ принимаем .txt/.xml/.json/.css и пр. — иначе «robots.txt» считается доменом.
 _TLD = (r"(?:ru|рф|su|moscow|tatar|com|net|org|io|ai|co|me|app|dev|store|shop|online|pro|biz|info|tech|site|space|"
@@ -954,7 +976,8 @@ _INSTRUCTION = {
  "закажите","заказать","закажи","заказывайте","закажем","купите","купить","возьмите","посетите","выбирайте","рассмотрите",
  "обращайтесь","свяжитесь","начните","начинайте","попробуйте","попробовать","сравнивайте","ищите","закажете",
  "упростите","упростить","проверяйте","проверяй","понимайте","понять","помните","запомните","избегайте","избегать",
- "ориентируйтесь","фокусируйтесь","сосредоточьтесь","анализируй","задавай","проверь","сделай","добавь","убедись"}
+ "ориентируйтесь","фокусируйтесь","сосредоточьтесь","анализируй","задавай","проверь","сделай","добавь","убедись",
+ "дайте","дай","дайдите","выберите","рассмотрим","отметьте","запросите","сформируйте","сформулируй","перечислите","перечисли"}
 _CONCEPT_STOP |= _INSTRUCTION
 _FOREIGN_CONNECT = {"y","de","la","el","con","para","the","and","for","of","en","del","los","las","una","un","da","do"}
 _STOPCONN = {"в","на","с","по","и","или","для","до","от","как","что","это","не","без","к","о","об","за","при","из","у"}
@@ -979,7 +1002,9 @@ _ENG_COMMON = {"search","product","products","discovery","service","services","m
  "reach","impressions","clicks","traffic","conversion","retention","awareness","sentiment","keyword","backlink","backlinks",
  "user","users","agent","agents","useragent","share","sharing","topic","topics","organic","paid","comparison","overview",
  "per","via","etc","also","such","more","less","best","good","main","key","core","full","real","true","new","top","all",
- "agencies","companies","providers","vendors","tools","services","solutions","platforms","systems","experts","consultants"}
+ "agencies","companies","providers","vendors","tools","services","solutions","platforms","systems","experts","consultants",
+ "executive","firm","firms","sourcer","sourcers","referral","referrals","staffing","talent","recruitment","recruiting",
+ "specialized","outsourcing","outstaffing","headhunting","staff","candidate","candidates","vacancy","hiring"}
 # Частые испанские/иностранные слова-обрывки, которые нейросеть иногда выдаёт в ответе (не бренды).
 _FOREIGN_COMMON = {"clara","claro","contenido","contenidos","consultas","consulta","genericas","genericos","generica",
  "generico","servicios","servicio","calidad","negocio","negocios","empresa","empresas","diferenciacion","optimizacion",
@@ -1141,7 +1166,7 @@ def _clean_named_list(names, niche=""):
             continue
         if re.search(r"[áéíóúñàèìòùâêîôûäëïöüç]", low):                      # иностранные диакритики (исп./фр.) — не РФ-бренд
             continue
-        if len(words) == 1 and re.fullmatch(r"[A-Z]{2,5}", nl):            # одиночная аббревиатура (SEM, SEO, CRM)
+        if len(words) == 1 and re.fullmatch(r"[A-ZА-ЯЁ]{2,5}", nl):        # одиночная аббревиатура без сайта (SEM, CRM, ВИС, АРЕС) — обычно шум
             continue
         if len(words) >= 2 and any(w in _FOREIGN_CONNECT for w in ww):     # иностранная фраза (SEO y Contenido)
             continue
@@ -1244,7 +1269,7 @@ def _competitors_llm(answers, niche):
         "Каждое название с новой строки, по убыванию частоты, максимум 6. Если таких компаний нет, ответь одним словом: НЕТ."
     )
     try:
-        raw = ask(prompt)
+        raw = _ask_any(prompt)
     except Exception:
         return None
     if not raw: return []
@@ -1544,7 +1569,7 @@ def _companies_only(names, niche, corpus="", aliases=None):
               "компанию из чужой, не связанной с этой нишей отрасли. Пиши строки ровно как во входе, по одной на строку, "
               "без пояснений. Если убирать нечего — ответь «-».\n\n" + "\n".join(maybe))
     try:
-        raw = ask(prompt) or ""
+        raw = _ask_any(prompt) or ""
     except Exception:
         return det
     bad = set()
@@ -1976,7 +2001,7 @@ def _competitor_sites(names):
               "Ставь «-» только если это вообще не компания. Не пиши пояснений. "
               "Формат строго построчно: «Компания | домен» (например «Рога и Копыта | rogakopyta.ru»). Список:\n" + "\n".join(names))
     try:
-        raw = ask(prompt)
+        raw = _ask_any(prompt)
     except Exception:
         return {}
     out = {}
@@ -2151,7 +2176,7 @@ def _reco_review(niche, brand_short, site_info=None):
               "Без штампов «всё отлично, рекомендую». НЕ выдумывай точные цифры (срок, цена) — просто опусти их, без скобок. "
               "Без кавычек и пояснений, только текст отзыва.")
     try:
-        raw = ask(prompt)
+        raw = _ask_any(prompt)
     except Exception:
         return ""
     r = re.sub(r"\s+", " ", (raw or "").strip().strip('«»"\'')).strip()
@@ -2221,7 +2246,7 @@ def _reco_examples(niche, brand_short, queries=None, site_info=None):
         "REVIEW:\n"
         "<готовый отзыв клиента: услуга, тип объекта, что сделали; неизвестное опусти, без скобок>"))
     try:
-        raw = ask(prompt)
+        raw = _ask_any(prompt)
     except Exception:
         return {}
     raw = raw or ""
@@ -2509,7 +2534,7 @@ def _niche_from_site(site_info):
     prompt = ("По данным сайта определи нишу компании ОДНОЙ короткой фразой (2–5 слов): чем она занимается, что продаёт "
               "или какие услуги оказывает. Только ОДНА ниша, без вариантов и перечислений разных сфер. Без пояснений и кавычек.\n\n" + bits[:800])
     try:
-        raw = ask(prompt)
+        raw = _ask_any(prompt)
     except Exception:
         return ""
     line = ((raw or "").strip().splitlines() or [""])[0]

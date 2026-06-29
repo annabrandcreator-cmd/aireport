@@ -1744,17 +1744,23 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
         if detect_mention(ans, aliases):
             queries[qi]["hits"][eid] += 1
     failed = [eid for eid in eng_tot if eng_tot[eid] and eng_err[eid] >= (eng_tot[eid] + 1) // 2]   # большинство вызовов с ошибкой -> движок недоступен
-    # живой ДОСЛОВНЫЙ фрагмент одного реального ответа на каждый запрос (для блока «Примеры реальных ответов»)
+    # живой ДОСЛОВНЫЙ фрагмент одного реального ответа на каждый запрос (для блока «Примеры реальных ответов»).
+    # Берём РАЗНЫЕ нейросети по очереди, а не одну самую «болтливую», чтобы в примерах были и ChatGPT, и Gemini, и др.
     eng_nm = {e["id"]: e["name"] for e in engines}
-    qbest = {}
+    per = {}                                                  # qi -> {eid: (текст, длина)} — лучший ответ каждой сети на запрос
     for (qi, eid, _q, _run), ans in zip(tasks, answers):
         if not ans or len((ans or "").strip()) < 40:
             continue
-        if qi not in qbest or len(ans) > qbest[qi][2]:
-            qbest[qi] = (eng_nm.get(eid, eid), ans, len(ans), eid)
-    for qi, q in enumerate(queries):
-        if qi in qbest:
-            q["quote"] = {"engine": qbest[qi][0], "eid": qbest[qi][3], "text": _clean_quote(qbest[qi][1], 1300)}
+        d = per.setdefault(qi, {})
+        if eid not in d or len(ans) > d[eid][1]:
+            d[eid] = (ans, len(ans))
+    used = {}                                                 # сколько раз показали каждую сеть -> равномерно распределяем
+    for qi in sorted(per):
+        cand = per[qi]
+        good = {e: v for e, v in cand.items() if v[1] >= 120} or cand   # предпочитаем содержательные ответы
+        eid = min(good, key=lambda e: (used.get(e, 0), -good[e][1]))    # реже всего показанная сеть, при равенстве — длиннее
+        used[eid] = used.get(eid, 0) + 1
+        queries[qi]["quote"] = {"engine": eng_nm.get(eid, eid), "eid": eid, "text": _clean_quote(good[eid][0], 1300)}
     # ── ОСНОВНОЙ путь: реальные компании + их сайты извлекает сама нейросеть (семантически, без стоп-листов) ──
     real = None if test else _extract_real_companies(all_answers, niche, brand_short or brand, aliases)
     comp_sites = {}

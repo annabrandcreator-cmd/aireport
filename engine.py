@@ -1585,6 +1585,20 @@ def _companies_only(names, niche, corpus="", aliases=None):
                 bad.add(n)
     return [n for n in det if n not in bad]
 
+def _clean_quote(text, limit=320):
+    """Чистый короткий ДОСЛОВНЫЙ фрагмент ответа нейросети для блока «Примеры реальных ответов»."""
+    t = re.sub(r"\*\*([^*]+)\*\*", r"\1", text or "")            # снять markdown-жирность, оставить слова
+    t = re.sub(r"`+|#+|^\s*>+|_{2,}|\[\d+\]|\(https?://[^)]+\)", " ", t)
+    t = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", t)               # ведущий маркер списка
+    t = re.sub(r"\s+", " ", t).strip().strip("«»\"'· ")
+    if len(t) <= limit:
+        return t
+    cut = t[:limit]
+    last = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+    if last >= limit * 0.55:                                     # обрезаем по концу предложения, если он близко
+        return cut[:last + 1].strip()
+    return cut.rsplit(" ", 1)[0].strip() + " …"
+
 def _extract_real_companies(answers, niche, brand="", aliases=None):
     """ОСНОВНОЙ способ: сильная нейросеть сама извлекает РЕАЛЬНЫЕ компании из ответов и даёт их сайты.
     Работает в любой нише без стоп-листов и не выкидывает настоящие компании (модель знает, что МТС — компания,
@@ -1694,6 +1708,17 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
         if detect_mention(ans, aliases):
             queries[qi]["hits"][eid] += 1
     failed = [eid for eid in eng_tot if eng_tot[eid] and eng_err[eid] >= (eng_tot[eid] + 1) // 2]   # большинство вызовов с ошибкой -> движок недоступен
+    # живой ДОСЛОВНЫЙ фрагмент одного реального ответа на каждый запрос (для блока «Примеры реальных ответов»)
+    eng_nm = {e["id"]: e["name"] for e in engines}
+    qbest = {}
+    for (qi, eid, _q, _run), ans in zip(tasks, answers):
+        if not ans or len((ans or "").strip()) < 40:
+            continue
+        if qi not in qbest or len(ans) > qbest[qi][2]:
+            qbest[qi] = (eng_nm.get(eid, eid), ans, len(ans))
+    for qi, q in enumerate(queries):
+        if qi in qbest:
+            q["quote"] = {"engine": qbest[qi][0], "text": _clean_quote(qbest[qi][1])}
     # ── ОСНОВНОЙ путь: реальные компании + их сайты извлекает сама нейросеть (семантически, без стоп-листов) ──
     real = None if test else _extract_real_companies(all_answers, niche, brand_short or brand, aliases)
     comp_sites = {}
@@ -2023,31 +2048,45 @@ def _pick_examples(queries, brand_short, best, competitors):
     ex = []
     eng_name = {e["id"]: e["name"] for e in active_engines()}
     def comps_engine(q):
-        """(нейросеть, [названные игроки]) реально по этому запросу — сперва конкуренты, потом прочие площадки."""
+        """(нейросеть, [названные игроки]) реально по этому запросу. Сперва берём движок ЦИТАТЫ —
+        чтобы заголовок «Дословный фрагмент · X» и строка «X назвал …» относились к одному движку."""
         ev = q.get("evidence") or {}
-        for eid, evv in ev.items():
-            if evv.get("comps"):
-                return eng_name.get(eid, eid), evv["comps"][:3]
-        for eid, evv in ev.items():
-            if evv.get("others"):
-                return eng_name.get(eid, eid), evv["others"][:3]
-        return best["name"], []
+        qeng = (q.get("quote") or {}).get("engine")
+        qeid = next((eid for eid, nm in eng_name.items() if nm == qeng), None)
+        order = ([qeid] if qeid in ev else []) + [e for e in ev if e != qeid]
+        for eid in order:
+            if (ev.get(eid) or {}).get("comps"):
+                return eng_name.get(eid, eid), ev[eid]["comps"][:3]
+        for eid in order:
+            if (ev.get(eid) or {}).get("others"):
+                return eng_name.get(eid, eid), ev[eid]["others"][:3]
+        return qeng or best["name"], []
     strong_cell = next((q for q in queries if any(v==2 for v in q["hits"].values())), None)
     zero_cell   = next((q for q in queries if all(v==0 for v in q["hits"].values())), None)
     mid_cell    = next((q for q in queries if any(v==1 for v in q["hits"].values())), None)
     if strong_cell:
-        ex.append({"kind":"yes","query":strong_cell["q"],"engine":best["name"],
+        ex.append({"kind":"yes","query":strong_cell["q"],"engine":(strong_cell.get("quote") or {}).get("engine") or best["name"],"quote":strong_cell.get("quote"),
                    "named":[brand_short],"result":"бренд появился в обоих ответах (2 из 2)",
                    "why":"возможное объяснение: в доступных источниках оказалось достаточно релевантной информации, чтобы нейросеть включила бренд. По одному результату точную причину установить нельзя."})
     if zero_cell:
         en, comps = comps_engine(zero_cell)
-        ex.append({"kind":"no","query":zero_cell["q"],"engine":en,
+        ex.append({"kind":"no","query":zero_cell["q"],"engine":en,"quote":zero_cell.get("quote"),
                    "named":comps,"result":"бренд не появился (0 из 2)",
                    "why":"по одному ответу причину точно не определить. Стоит проверить, есть ли на сайте страница, которая прямо отвечает на этот вопрос, и упоминания по теме на внешних площадках."})
     if mid_cell and mid_cell not in (strong_cell, zero_cell):
-        ex.append({"kind":"mid","query":mid_cell["q"],"engine":best["name"],
+        ex.append({"kind":"mid","query":mid_cell["q"],"engine":(mid_cell.get("quote") or {}).get("engine") or best["name"],"quote":mid_cell.get("quote"),
                    "named":[brand_short],"result":"бренд появился в одной из двух проверок",
                    "why":"возможная причина: упоминаний мало и они не закреплены по этому запросу."})
+    # если каких-то «срезов» нет — добиваем примеры обычными запросами, чтобы всегда было 3 живых цитаты
+    if len(ex) < 3:
+        used = {e["query"] for e in ex}
+        for q in queries:
+            if len(ex) >= 3: break
+            if q["q"] in used or not q.get("quote"): continue
+            en, comps = comps_engine(q)
+            ex.append({"kind":"no","query":q["q"],"engine":en,"quote":q.get("quote"),
+                       "named":comps,"result":"бренд не появился",
+                       "why":"по одному ответу причину точно не определить; смотрите рекомендации в отчёте."})
     return ex[:3]
 
 def _competitor_objs(comp_conf, total):

@@ -209,6 +209,9 @@ table.mx th.q{{text-align:left}}
 .ex .q{{font-size:11pt;font-weight:700;margin-bottom:2.5mm}}
 .ex .r{{font-size:10pt;color:{MUTED};line-height:1.65}} .ex .r b{{color:{INK}}}
 .ex .tag{{display:inline-block;font-size:7.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.5px;padding:3px 9px;border-radius:20px;margin-bottom:3mm}}
+.ex .quote{{background:#F7F2EA;border-left:3px solid {ACCENT};border-radius:8px;padding:3.5mm 4mm;margin:0 0 3.5mm}}
+.ex .quote-h{{font-size:7.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:{FAINT};margin-bottom:1.5mm}}
+.ex .quote-t{{font-size:9.5pt;font-style:italic;color:{INK};line-height:1.62}}
 .tag-no{{background:rgba(193,53,37,.12);color:{RED}}} .tag-yes{{background:rgba(46,139,87,.13);color:{GREEN}}} .tag-mid{{background:rgba(201,121,26,.14);color:{AMBER}}}
 /* рекомендации */
 .rcard{{border:1px solid {BORDER};border-radius:13px;padding:5.5mm;margin-bottom:4.5mm;background:{CARD};box-shadow:0 1px 3px rgba(20,16,12,.05)}}
@@ -545,8 +548,14 @@ def p_examples(d):
                 eng_line=f"<b>{esc(ex['engine'])}:</b> дал общий ответ, конкретные компании не назвал"
         else:
             eng_line=f"<b>{esc(ex['engine'])}:</b> назвал ваш бренд в ответе"
+        quote_html=""
+        q=ex.get('quote') or {}
+        if q.get('text'):
+            quote_html=(f'<div class="quote"><div class="quote-h">Дословный фрагмент ответа · {esc(q.get("engine",""))}</div>'
+                        f'<div class="quote-t">«{esc(q["text"])}»</div></div>')
         cards+=f'''<div class="ex"><span class="tag {tag[0]}">{tag[1]}</span>
           <div class="q">{esc(ex['query'])}</div>
+          {quote_html}
           <div class="r">{eng_line}<br>
           <b>{b}:</b> {esc(ex['result'])}<br>
           <b>Почему:</b> {esc(ex['why'])}</div></div>'''

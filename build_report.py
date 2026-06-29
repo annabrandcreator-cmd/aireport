@@ -142,8 +142,8 @@ def css():
 @page{{size:A4;margin:0}}
 *{{margin:0;padding:0;box-sizing:border-box}}
 body{{font-family:'Gilroy',sans-serif;color:{INK}}}
-.page{{width:210mm;min-height:297mm;padding:16mm 15mm 13mm;position:relative;page-break-after:always;background:{PAGE}}}
-.ex,.fa,.rcard,.qd,.card{{break-inside:avoid}}
+.page{{width:210mm;height:297mm;padding:16mm 15mm 13mm;position:relative;overflow:hidden;page-break-after:always;background:{PAGE}}}
+.ex,.fa,.rcard,.qd{{break-inside:avoid}}
 .page:last-child{{page-break-after:auto}}
 .page--dark{{background:#0e0b09 url('file://{ASSETS}/cover-bg.jpg') center/cover no-repeat;color:#fff;padding:0;text-shadow:0 1px 3px rgba(0,0,0,.7)}}
 .kicker{{font-size:8.5pt;font-weight:600;letter-spacing:2px;text-transform:uppercase;color:{FAINT};margin-bottom:4mm}}
@@ -543,34 +543,33 @@ def p_groups(d):
       {footer(d)}</div>'''
 
 def p_examples(d):
-    has_comp=bool(d.get('competitors')); b=esc(d['brand_short']); lm=d.get('link_map')
-    cards=""
+    has_comp=bool(d.get('competitors')); lm=d.get('link_map')
+    cards=[]
     for ex in d['examples']:
         kind=ex['kind']
         tag={'yes':('tag-yes','Бренд появился'),'no':('tag-no','Бренда нет')}.get(kind,('tag-no','Бренда нет'))
         named=ex.get('named') or []
         named_str=', '.join(_linkify(x, lm) for x in named) if named else ''
         if kind=='yes':
-            eng_line=(f"<b>{esc(ex['engine'])}:</b> назвал ваш бренд в этом ответе"
-                      + (f", рядом — {named_str}" if named_str else ""))
+            eng_line=(f"<b>{esc(ex['engine'])}:</b> назвал ваш бренд в этом ответе" + (f", рядом — {named_str}" if named_str else ""))
+        elif named_str:
+            eng_line=f"<b>{esc(ex['engine'])}:</b> назвал {named_str}; вашего бренда в этом ответе нет"
         else:
-            eng_line=(f"<b>{esc(ex['engine'])}:</b> назвал {named_str}; вашего бренда в этом ответе нет" if named_str
-                      else f"<b>{esc(ex['engine'])}:</b> дал общий ответ без конкретных компаний; вашего бренда нет")
-        quote_html=""
+            eng_line=f"<b>{esc(ex['engine'])}:</b> вашего бренда в этом ответе нет"   # без ложного «компании не названы»
+        quote_html=""; qlen=0
         q=ex.get('quote') or {}
         if q.get('text'):
             qt=q["text"]
-            if len(qt)>270:                                   # в блоке 05 — короткий тизер; полные ответы ниже отдельным блоком
-                qt=qt[:270].rsplit(" ",1)[0].rstrip(" ,.;:")+" …"
+            if len(qt)>250: qt=qt[:250].rsplit(" ",1)[0].rstrip(" ,.;:")+" …"
+            qlen=len(qt)
             quote_html=(f'<div class="quote"><div class="quote-h">Фрагмент ответа · {esc(q.get("engine",""))}</div>'
                         f'<div class="quote-t">«{esc(qt)}»</div></div>')
-        cards+=f'''<div class="ex"><span class="tag {tag[0]}">{tag[1]}</span>
-          <div class="q">{esc(ex['query'])}</div>
-          {quote_html}
-          <div class="r">{eng_line}<br>
-          <b>Почему:</b> {esc(ex['why'])}</div></div>'''
-    n_ex=len(d['examples'])
-    intro=("Пример ответа из проверки: кого называет нейросеть и появился ли ваш бренд." if n_ex==1
+        html=(f'<div class="ex"><span class="tag {tag[0]}">{tag[1]}</span>'
+              f'<div class="q">{esc(ex["query"])}</div>{quote_html}'
+              f'<div class="r">{eng_line}<br><b>Почему:</b> {esc(ex["why"])}</div></div>')
+        h=30 + len(ex["query"])/56*6.4 + qlen/82*5.3 + len(ex["why"])/82*5.2
+        cards.append((html, h))
+    intro=("Пример ответа из проверки: кого называет нейросеть и появился ли ваш бренд." if len(cards)==1
            else "Несколько ответов из проверки: кого называет нейросеть, появился ли ваш бренд и что с этим делать.")
     others=d.get('others_named') or []
     if d.get('zero'):
@@ -586,13 +585,31 @@ def p_examples(d):
     else:
         takeaway=("Повторяемые упоминания есть по части вопросов. По остальным бренд не появился; точную причину по одному ответу определить нельзя — "
                   "нужен разбор страниц сайта и внешних источников по этой теме.")
-    return f'''<div class="page"><h2><span class="num">05</span>Примеры реальных ответов нейросетей</h2>
-      <div class="sec-intro">{intro}</div>
-      {cards}
-      <div class="box cream"><h4>Что показывают примеры</h4><p>{takeaway}</p></div>
-      <div class="box"><h4>Что проверить</h4><p>Есть ли на сайте отдельная страница, которая прямо отвечает на такой вопрос — с конкретными фактами: что входит или из чего состоит, для кого, условия, цены или сроки, и есть ли отзывы. И упоминается ли компания по этой теме на внешних площадках.</p></div>
-      <div class="note">Приведены короткие фрагменты ответов на дату проверки. Полные ответы — в следующем разделе. По одному ответу причина указана как возможная, а не доказанная.</div>
-      {footer(d)}</div>'''
+    boxes=(f'<div class="box cream"><h4>Что показывают примеры</h4><p>{takeaway}</p></div>'
+           f'<div class="box"><h4>Что проверить</h4><p>Есть ли на сайте отдельная страница, которая прямо отвечает на такой вопрос — с конкретными фактами: что входит или из чего состоит, для кого, условия, цены или сроки, и есть ли отзывы. И упоминается ли компания по этой теме на внешних площадках.</p></div>'
+           '<div class="note">Это короткие фрагменты для иллюстрации. Полные ответы целиком — в следующем разделе.</div>')
+    boxes_h=98
+    pages=[]; i=0; first=True; boxes_done=False
+    while i < len(cards) or not boxes_done:
+        budget = 206 if first else 246
+        used=0.0; body=""
+        while i < len(cards):
+            h=cards[i][1]
+            if body and used+h > budget: break
+            body+=cards[i][0]; used+=h; i+=1
+        tail=""
+        if i >= len(cards) and not boxes_done and used + boxes_h <= budget:
+            tail=boxes; boxes_done=True
+        head=('<h2><span class="num">05</span>Примеры реальных ответов нейросетей</h2><div class="sec-intro">'+intro+'</div>'
+              if first else '<h2>Примеры реальных ответов · продолжение</h2>')
+        pages.append(f'<div class="page">{head}{body}{tail}{footer(d)}</div>')
+        first=False
+        if i >= len(cards) and not boxes_done:                # боксы не влезли на страницу с карточками -> отдельная страница
+            pages.append(f'<div class="page"><h2>Примеры реальных ответов · итоги</h2>{boxes}{footer(d)}</div>')
+            boxes_done=True
+        if i >= len(cards) and boxes_done:
+            break
+    return "".join(pages)
 
 def p_full_answers(d):
     """Развёрнутые ПОЛНЫЕ ответы нейросетей: по одному на каждый запрос. С обоснованием, почему не все RUNS*движки."""
@@ -610,10 +627,10 @@ def p_full_answers(d):
              "что видит потенциальный клиент, какие компании ему рекомендуют и упоминается ли среди них ваш бренд.")
     def _note(fx):
         if fx.get('hit'):
-            return '<span class="fa-yes">✓ ваш бренд назван в ответе</span>'
+            return '<span class="fa-yes">✓ ваш бренд назван в этом ответе</span>'
         if fx.get('named'):
-            return 'нейросеть назвала: ' + ', '.join(_linkify(x, lm) for x in fx['named'][:5]) + '; вашего бренда нет'
-        return 'конкретные компании не названы'
+            return 'из конкурентов нейросеть назвала: ' + ', '.join(_linkify(x, lm) for x in fx['named'][:5]) + '; вашего бренда нет'
+        return 'вашего бренда в этом ответе нет'   # без ложного «компании не названы» — компании могут быть в тексте выше
     def _card_mm(fx):
         return max(1, len(fx['text'])/86)*5.2 + max(1, len(fx['q'])/62)*6.0 + 27
     pages, idx, first = [], 0, True
@@ -735,7 +752,9 @@ def _site_evidence(d):
     s=d.get('site_info') or {}
     if not s.get('ok'):
         if s and s.get('host'):
-            return '<div class="box"><h4>Проверка сайта</h4><p>Сайт не удалось открыть автоматически для проверки. Проверьте адрес и доступность для ботов.</p></div>'
+            return ('<div class="box"><h4>Технический разбор сайта</h4><p>Проверка видимости в нейросетях выполнена полностью и от сайта не зависит. '
+                    'Дополнительный технический разбор самого сайта автопроверка сделать не смогла — сайт не открылся для нашего робота '
+                    '(обычно из-за защиты от ботов или загрузки контента скриптами). На результаты выше это не влияет.</p></div>')
         return ''
     parts=[]
     if s.get('sitemap_urls'): parts.append(f"страниц в sitemap: {s['sitemap_urls']}")
@@ -753,8 +772,11 @@ def _site_facts_plain(d):
     s=d.get('site_info') or {}
     if not s.get('ok'):
         if s and s.get('host'):
-            return "Сайт не удалось открыть автоматически для проверки. Стоит проверить адрес и доступность для поисковых роботов."
-        return "Автоматическая проверка сайта в этот раз не проводилась."
+            return ("Важно: сама проверка видимости в нейросетях проведена полностью — она опрашивает нейросети и не зависит от доступа к вашему сайту. "
+                    "А вот этот дополнительный технический разбор самого сайта автопроверка в этот раз выполнить не смогла: сайт не открылся для нашего робота "
+                    "(частая причина — защита от ботов или контент, который подгружается скриптами). На результаты и проценты выше это никак не влияет. "
+                    "Чтобы добавить и технический разбор сайта, передайте его вашему специалисту или временно откройте доступ для поисковых роботов.")
+        return "Дополнительный технический разбор сайта в этот раз не проводился. На проверку видимости в нейросетях это не влияет."
     types={str(x).lower() for x in (s.get('schema') or [])}
     has_products=bool(types & {"product","offer","aggregateoffer","store","onlinestore","productgroup"}) or (s.get('product_pages',0) or 0)>0
     svc=s.get('service_pages',0); case=s.get('case_pages',0)

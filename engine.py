@@ -1608,6 +1608,31 @@ def _companies_only(names, niche, corpus="", aliases=None):
                 bad.add(n)
     return [n for n in det if n not in bad]
 
+def _assign_quotes(queries, tasks, answers, engines, aliases):
+    """Для каждого запроса выбирает один дословный ответ для блоков «Примеры» и «Развёрнутые ответы».
+    Два правила:
+      • если по запросу бренд РЕАЛЬНО встречается в чьём-то ответе — показываем ответ именно той сети
+        (чтобы клиент видел свой бренд в тексте, а не ответ другой нейросети без бренда);
+      • в остальном раздаём примеры РАЗНЫМ нейросетям по очереди, а не одной самой «болтливой»."""
+    eng_nm = {e["id"]: e["name"] for e in engines}
+    per = {}                                                  # qi -> {eid: (текст, длина, есть_бренд)} — лучший ответ каждой сети
+    for (qi, eid, _q, _run), ans in zip(tasks, answers):
+        if not ans or len((ans or "").strip()) < 40:
+            continue
+        hb = detect_mention(ans, aliases)
+        d = per.setdefault(qi, {})
+        cur = d.get(eid)                                      # для одной сети предпочитаем прогон С брендом, при равенстве — длиннее
+        if cur is None or (hb and not cur[2]) or (hb == cur[2] and len(ans) > cur[1]):
+            d[eid] = (ans, len(ans), hb)
+    used = {}                                                 # сколько раз показали каждую сеть -> равномерно распределяем
+    for qi in sorted(per):
+        cand = per[qi]
+        brand_pool = {e: v for e, v in cand.items() if v[2]}            # сети, где бренд РЕАЛЬНО в ответе — для таких запросов берём их
+        pool = brand_pool or ({e: v for e, v in cand.items() if v[1] >= 120} or cand)
+        eid = min(pool, key=lambda e: (used.get(e, 0), -pool[e][1]))    # реже всего показанная сеть, при равенстве — длиннее
+        used[eid] = used.get(eid, 0) + 1
+        queries[qi]["quote"] = {"engine": eng_nm.get(eid, eid), "eid": eid, "text": _clean_quote(pool[eid][0], 1300)}
+
 def _enrich_quotes(queries, aliases, company_names):
     """Помечает в каждой цитате: есть ли бренд и какие из реальных компаний названы ИМЕННО в этом ответе.
     Благодаря этому пример в отчёте всегда согласован — тег и разбор соответствуют показанному тексту цитаты."""
@@ -1744,23 +1769,7 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
         if detect_mention(ans, aliases):
             queries[qi]["hits"][eid] += 1
     failed = [eid for eid in eng_tot if eng_tot[eid] and eng_err[eid] >= (eng_tot[eid] + 1) // 2]   # большинство вызовов с ошибкой -> движок недоступен
-    # живой ДОСЛОВНЫЙ фрагмент одного реального ответа на каждый запрос (для блока «Примеры реальных ответов»).
-    # Берём РАЗНЫЕ нейросети по очереди, а не одну самую «болтливую», чтобы в примерах были и ChatGPT, и Gemini, и др.
-    eng_nm = {e["id"]: e["name"] for e in engines}
-    per = {}                                                  # qi -> {eid: (текст, длина)} — лучший ответ каждой сети на запрос
-    for (qi, eid, _q, _run), ans in zip(tasks, answers):
-        if not ans or len((ans or "").strip()) < 40:
-            continue
-        d = per.setdefault(qi, {})
-        if eid not in d or len(ans) > d[eid][1]:
-            d[eid] = (ans, len(ans))
-    used = {}                                                 # сколько раз показали каждую сеть -> равномерно распределяем
-    for qi in sorted(per):
-        cand = per[qi]
-        good = {e: v for e, v in cand.items() if v[1] >= 120} or cand   # предпочитаем содержательные ответы
-        eid = min(good, key=lambda e: (used.get(e, 0), -good[e][1]))    # реже всего показанная сеть, при равенстве — длиннее
-        used[eid] = used.get(eid, 0) + 1
-        queries[qi]["quote"] = {"engine": eng_nm.get(eid, eid), "eid": eid, "text": _clean_quote(good[eid][0], 1300)}
+    _assign_quotes(queries, tasks, answers, engines, aliases)  # дословный фрагмент одного ответа на каждый запрос
     # ── ОСНОВНОЙ путь: реальные компании + их сайты извлекает сама нейросеть (семантически, без стоп-листов) ──
     real = None if test else _extract_real_companies(all_answers, niche, brand_short or brand, aliases)
     comp_sites = {}
@@ -2125,16 +2134,20 @@ def _pick_examples(queries, brand_short, best, competitors):
         ex.append({"kind": kind, "query": q["q"], "engine": qt.get("engine"), "quote": qt,
                    "named": qt.get("named", []), "result": result, "why": why})
         used.add(q["q"])
-    yes = next((q for q in qs if q["quote"].get("brand")), None)         # 1) где бренд назван (если есть)
-    if yes: add(yes, "yes")
-    for q in qs:                                                        # 2) где бренда нет, но видно конкурентов — самое полезное
-        if len(ex) >= 3: break
-        if q["q"] in used or q["quote"].get("brand") or not q["quote"].get("named"): continue
+    yes = [q for q in qs if q["quote"].get("brand")]                     # запросы, где бренд РЕАЛЬНО в цитате
+    no  = [q for q in qs if not q["quote"].get("brand")]
+    no  = [q for q in no if q["quote"].get("named")] + [q for q in no if not q["quote"].get("named")]  # сперва с конкурентами
+    n = min(3, len(qs))
+    max_yes = max(1, n // 2) if yes else 0                               # бренд-появления показываем обязательно, но НЕ больше половины
+    for q in yes[:max_yes]:                                              # 1) бренд назван (но не заполняем ими все примеры)
+        if len(ex) >= n: break
+        add(q, "yes")
+    for q in no:                                                        # 2) где бренда нет — чтобы было видно и такие тексты
+        if len(ex) >= n: break
         add(q, "no")
-    for q in qs:                                                        # 3) добиваем до 3 любыми с цитатой
-        if len(ex) >= 3: break
-        if q["q"] in used: continue
-        add(q, "yes" if q["quote"].get("brand") else "no")
+    for q in yes[max_yes:]:                                             # 3) если «нет»-примеров не хватило, добиваем оставшимися «да»
+        if len(ex) >= n: break
+        add(q, "yes")
     return ex[:3]
 
 def _competitor_objs(comp_conf, total):

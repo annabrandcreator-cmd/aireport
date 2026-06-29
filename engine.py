@@ -1715,10 +1715,10 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
         if not ans or len((ans or "").strip()) < 40:
             continue
         if qi not in qbest or len(ans) > qbest[qi][2]:
-            qbest[qi] = (eng_nm.get(eid, eid), ans, len(ans))
+            qbest[qi] = (eng_nm.get(eid, eid), ans, len(ans), eid)
     for qi, q in enumerate(queries):
         if qi in qbest:
-            q["quote"] = {"engine": qbest[qi][0], "text": _clean_quote(qbest[qi][1])}
+            q["quote"] = {"engine": qbest[qi][0], "eid": qbest[qi][3], "text": _clean_quote(qbest[qi][1], 1300)}
     # ── ОСНОВНОЙ путь: реальные компании + их сайты извлекает сама нейросеть (семантически, без стоп-листов) ──
     real = None if test else _extract_real_companies(all_answers, niche, brand_short or brand, aliases)
     comp_sites = {}
@@ -1917,6 +1917,21 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
         comp_conf = []
     comp_names = [n for n, _ in comp_conf]
     examples = _pick_examples(queries, brand_short, best, comp_names)
+    # Развёрнутые ответы: по одному ПОЛНОМУ ответу на каждый запрос (самый содержательный), а не все RUNS*движки —
+    # клиенту нужна показательная выжимка, а не 140 повторяющихся ответов.
+    eng_nm_all = {e["id"]: e["name"] for e in eng}
+    full_answers = []
+    for q in queries:
+        qt = q.get("quote")
+        if not qt or not qt.get("text"):
+            continue
+        eid = qt.get("eid")
+        ev = (q.get("evidence") or {}).get(eid, {})
+        nmd = list(ev.get("comps") or []) + [o for o in (ev.get("others") or []) if o not in (ev.get("comps") or [])]
+        hit = bool(ev.get("brand")) or (q.get("hits", {}).get(eid, 0) > 0)
+        full_answers.append({"q": q["q"], "engine": qt.get("engine") or eng_nm_all.get(eid, ""),
+                             "text": qt["text"], "named": nmd[:6], "hit": hit})
+    full_answers = full_answers[:15]
     others_named = []                                         # прочие игроки (площадки/домены/бренды), названные ИИ, кроме подтверждённых конкурентов
     for q in queries:
         for eid, evv in (q.get("evidence") or {}).items():
@@ -2021,6 +2036,8 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
                       "Добиться первых повторяемых упоминаний (2 из 2): чтобы бренд появлялся в обоих ответах на один вопрос, а не через раз.")),
         },
         "examples": examples,
+        "full_answers": full_answers,
+        "answers_total": len(queries) * len([e for e in eng if e["id"] not in failed_set]) * RUNS,
         "others_named": others_named[:6],
         "link_map": link_map,
         "competitors": comp_objs,

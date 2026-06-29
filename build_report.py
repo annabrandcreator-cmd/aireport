@@ -212,6 +212,13 @@ table.mx th.q{{text-align:left}}
 .ex .quote{{background:#F7F2EA;border-left:3px solid {ACCENT};border-radius:8px;padding:3.5mm 4mm;margin:0 0 3.5mm}}
 .ex .quote-h{{font-size:7.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:{FAINT};margin-bottom:1.5mm}}
 .ex .quote-t{{font-size:9.5pt;font-style:italic;color:{INK};line-height:1.62}}
+/* развёрнутые ответы */
+.fa{{border:1px solid {BORDER};border-radius:11px;padding:5mm 5.5mm;margin-bottom:4mm;background:{CARD};box-shadow:0 1px 3px rgba(20,16,12,.05);break-inside:avoid}}
+.fa-q{{font-size:10.5pt;font-weight:700;color:{INK};margin-bottom:2mm;line-height:1.35}}
+.fa-h{{font-size:7.5pt;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:{FAINT};margin-bottom:2mm}}
+.fa-t{{font-size:9.5pt;font-style:italic;color:{INK};line-height:1.6;margin-bottom:2.5mm}}
+.fa-n{{font-size:9pt;color:{MUTED};line-height:1.5}}
+.fa-yes{{color:{GREEN};font-weight:700}}
 .tag-no{{background:rgba(193,53,37,.12);color:{RED}}} .tag-yes{{background:rgba(46,139,87,.13);color:{GREEN}}} .tag-mid{{background:rgba(201,121,26,.14);color:{AMBER}}}
 /* рекомендации */
 .rcard{{border:1px solid {BORDER};border-radius:13px;padding:5.5mm;margin-bottom:4.5mm;background:{CARD};box-shadow:0 1px 3px rgba(20,16,12,.05)}}
@@ -551,8 +558,11 @@ def p_examples(d):
         quote_html=""
         q=ex.get('quote') or {}
         if q.get('text'):
-            quote_html=(f'<div class="quote"><div class="quote-h">Дословный фрагмент ответа · {esc(q.get("engine",""))}</div>'
-                        f'<div class="quote-t">«{esc(q["text"])}»</div></div>')
+            qt=q["text"]
+            if len(qt)>270:                                   # в блоке 05 — короткий тизер; полные ответы ниже отдельным блоком
+                qt=qt[:270].rsplit(" ",1)[0].rstrip(" ,.;:")+" …"
+            quote_html=(f'<div class="quote"><div class="quote-h">Фрагмент ответа · {esc(q.get("engine",""))}</div>'
+                        f'<div class="quote-t">«{esc(qt)}»</div></div>')
         cards+=f'''<div class="ex"><span class="tag {tag[0]}">{tag[1]}</span>
           <div class="q">{esc(ex['query'])}</div>
           {quote_html}
@@ -581,8 +591,49 @@ def p_examples(d):
       {cards}
       <div class="box cream"><h4>Что показывают примеры</h4><p>{takeaway}</p></div>
       <div class="box"><h4>Что проверить</h4><p>Есть ли на сайте отдельная страница, которая прямо отвечает на такой вопрос — с конкретными фактами: что входит или из чего состоит, для кого, условия, цены или сроки, и есть ли отзывы. И упоминается ли компания по этой теме на внешних площадках.</p></div>
-      <div class="note">Приведены короткие фрагменты ответов на дату проверки. По одному ответу причина указана как возможная, а не доказанная.</div>
+      <div class="note">Приведены короткие фрагменты ответов на дату проверки. Полные ответы — в следующем разделе. По одному ответу причина указана как возможная, а не доказанная.</div>
       {footer(d)}</div>'''
+
+def p_full_answers(d):
+    """Развёрнутые ПОЛНЫЕ ответы нейросетей: по одному на каждый запрос. С обоснованием, почему не все RUNS*движки."""
+    fa = d.get('full_answers') or []
+    if not fa:
+        return ""
+    lm = d.get('link_map')
+    total = d.get('answers_total') or (len(d.get('queries', []))*RUNS*len(d.get('engines', [])))
+    n_eng = len([e for e in d.get('engines', []) if not e.get('failed')]) or len(d.get('engines', []))
+    intro = (f"Полные ответы нейросетей — по одному на каждый ваш вопрос. Всего сделано {total} ответов "
+             f"({len(d.get('queries', []))} вопросов × {n_eng} нейросетей × {RUNS} повтора): повторы и разные нейросети по одному "
+             "вопросу отвечают похоже, читать все смысла нет. Здесь — самый показательный ответ на каждый вопрос: по нему видно, "
+             "как нейросеть реально отвечает вашему клиенту и кого называет.")
+    def _note(fx):
+        if fx.get('hit'):
+            return '<span class="fa-yes">✓ ваш бренд назван в ответе</span>'
+        if fx.get('named'):
+            return 'нейросеть назвала: ' + ', '.join(_linkify(x, lm) for x in fx['named'][:5]) + '; вашего бренда нет'
+        return 'конкретные компании не названы'
+    def _card_mm(fx):
+        return max(1, len(fx['text'])/86)*5.2 + max(1, len(fx['q'])/62)*6.0 + 27
+    pages, idx, first = [], 0, True
+    while idx < len(fa):
+        budget = 196 if first else 234
+        used, chunk = 0.0, []
+        while idx < len(fa):
+            h = _card_mm(fa[idx])
+            if chunk and used + h > budget:
+                break
+            chunk.append(fa[idx]); used += h; idx += 1
+        body = "".join(
+            f'<div class="fa"><div class="fa-q">{esc(fx["q"])}</div>'
+            f'<div class="fa-h">Ответ нейросети · {esc(fx["engine"])}</div>'
+            f'<div class="fa-t">«{esc(fx["text"])}»</div>'
+            f'<div class="fa-n">{_note(fx)}</div></div>' for fx in chunk)
+        head = ('<h2><span class="num">06</span>Развёрнутые ответы нейросетей</h2>' if first
+                else '<h2>Развёрнутые ответы нейросетей · продолжение</h2>')
+        intro_html = f'<div class="sec-intro">{intro}</div>' if first else ''
+        pages.append(f'<div class="page">{head}{intro_html}{body}{footer(d)}</div>')
+        first = False
+    return "".join(pages)
 
 def _gap_phrase(gap):
     if gap > 0: return f"опережает вас на {gap} п.п."
@@ -837,6 +888,9 @@ def build(data, out):
     d=compute(data)
     recs=d['recommendations']
     pages=[p_cover(d), p_summary(d), p_engines(d), p_matrix(d)] + p_query_detail(d) + [p_groups(d), p_examples(d)]
+    fa_html=p_full_answers(d)                  # развёрнутые полные ответы (по одному на запрос)
+    if fa_html:
+        pages.append(fa_html)
     if d.get('competitors'):                  # блок конкурентов только если есть подтверждённые (>=2)
         pages.append(p_competitors(d))
     pages.append(p_works(d))

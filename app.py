@@ -26,7 +26,7 @@ DB = os.environ.get("DB_PATH") or os.path.join(APP_DIR, "orders.db")
 REPORTS = os.environ.get("REPORTS_DIR") or os.path.join(APP_DIR, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
-VERSION = "v90"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
+VERSION = "v91"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
 TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO").strip()  # .strip() — от случайных пробелов/переноса при вставке
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
@@ -679,25 +679,74 @@ def tbank_notify():
     if not ok:
         abort(403)                              # подпись не сошлась
     if data.get("Status") in ("CONFIRMED", "AUTHORIZED") and data.get("Success"):
-        oid = data.get("OrderId")
-        with db() as c:
-            o = c.execute("SELECT status, tg_chat_id, kind, qn FROM orders WHERE id=?", (oid,)).fetchone()
-        print(f"[notify] найден={bool(o)} статус={o['status'] if o else None} чат={o['tg_chat_id'] if o else None}", flush=True)
-        if o and o["status"] in ("new", "pending"):
-            if (o["kind"] or "main") == "addon":          # дозакупка: после оплаты просим запросы, а не запускаем сразу
-                with db() as c:
-                    c.execute("UPDATE orders SET status='await_queries', awaiting='addon_queries' WHERE id=?", (oid,))
-                if o["tg_chat_id"]:
-                    n = o["qn"] or 1
-                    tg_send_message(o["tg_chat_id"],
-                        f"Оплата получена! Пришлите {n} {_plural_q(n)} для проверки — каждый с новой строки. "
-                        "Я покажу их на подтверждение, а потом запущу проверку и пришлю отчёт.")
-            else:
-                with db() as c:
-                    c.execute("UPDATE orders SET status='paid' WHERE id=?", (oid,))   # фиксируем оплату, движок пока НЕ запускаем
-                if o["tg_chat_id"]:           # клиент уже нажал Старт раньше оплаты -> показываем запросы на подтверждение
-                    maybe_start_review(oid)
+        _on_payment_confirmed(data.get("OrderId"), src="webhook")
     return "OK"
+
+def _on_payment_confirmed(oid, src="webhook"):
+    """Единая реакция на подтверждённую оплату — из вебхука ИЛИ из опроса статуса. Идемпотентна:
+    срабатывает один раз (только пока заказ ещё new/pending), поэтому два источника не дублируют сообщение."""
+    if not oid:
+        return False
+    with db() as c:
+        o = c.execute("SELECT status, tg_chat_id, kind, qn FROM orders WHERE id=?", (oid,)).fetchone()
+    if not o or o["status"] not in ("new", "pending"):
+        return False                                         # уже обработан другим источником или клиентом
+    is_addon = (o["kind"] or "main") == "addon"
+    with db() as c:                                          # АТОМАРНО «забираем» заказ: вебхук и опрос не сработают дважды
+        if is_addon:
+            claimed = c.execute("UPDATE orders SET status='await_queries', awaiting='addon_queries' "
+                                "WHERE id=? AND status IN ('new','pending')", (oid,)).rowcount
+        else:
+            claimed = c.execute("UPDATE orders SET status='paid' WHERE id=? AND status IN ('new','pending')", (oid,)).rowcount
+    if not claimed:
+        return False
+    print(f"[paid:{src}] order={oid} оплата подтверждена -> {'await_queries' if is_addon else 'paid'}", flush=True)
+    if is_addon:                                             # дозакупка: после оплаты просим запросы, а не запускаем сразу
+        if o["tg_chat_id"]:
+            n = o["qn"] or 1
+            tg_send_message(o["tg_chat_id"],
+                f"Оплата получена! Пришлите {n} {_plural_q(n)} для проверки — каждый с новой строки. "
+                "Я покажу их на подтверждение, а потом запущу проверку и пришлю отчёт.")
+    else:
+        if o["tg_chat_id"]:                                   # есть чат клиента -> сразу показываем запросы на подтверждение
+            maybe_start_review(oid)
+    return True
+
+def tbank_check_order(oid):
+    """Спрашиваем у TBank статус по заказу (CheckOrder, по OrderId). True, если хоть один платёж подтверждён."""
+    password = os.environ.get("TBANK_PASSWORD", "").strip()
+    if not password:
+        return False
+    payload = {"TerminalKey": TERMINAL, "OrderId": str(oid)}
+    payload["Token"] = tbank_token(payload, password)
+    try:
+        req = urllib.request.Request("https://securepay.tinkoff.ru/v2/CheckOrder",
+            data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            d = json.loads(r.read().decode("utf-8"))
+    except Exception as e:
+        print("[checkorder]", oid, e, flush=True)
+        return False
+    if not d.get("Success"):
+        return False
+    return any((p.get("Status") in ("CONFIRMED", "AUTHORIZED")) for p in (d.get("Payments") or []))
+
+def _payment_poller():
+    """Подстраховка на случай, если вебхук от TBank не дошёл: бот сам опрашивает статус «висящих» оплаченных
+    заказов и автоматически отвечает клиенту, даже если он не нажал «вернуться в Telegram» на сайте."""
+    gap = max(8, int(os.environ.get("PAYMENT_POLL_SEC", "25") or 25))
+    while True:
+        time.sleep(gap)
+        try:
+            with db() as c:                                  # ждём оплату: есть чат клиента, заказ свежий (до 2 часов)
+                rows = c.execute("SELECT id FROM orders WHERE status IN ('new','pending') "
+                                 "AND tg_chat_id IS NOT NULL AND tg_chat_id<>'' AND created > ?",
+                                 (time.time() - 7200,)).fetchall()
+            for r in rows:
+                if tbank_check_order(r["id"]):
+                    _on_payment_confirmed(r["id"], src="poll")
+        except Exception as e:
+            print("[poller]", e, flush=True)
 
 @app.get("/thanks")
 def thanks():
@@ -1206,6 +1255,13 @@ def admin_export():
                     (r["feedback"] or "").replace("\n"," "), r["payment_id"] or ""])
     return app.response_class(buf.getvalue(), mimetype="text/csv",
                              headers={"Content-Disposition": "attachment; filename=orders.csv"})
+
+# Фоновый опрос статуса оплаты (подстраховка к вебхуку) — запускается при импорте модуля,
+# поэтому работает и под gunicorn, а не только при прямом запуске. Идемпотентность обеспечена
+# атомарным «забором» заказа в _on_payment_confirmed, так что несколько воркеров не дублируют сообщение.
+if os.environ.get("TEST_MODE") != "1" and os.environ.get("DISABLE_PAYMENT_POLLER") != "1":
+    threading.Thread(target=_payment_poller, daemon=True).start()
+    print("[poller] фоновый опрос статуса оплаты запущен", flush=True)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8000")))

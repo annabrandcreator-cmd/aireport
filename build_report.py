@@ -142,7 +142,8 @@ def css():
 @page{{size:A4;margin:0}}
 *{{margin:0;padding:0;box-sizing:border-box}}
 body{{font-family:'Gilroy',sans-serif;color:{INK}}}
-.page{{width:210mm;height:297mm;padding:16mm 15mm 13mm;position:relative;overflow:hidden;page-break-after:always;background:{PAGE}}}
+.page{{width:210mm;min-height:297mm;padding:16mm 15mm 13mm;position:relative;page-break-after:always;background:{PAGE}}}
+.ex,.fa,.rcard,.qd,.card{{break-inside:avoid}}
 .page:last-child{{page-break-after:auto}}
 .page--dark{{background:#0e0b09 url('file://{ASSETS}/cover-bg.jpg') center/cover no-repeat;color:#fff;padding:0;text-shadow:0 1px 3px rgba(0,0,0,.7)}}
 .kicker{{font-size:8.5pt;font-weight:600;letter-spacing:2px;text-transform:uppercase;color:{FAINT};margin-bottom:4mm}}
@@ -545,16 +546,16 @@ def p_examples(d):
     has_comp=bool(d.get('competitors')); b=esc(d['brand_short']); lm=d.get('link_map')
     cards=""
     for ex in d['examples']:
-        tag={'yes':('tag-yes','Бренд появился'),'no':('tag-no','Бренда нет'),'mid':('tag-mid','В одном из двух')}[ex['kind']]
-        if ex['kind']=='no':
-            if ex.get('named'):
-                eng_line=f"<b>{esc(ex['engine'])}:</b> назвал {', '.join(_linkify(x, lm) for x in ex['named'])}; вашего бренда в ответе нет"
-            elif has_comp:
-                eng_line=f"<b>{esc(ex['engine'])}:</b> называет другие компании (см. раздел ниже), вашего бренда в ответе нет"
-            else:
-                eng_line=f"<b>{esc(ex['engine'])}:</b> дал общий ответ, конкретные компании не назвал"
+        kind=ex['kind']
+        tag={'yes':('tag-yes','Бренд появился'),'no':('tag-no','Бренда нет')}.get(kind,('tag-no','Бренда нет'))
+        named=ex.get('named') or []
+        named_str=', '.join(_linkify(x, lm) for x in named) if named else ''
+        if kind=='yes':
+            eng_line=(f"<b>{esc(ex['engine'])}:</b> назвал ваш бренд в этом ответе"
+                      + (f", рядом — {named_str}" if named_str else ""))
         else:
-            eng_line=f"<b>{esc(ex['engine'])}:</b> назвал ваш бренд в ответе"
+            eng_line=(f"<b>{esc(ex['engine'])}:</b> назвал {named_str}; вашего бренда в этом ответе нет" if named_str
+                      else f"<b>{esc(ex['engine'])}:</b> дал общий ответ без конкретных компаний; вашего бренда нет")
         quote_html=""
         q=ex.get('quote') or {}
         if q.get('text'):
@@ -567,7 +568,6 @@ def p_examples(d):
           <div class="q">{esc(ex['query'])}</div>
           {quote_html}
           <div class="r">{eng_line}<br>
-          <b>{b}:</b> {esc(ex['result'])}<br>
           <b>Почему:</b> {esc(ex['why'])}</div></div>'''
     n_ex=len(d['examples'])
     intro=("Пример ответа из проверки: кого называет нейросеть и появился ли ваш бренд." if n_ex==1
@@ -602,10 +602,12 @@ def p_full_answers(d):
     lm = d.get('link_map')
     total = d.get('answers_total') or (len(d.get('queries', []))*RUNS*len(d.get('engines', [])))
     n_eng = len([e for e in d.get('engines', []) if not e.get('failed')]) or len(d.get('engines', []))
-    intro = (f"Полные ответы нейросетей — по одному на каждый ваш вопрос. Всего сделано {total} ответов "
-             f"({len(d.get('queries', []))} вопросов × {n_eng} нейросетей × {RUNS} повтора): повторы и разные нейросети по одному "
-             "вопросу отвечают похоже, читать все смысла нет. Здесь — самый показательный ответ на каждый вопрос: по нему видно, "
-             "как нейросеть реально отвечает вашему клиенту и кого называет.")
+    nq = len(d.get('queries', []))
+    intro = (f"По каждому вопросу показан один наиболее показательный ответ нейросети. Всего сервис получил "
+             f"{total} {plural(total,'ответ','ответа','ответов')}: {nq} {plural(nq,'вопрос','вопроса','вопросов')} × "
+             f"{n_eng} {plural(n_eng,'нейросеть','нейросети','нейросетей')} × {RUNS} {plural(RUNS,'проверка','проверки','проверок')}. "
+             "Поскольку ответы часто повторяются, здесь собраны только полные версии, которые лучше всего показывают, "
+             "что видит потенциальный клиент, какие компании ему рекомендуют и упоминается ли среди них ваш бренд.")
     def _note(fx):
         if fx.get('hit'):
             return '<span class="fa-yes">✓ ваш бренд назван в ответе</span>'

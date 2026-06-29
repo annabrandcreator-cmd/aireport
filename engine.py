@@ -535,6 +535,25 @@ def _brand_gender(brand_short):
         if re.search(r"(ов|ев|ёв|ин|ын|ский|цкий|ской|ной)$", sur): return "m"
     return "n"
 
+_CYR2LAT = {"а":"a","б":"b","в":"v","г":"g","д":"d","е":"e","ё":"e","ж":"zh","з":"z","и":"i","й":"y","к":"k","л":"l",
+            "м":"m","н":"n","о":"o","п":"p","р":"r","с":"s","т":"t","у":"u","ф":"f","х":"h","ц":"ts","ч":"ch","ш":"sh",
+            "щ":"sch","ъ":"","ы":"y","ь":"","э":"e","ю":"yu","я":"ya"}
+_LAT2CYR = [("shch","щ"),("sch","щ"),("yo","ё"),("zh","ж"),("kh","х"),("ts","ц"),("ch","ч"),("sh","ш"),("yu","ю"),
+            ("ya","я"),("a","а"),("b","б"),("v","в"),("g","г"),("d","д"),("e","е"),("z","з"),("i","и"),("y","й"),
+            ("k","к"),("l","л"),("m","м"),("n","н"),("o","о"),("p","п"),("r","р"),("s","с"),("t","т"),("u","у"),
+            ("f","ф"),("h","х"),("c","к"),("j","дж"),("w","в"),("x","кс"),("q","к")]
+def _translit(s):
+    """Другое написание имени: латиница->кириллица и наоборот, чтобы бренд ловился в обоих видах («Askona»<->«Аскона»)."""
+    s = (s or "").strip().lower()
+    if re.search(r"[а-яё]", s):                              # кириллица -> латиница
+        return "".join(_CYR2LAT.get(ch, ch) for ch in s)
+    if re.search(r"[a-z]", s):                               # латиница -> кириллица (сперва диграфы)
+        out = s
+        for k, v in _LAT2CYR:
+            out = out.replace(k, v)
+        return out
+    return ""
+
 def brand_aliases(site, site_info=None, brand="", brand_short=""):
     """Все варианты имени бренда: домен, введённое имя, названия с сайта (og:site_name, Schema name, title).
     По ним детектим упоминание и их же исключаем из конкурентов, чтобы бренд не попал сам к себе в конкуренты."""
@@ -548,6 +567,10 @@ def brand_aliases(site, site_info=None, brand="", brand_short=""):
         al.add(base); al.add(base.replace("-", " "))
     elif len(base) >= 5 and not base.startswith(_GEO_STEMS) and base not in _COMMON:
         al.add(base)                                         # единичное слово-домен: hollyshop -> добавляем (но не гео/общие слова)
+    for x in [b for b in (brand, brand_short) if b]:        # второе написание имени (латиница<->кириллица)
+        t = _translit(x)
+        if t and len(t) >= 4 and t != x.strip().lower():
+            al.add(t)
     return {a for a in al if len(a) >= 3}
 
 def _brand_from_host(name, host):
@@ -1585,6 +1608,19 @@ def _companies_only(names, niche, corpus="", aliases=None):
                 bad.add(n)
     return [n for n in det if n not in bad]
 
+def _enrich_quotes(queries, aliases, company_names):
+    """Помечает в каждой цитате: есть ли бренд и какие из реальных компаний названы ИМЕННО в этом ответе.
+    Благодаря этому пример в отчёте всегда согласован — тег и разбор соответствуют показанному тексту цитаты."""
+    cl = list(dict.fromkeys([c for c in (company_names or []) if c]))
+    for q in queries:
+        qt = q.get("quote")
+        if not qt or not qt.get("text"):
+            continue
+        low = qt["text"].lower()
+        al = [a for a in (aliases or ()) if a]
+        qt["brand"] = detect_mention(qt["text"], aliases)
+        qt["named"] = [c for c in cl if c.lower() in low and not any(a in c.lower() for a in al)][:5]  # компании, кроме самого бренда
+
 def _clean_quote(text, limit=320):
     """Чистый короткий ДОСЛОВНЫЙ фрагмент ответа нейросети для блока «Примеры реальных ответов»."""
     t = re.sub(r"\*\*([^*]+)\*\*", r"\1", text or "")            # снять markdown-жирность, оставить слова
@@ -1739,6 +1775,7 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
                     (cell["comps"] if cn.lower() in comp_low else cell["others"]).append(cn)
         # переносим сайты и на «очищенные» имена-домены (1ps.ru остаётся 1ps.ru и т.п.)
         comp_sites = {_clean_comp_name(k): v for k, v in comp_sites.items()}
+        _enrich_quotes(queries, aliases, [_clean_comp_name(n) for n in names])   # бренд и компании ИМЕННО в цитате (для согласованного примера)
         return queries, competitors, failed, comp_sites
     # ── ОТКАТ: модель недоступна -> старый способ (regex + фильтры) ──
     competitors = extract_competitors(all_answers, brand, brand_short, niche, aliases=aliases)
@@ -1764,6 +1801,7 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
             cell["comps"] = [c for c in cell["comps"] if c.lower() in good_low]
             cell["others"] = [o for o in cell["others"] if o.lower() in good_low]
     competitors = [(n, c) for (n, c) in competitors if n.lower() in good_low]
+    _enrich_quotes(queries, aliases, [n for n in cand if n.lower() in good_low])   # бренд и компании в цитате для согласованного примера
     return queries, competitors, failed, {}
 
 # ───────────────────────── сборка данных отчёта ───────────────────────
@@ -1926,11 +1964,13 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
         if not qt or not qt.get("text"):
             continue
         eid = qt.get("eid")
-        ev = (q.get("evidence") or {}).get(eid, {})
-        nmd = list(ev.get("comps") or []) + [o for o in (ev.get("others") or []) if o not in (ev.get("comps") or [])]
-        hit = bool(ev.get("brand")) or (q.get("hits", {}).get(eid, 0) > 0)
+        # статус бренда и названные компании — ИМЕННО из показанной цитаты (qt['brand']/qt['named']), а не из агрегата
+        nmd = qt.get("named")
+        if nmd is None:
+            ev = (q.get("evidence") or {}).get(eid, {})
+            nmd = list(ev.get("comps") or []) + [o for o in (ev.get("others") or []) if o not in (ev.get("comps") or [])]
         full_answers.append({"q": q["q"], "engine": qt.get("engine") or eng_nm_all.get(eid, ""),
-                             "text": qt["text"], "named": nmd[:6], "hit": hit})
+                             "text": qt["text"], "named": nmd[:6], "hit": bool(qt.get("brand"))})
     full_answers = full_answers[:15]
     others_named = []                                         # прочие игроки (площадки/домены/бренды), названные ИИ, кроме подтверждённых конкурентов
     for q in queries:
@@ -2062,48 +2102,33 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
     return data
 
 def _pick_examples(queries, brand_short, best, competitors):
-    ex = []
-    eng_name = {e["id"]: e["name"] for e in active_engines()}
-    def comps_engine(q):
-        """(нейросеть, [названные игроки]) реально по этому запросу. Сперва берём движок ЦИТАТЫ —
-        чтобы заголовок «Дословный фрагмент · X» и строка «X назвал …» относились к одному движку."""
-        ev = q.get("evidence") or {}
-        qeng = (q.get("quote") or {}).get("engine")
-        qeid = next((eid for eid, nm in eng_name.items() if nm == qeng), None)
-        order = ([qeid] if qeid in ev else []) + [e for e in ev if e != qeid]
-        for eid in order:
-            if (ev.get(eid) or {}).get("comps"):
-                return eng_name.get(eid, eid), ev[eid]["comps"][:3]
-        for eid in order:
-            if (ev.get(eid) or {}).get("others"):
-                return eng_name.get(eid, eid), ev[eid]["others"][:3]
-        return qeng or best["name"], []
-    strong_cell = next((q for q in queries if any(v==2 for v in q["hits"].values())), None)
-    zero_cell   = next((q for q in queries if all(v==0 for v in q["hits"].values())), None)
-    mid_cell    = next((q for q in queries if any(v==1 for v in q["hits"].values())), None)
-    if strong_cell:
-        ex.append({"kind":"yes","query":strong_cell["q"],"engine":(strong_cell.get("quote") or {}).get("engine") or best["name"],"quote":strong_cell.get("quote"),
-                   "named":[brand_short],"result":"бренд появился в обоих ответах (2 из 2)",
-                   "why":"возможное объяснение: в доступных источниках оказалось достаточно релевантной информации, чтобы нейросеть включила бренд. По одному результату точную причину установить нельзя."})
-    if zero_cell:
-        en, comps = comps_engine(zero_cell)
-        ex.append({"kind":"no","query":zero_cell["q"],"engine":en,"quote":zero_cell.get("quote"),
-                   "named":comps,"result":"бренд не появился (0 из 2)",
-                   "why":"по одному ответу причину точно не определить. Стоит проверить, есть ли на сайте страница, которая прямо отвечает на этот вопрос, и упоминания по теме на внешних площадках."})
-    if mid_cell and mid_cell not in (strong_cell, zero_cell):
-        ex.append({"kind":"mid","query":mid_cell["q"],"engine":(mid_cell.get("quote") or {}).get("engine") or best["name"],"quote":mid_cell.get("quote"),
-                   "named":[brand_short],"result":"бренд появился в одной из двух проверок",
-                   "why":"возможная причина: упоминаний мало и они не закреплены по этому запросу."})
-    # если каких-то «срезов» нет — добиваем примеры обычными запросами, чтобы всегда было 3 живых цитаты
-    if len(ex) < 3:
-        used = {e["query"] for e in ex}
-        for q in queries:
-            if len(ex) >= 3: break
-            if q["q"] in used or not q.get("quote"): continue
-            en, comps = comps_engine(q)
-            ex.append({"kind":"no","query":q["q"],"engine":en,"quote":q.get("quote"),
-                       "named":comps,"result":"бренд не появился",
-                       "why":"по одному ответу причину точно не определить; смотрите рекомендации в отчёте."})
+    """Примеры строятся СТРОГО по цитате: тег, «кого назвал» и статус бренда берутся из того же ответа,
+    который показан дословно. Поэтому противоречий (цитата с брендом, а разбор «бренда нет») быть не может."""
+    qs = [q for q in queries if (q.get("quote") or {}).get("text")]
+    ex, used = [], set()
+    def add(q, kind):
+        qt = q["quote"]
+        if kind == "yes":
+            result = "ваш бренд назван в этом ответе"
+            why = ("нейросеть включила ваш бренд в ответ на этот вопрос — значит по нему информации о вас достаточно. "
+                   "Это сильная позиция, её стоит закрепить и расширить на остальные вопросы.")
+        else:
+            result = "вашего бренда в этом ответе нет"
+            why = ("по этому вопросу нейросеть называет другие компании, а ваш бренд не показывает. "
+                   "Это зона роста: нужны понятная страница под такой запрос и упоминания на внешних площадках. Подробнее — в рекомендациях.")
+        ex.append({"kind": kind, "query": q["q"], "engine": qt.get("engine"), "quote": qt,
+                   "named": qt.get("named", []), "result": result, "why": why})
+        used.add(q["q"])
+    yes = next((q for q in qs if q["quote"].get("brand")), None)         # 1) где бренд назван (если есть)
+    if yes: add(yes, "yes")
+    for q in qs:                                                        # 2) где бренда нет, но видно конкурентов — самое полезное
+        if len(ex) >= 3: break
+        if q["q"] in used or q["quote"].get("brand") or not q["quote"].get("named"): continue
+        add(q, "no")
+    for q in qs:                                                        # 3) добиваем до 3 любыми с цитатой
+        if len(ex) >= 3: break
+        if q["q"] in used: continue
+        add(q, "yes" if q["quote"].get("brand") else "no")
     return ex[:3]
 
 def _competitor_objs(comp_conf, total):

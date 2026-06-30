@@ -201,10 +201,31 @@ def _strip_geo(qs):
         return t
     return [{"q": clean(q["q"]), "group": q["group"]} for q in qs]
 
+_NICHE_STOP = {"ключ","сайт","горо","моск","росс","комп","услу","зака","купи","цена","прод","серв",
+               "бизн","рабо","зака","клие","найт","посо","како","выбо","лучш","хоро","недо"}
+def _niche_anchor_tokens(niche, site_info):
+    """Ключевые «предметные» слова ниши и услуг с сайта (4-буквенные стемы), по которым проверяем, что запросы про неё."""
+    toks, src = set(), (niche or "") + " " + (_site_offerings(site_info) or "")
+    for w in re.findall(r"[А-Яа-яЁёA-Za-z]{4,}", src.lower()):
+        st = w[:4]
+        if st not in _NICHE_STOP:
+            toks.add(st)
+    return toks
+def _share_on_niche(qs, niche, site_info):
+    """Доля запросов, реально упоминающих предмет ниши/сайта. Низкая доля = модель ушла не туда (часто из названия бренда)."""
+    toks = _niche_anchor_tokens(niche, site_info)
+    if not toks or not qs:
+        return 1.0
+    hit = sum(1 for q in qs if any(t in (q.get("q") or "").lower() for t in toks))
+    return hit / len(qs)
+
 def generate_queries(niche, city, site_info=None, aliases=None):
     city = _norm_city(city)
     # боевой режим: запросы под нишу формирует сама нейросеть (с учётом сайта); иначе/при сбое — шаблоны
     qs = generate_queries_llm(niche, city, site_info) if os.environ.get("TEST_MODE") != "1" else None
+    if qs and _share_on_niche(qs, niche, site_info) < 0.2:    # запросы не про нишу (напр. модель повелась на название) -> шаблоны по нише
+        print(f"[queries] LLM ушёл не в нишу «{niche}» -> откат на шаблоны", flush=True)
+        qs = None
     if not qs:
         qs = generate_queries_tpl(niche, city)
     qs = [{"q": _depersonalize(x["q"]), "group": x["group"]} for x in qs]   # убираем обращения к нейросети («найдите/подскажите…»)
@@ -460,6 +481,10 @@ def generate_queries_llm(niche, city, site_info=None):
         f"ОДНА НИША. ВСЕ 10 запросов — про ОДНУ и ту же компанию и нишу «{niche}». КАТЕГОРИЧЕСКИ нельзя смешивать разные сферы "
         "(например клиники, двери, окна, ножи, бельё, потолки, реклама в одном наборе) — это грубая ошибка. "
         "Если ниша не ясна — не выдумывай случайные сферы.\n"
+        f"НАЗВАНИЕ КОМПАНИИ — НЕ ТЕМА. Предмет запросов определяется ТОЛЬКО нишей «{niche}» и услугами/товарами с сайта, "
+        "а НЕ названием бренда и НЕ доменом. Название может случайно звучать как другое слово (например «Стробос» похоже на "
+        "стробоскоп и свет, «Бриз» на вентиляцию, «Гранит» на камень), но это НИЧЕГО не говорит о деятельности. "
+        "НЕ выводи тему из названия и не делай ассоциаций с ним — ориентируйся строго на нишу и сайт.\n"
         "СПИСОК ИГРОКОВ — САМОЕ ВАЖНОЕ: КАЖДЫЙ запрос сформулируй так, чтобы нейросеть в ответ ВЫДАЛА СПИСОК конкретных "
         "компаний, сервисов, клиник, салонов, магазинов или сайтов. Сильные формулировки: «Какие компании…», «Кто делает/продаёт…», "
         "«Где заказать/купить…», «На каком сайте…», «Назови компании/сервисы, которые…», «Посоветуй исполнителя/сервис/компанию для…», "
@@ -588,19 +613,40 @@ def detect_mention(answer, aliases):
     return any(al in a for al in (aliases or ()))
 
 # ───────────────────────── разбор сайта (доказательная база) ──────────
+_ENC_ALIASES = {"windows-1251": "cp1251", "win-1251": "cp1251", "cp-1251": "cp1251", "windows1251": "cp1251",
+                "utf8": "utf-8", "koi8-r": "koi8-r", "windows-1252": "cp1252", "iso-8859-1": "latin-1"}
+def _decode_bytes(raw, content_type=""):
+    """Декодируем страницу по charset из заголовка или мета-тега. Многие российские сайты в windows-1251 —
+    без этого текст превращался в мусор, ниша определялась неверно, и запросы уезжали не в ту сторону."""
+    enc = None
+    m = re.search(r'charset\s*=\s*["\']?([\w\-]+)', content_type or "", re.I)
+    if m: enc = m.group(1).strip().lower()
+    if not enc:                                              # charset из <meta> в начале страницы
+        head = raw[:3000].decode("ascii", "ignore").lower()
+        m = re.search(r'charset\s*=\s*["\']?\s*([\w\-]+)', head)
+        if m: enc = m.group(1).strip().lower()
+    enc = _ENC_ALIASES.get(enc, enc)
+    for cand in (enc, "utf-8", "cp1251"):                    # пробуем заявленную, потом utf-8, потом cp1251
+        if not cand: continue
+        try:
+            return raw.decode(cand)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return raw.decode("utf-8", "replace")
+
 def _fetch_text(url, timeout=12, limit=400000):
     req = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0 (compatible; AIVisibilityBot/1.0)",
         "Accept": "text/html,application/xhtml+xml,application/xml"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.geturl(), r.read(limit).decode("utf-8", "replace")
+            return r.geturl(), _decode_bytes(r.read(limit), r.headers.get("Content-Type", ""))
     except urllib.error.HTTPError:
         raise
     except Exception:
         ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
-            return r.geturl(), r.read(limit).decode("utf-8", "replace")
+            return r.geturl(), _decode_bytes(r.read(limit), r.headers.get("Content-Type", ""))
 
 def analyze_site(site):
     """Реально открывает сайт: заголовок, описание, текст, Schema, страницы услуг/кейсов, robots для ИИ-ботов."""

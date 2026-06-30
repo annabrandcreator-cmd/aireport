@@ -27,7 +27,7 @@ DB = os.environ.get("DB_PATH") or os.path.join(APP_DIR, "orders.db")
 REPORTS = os.environ.get("REPORTS_DIR") or os.path.join(APP_DIR, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
-VERSION = "v96"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
+VERSION = "v99"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
 TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO").strip()  # .strip() — от случайных пробелов/переноса при вставке
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
@@ -140,7 +140,8 @@ def init_db():
             c.execute("ALTER TABLE orders ADD COLUMN prep TEXT")   # JSON: запросы + контекст для подтверждения
         for col, ddl in [("rating","INTEGER"),("feedback","TEXT"),("awaiting","TEXT"),
                          ("kind","TEXT"),("parent","TEXT"),("qn","INTEGER"),("amount","INTEGER"),("err","TEXT"),
-                         ("promo","TEXT"),("tg_username","TEXT"),("tg_name","TEXT")]:
+                         ("promo","TEXT"),("tg_username","TEXT"),("tg_name","TEXT"),
+                         ("q_proposed","TEXT"),("q_final","TEXT")]:
             if col not in cols:
                 c.execute(f"ALTER TABLE orders ADD COLUMN {col} {ddl}")
 init_db()
@@ -307,7 +308,6 @@ def _send_feedback_request(chat_id, oid):
 
 def _send_addon_offer(chat_id, parent_oid):
     tg_send_buttons(chat_id,
-        "Спасибо за обратную связь!\n\n"
         "Хотите проверить другие запросы? Первый отчёт сделан по 10 запросам. "
         "Можно отдельно проверить видимость по запросам, которых в нём не было: например, по другой услуге или направлению, "
         "в конкретном городе или регионе, среди определённого типа клиентов или в другом ценовом сегменте.\n\n"
@@ -391,6 +391,10 @@ def _send_menu(chat):
         "Нажмите «Заказать проверку видимости», чтобы оформить отчёт. Если что-то не работает — «Связаться с поддержкой».",
         _menu_kb())
 
+def _q_dump(prep):
+    """Список текстов запросов из prep -> JSON (для сохранения «что предложил бот» / «что подтвердил клиент»)."""
+    return json.dumps([q.get("q", "") for q in (prep.get("queries") or []) if isinstance(q, dict)], ensure_ascii=False)
+
 def _do_review(oid):
     """Готовит запросы (есть LLM-вызовы, потому фоном) и отправляет клиенту на подтверждение."""
     with db() as c:
@@ -409,8 +413,8 @@ def _do_review(oid):
         _ask_niche(o["tg_chat_id"], o["site"])
         return
     with db() as c:
-        c.execute("UPDATE orders SET prep=?, brand=?, brand_short=?, niche=?, status='reviewing' WHERE id=?",
-                  (json.dumps(prep, ensure_ascii=False), prep["brand"], prep["brand_short"], prep["niche"], oid))
+        c.execute("UPDATE orders SET prep=?, brand=?, brand_short=?, niche=?, status='reviewing', q_proposed=? WHERE id=?",
+                  (json.dumps(prep, ensure_ascii=False), prep["brand"], prep["brand_short"], prep["niche"], _q_dump(prep), oid))
     _send_review(o["tg_chat_id"], oid, prep, edited=False)
 
 def _ask_niche(chat, site):
@@ -442,8 +446,8 @@ def _set_niche(oid, niche_text):
         except Exception as e:
             print("[niche] ошибка generate:", e, flush=True)
     with db() as c:
-        c.execute("UPDATE orders SET prep=?, niche=?, status='reviewing', awaiting=NULL WHERE id=?",
-                  (json.dumps(prep, ensure_ascii=False), niche, oid))
+        c.execute("UPDATE orders SET prep=?, niche=?, status='reviewing', awaiting=NULL, q_proposed=? WHERE id=?",
+                  (json.dumps(prep, ensure_ascii=False), niche, _q_dump(prep), oid))
     _send_review(o["tg_chat_id"], oid, prep, edited=False)
 
 def maybe_start_review(oid):
@@ -477,8 +481,10 @@ def start_generation(oid):
     with db() as c:
         o = c.execute("SELECT prep, tg_chat_id FROM orders WHERE id=?", (oid,)).fetchone()
     if not o or not o["prep"]: return False
+    try: qfin = _q_dump(json.loads(o["prep"]))               # финальный набор, который реально идёт на проверку
+    except Exception: qfin = None
     with db() as c:
-        c.execute("UPDATE orders SET status='processing' WHERE id=?", (oid,))
+        c.execute("UPDATE orders SET status='processing', q_final=? WHERE id=?", (qfin, oid))
     if o["tg_chat_id"]:
         tg_send_message(o["tg_chat_id"], "Принято! Запускаю проверку по нейросетям, пришлю готовый отчёт сюда через несколько минут.")
     threading.Thread(target=generate, args=(oid,), daemon=True).start()
@@ -993,8 +999,16 @@ def _handle_callback(cq):
             c.execute("UPDATE orders SET rating=?, awaiting='fb_text' WHERE id=?", (int(n), oid))
             o = c.execute("SELECT brand, site FROM orders WHERE id=?", (oid,)).fetchone()
         admin_notify(f"Оценка отчёта: {n}/5\nЗаказ: {oid}\nБренд: {(o['brand'] if o else '') or ''}\nСайт: {(o['site'] if o else '') or ''}")
-        tg_send_message(chat, "Спасибо за оценку! Если хотите, в одном сообщении напишите, чего не хватило или что было особенно полезно.")
-        _send_addon_offer(chat, oid)              # оффер дозакупки сразу после оценки, не дожидаясь текста
+        tg_send_buttons(chat,
+            "Спасибо за оценку! Если хотите, напишите одним сообщением, чего не хватило или что было особенно полезно. "
+            "Или нажмите «Пропустить».",
+            [[{"text": "Пропустить", "callback_data": f"fb_skip:{oid}"}]])   # отзыв сначала; оффер дозакупки — уже после него
+        return "OK"
+    if data.startswith("fb_skip:"):                      # клиент решил не оставлять отзыв -> показываем оффер дозакупки
+        oid = data.split(":", 1)[1]
+        with db() as c:
+            c.execute("UPDATE orders SET awaiting=NULL WHERE id=? AND awaiting='fb_text'", (oid,))
+        _send_addon_offer(chat, oid)
         return "OK"
     if data.startswith("buy:"):
         try: _, n, parent = data.split(":", 2)
@@ -1114,9 +1128,31 @@ def tg_webhook():
         if nq:
             _set_niche(nq["id"], text)
             return "OK"
-        # принимаем правку запросов не только в reviewing, но и по упавшему заказу (error); админ может и по готовому (done) — для тестов
-        admin = str(chat) == str(os.environ.get("ADMIN_CHAT_ID") or "")
-        states = ("reviewing", "error", "done") if admin else ("reviewing", "error")
+        # ОТЗЫВ и ДОЗАКУПКА имеют ПРИОРИТЕТ над правкой запросов: иначе текст отзыва
+        # принимается за новый список запросов (и готовый заказ откатывается в «согласование»).
+        with db() as c:
+            a = c.execute("SELECT * FROM orders WHERE tg_chat_id=? AND awaiting IS NOT NULL ORDER BY created DESC LIMIT 1",
+                          (str(chat),)).fetchone()
+        if a:
+            if a["awaiting"] == "fb_text":
+                with db() as c:
+                    c.execute("UPDATE orders SET feedback=?, awaiting=NULL WHERE id=?", (text, a["id"]))
+                admin_notify(f"Отзыв об отчёте\nЗаказ: {a['id']}\nБренд: {a['brand'] or ''}\n"
+                             f"Оценка: {a['rating'] if a['rating'] is not None else '—'}/5\n\n{text}")
+                tg_send_message(chat, "Спасибо за обратную связь! Учту в работе.")
+                _send_addon_offer(chat, a["id"])    # оффер дозакупки — уже ПОСЛЕ отзыва, а не вместе с просьбой о нём
+                return "OK"
+            if a["awaiting"] == "addon_queries":
+                qs = _parse_query_list(text)
+                if len(qs) >= 1:
+                    _addon_collect_queries(a["id"], qs)
+                else:
+                    n = a["qn"] or 1
+                    tg_send_message(chat, f"Пришлите запросы для проверки — каждый с новой строки (до {n}).")
+                return "OK"
+        # Подтверждение/правка запросов — ТОЛЬКО для активных наборов: согласование или повтор после ошибки.
+        # Готовые («done») заказы сюда НЕ попадают, чтобы случайный текст не откатывал «Выиграно» обратно в согласование.
+        states = ("reviewing", "error")
         ph = ",".join("?" * len(states))
         with db() as c:
             o = c.execute(f"SELECT * FROM orders WHERE tg_chat_id=? AND status IN ({ph}) ORDER BY created DESC LIMIT 1",
@@ -1135,26 +1171,6 @@ def tg_webhook():
                 else:
                     tg_send_message(chat, "Чтобы заменить запросы, пришлите их списком — каждый с новой строки. Или ответьте ОК, чтобы запустить по показанному набору.")
             return "OK"
-        # обратная связь и дозакупка
-        with db() as c:
-            a = c.execute("SELECT * FROM orders WHERE tg_chat_id=? AND awaiting IS NOT NULL ORDER BY created DESC LIMIT 1",
-                          (str(chat),)).fetchone()
-        if a:
-            if a["awaiting"] == "fb_text":
-                with db() as c:
-                    c.execute("UPDATE orders SET feedback=?, awaiting=NULL WHERE id=?", (text, a["id"]))
-                admin_notify(f"Отзыв об отчёте\nЗаказ: {a['id']}\nБренд: {a['brand'] or ''}\n"
-                             f"Оценка: {a['rating'] if a['rating'] is not None else '—'}/5\n\n{text}")
-                tg_send_message(chat, "Спасибо за обратную связь! Учту в работе.")   # оффер уже показан после оценки
-                return "OK"
-            if a["awaiting"] == "addon_queries":
-                qs = _parse_query_list(text)
-                if len(qs) >= 1:
-                    _addon_collect_queries(a["id"], qs)
-                else:
-                    n = a["qn"] or 1
-                    tg_send_message(chat, f"Пришлите запросы для проверки — каждый с новой строки (до {n}).")
-                return "OK"
         _send_menu(chat)              # нет активного заказа -> показываем меню (заказать / поддержка)
         return "OK"
     return "OK"
@@ -1419,6 +1435,28 @@ def _tg_cell(r):
         return f'<a class=tg href="tg://user?id={html.escape(cid, quote=True)}">{nm or "Профиль"}</a>'
     return '<span class=mut>—</span>'
 
+def _parse_q(val):
+    try:
+        return [str(x) for x in (json.loads(val) if val else []) if x]
+    except Exception:
+        return []
+
+def _queries_cell(r):
+    """Сворачиваемый список: что предложил бот и что клиент в итоге отправил на проверку."""
+    prop = _parse_q(r["q_proposed"]); fin = _parse_q(r["q_final"])
+    if not prop and not fin:
+        return '<span class=mut>—</span>'
+    ol = lambda items: "<ol>" + "".join(f"<li>{html.escape(x)}</li>" for x in items) + "</ol>"
+    parts = ["<b>Бот предложил</b>" + ol(prop) if prop
+             else "<span class=mut>бот не предлагал (доп. проверка)</span>"]
+    if not fin:
+        parts.append("<b>Клиент отправил</b><div class=mut>проверка ещё не запускалась</div>")
+    elif fin == prop:
+        parts.append("<b>Клиент отправил</b><div class=mut>подтвердил без изменений</div>")
+    else:
+        parts.append("<b>Клиент отправил</b>" + ol(fin))
+    return f'<details><summary>{len(fin or prop)}</summary><div class=qd>{"".join(parts)}</div></details>'
+
 @app.get("/admin")
 def admin():
     if not _admin_ok():
@@ -1472,7 +1510,8 @@ def admin():
                 f'<td><span class="st {_stcls(st)}">{_ST_RU.get(st, st)}</span></td>'
                 f'<td class=num>{"" if amt is None else amt}</td>'
                 f'<td class=em>{html.escape(_mask_email(r["email"]))}</td>'
-                f'<td class=num>{rating}</td><td class=fb>{fb}</td></tr>')
+                f'<td class=num>{rating}</td><td class=fb>{fb}</td>'
+                f'<td class=q>{_queries_cell(r)}</td></tr>')
     ranges = [("today", "Сегодня"), ("7", "7 дней"), ("30", "30 дней"), ("", "Всё время")]
     rbar = "".join(f'<a class="q{" on" if (rng==rk or (rk=="" and rng=="all")) else ""}" '
                    f'href="{_url(range=rk, **{"from":"", "to":""})}">{lbl}</a>' for rk, lbl in ranges)
@@ -1520,6 +1559,13 @@ tr:last-child td{{border-bottom:0}} tbody tr:hover td{{background:var(--hov)}}
 .b{{font-weight:600}} .dt{{white-space:nowrap;color:var(--soft)}} .num{{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}}
 .em{{color:var(--soft);white-space:nowrap}} .fb{{color:var(--soft);max-width:220px}}
 .tg{{white-space:nowrap;text-decoration:underline;text-underline-offset:2px}} .tg:hover{{color:#000}} .mut{{color:var(--mut)}}
+td.q details>summary{{cursor:pointer;font-weight:600;color:var(--ink);list-style:none}}
+td.q details>summary::-webkit-details-marker{{display:none}}
+td.q details>summary::before{{content:"▸";color:var(--mut);margin-right:4px;font-size:10px}}
+td.q details[open]>summary::before{{content:"▾"}}
+.qd{{min-width:300px;font-size:12px;line-height:1.5;color:var(--soft);padding:4px 0 2px}}
+.qd b{{display:block;color:var(--ink);margin:8px 0 2px;font-size:11px;text-transform:uppercase;letter-spacing:.04em}}
+.qd ol{{margin:0;padding-left:18px}} .qd li{{margin:1px 0}} .qd .mut{{font-style:italic}}
 .st{{display:inline-block;border-radius:20px;padding:2px 9px;font-size:11px;white-space:nowrap;border:1px solid var(--line)}}
 .s-done{{background:var(--ink);color:#fff;border-color:var(--ink)}}
 .s-err{{background:#fff;color:var(--ink);border-color:var(--ink);font-weight:600}}
@@ -1537,8 +1583,8 @@ tr:last-child td{{border-bottom:0}} tbody tr:hover td{{background:var(--hov)}}
   <span class=sep></span>
   <span class=lbl>Статус</span>{sbar}
 </div>
-<div class=wrap><table><thead><tr><th>Дата</th><th>Бренд</th><th>Telegram</th><th>Сайт</th><th>Ниша</th><th>Тип</th><th>Статус</th><th>₽</th><th>Email</th><th>Оценка</th><th>Отзыв</th></tr></thead>
-<tbody>{trs or '<tr><td colspan=11 class=empty>За выбранный период заявок нет</td></tr>'}</tbody></table></div>
+<div class=wrap><table><thead><tr><th>Дата</th><th>Бренд</th><th>Telegram</th><th>Сайт</th><th>Ниша</th><th>Тип</th><th>Статус</th><th>₽</th><th>Email</th><th>Оценка</th><th>Отзыв</th><th>Запросы</th></tr></thead>
+<tbody>{trs or '<tr><td colspan=12 class=empty>За выбранный период заявок нет</td></tr>'}</tbody></table></div>
 </body></html>"""
 
 @app.get("/admin/export.csv")
@@ -1554,14 +1600,15 @@ def admin_export():
         rows = [r for r in rows if r["status"] == flt]
     buf = io.StringIO(); w = csv.writer(buf)
     w.writerow(["id","дата","бренд","сайт","ниша","город","тип","статус","сумма","email",
-                "телеграм","telegram_id","оценка","отзыв","payment_id"])
+                "телеграм","telegram_id","оценка","отзыв","payment_id","запросы_бот","запросы_клиент"])
     for r in rows:
         dt = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["created"] or 0))
         w.writerow([r["id"], dt, r["brand"] or "", r["site"] or "", r["niche"] or "", r["city"] or "",
                     _order_kind_ru(r), r["status"] or "",
                     (_order_amount(r) if r["status"] in _PAID_STATES else 0), _mask_email(r["email"]),
                     _tg_profile(r), r["tg_chat_id"] or "", (r["rating"] if r["rating"] is not None else ""),
-                    (r["feedback"] or "").replace("\n"," "), r["payment_id"] or ""])
+                    (r["feedback"] or "").replace("\n"," "), r["payment_id"] or "",
+                    " | ".join(_parse_q(r["q_proposed"])), " | ".join(_parse_q(r["q_final"]))])
     return app.response_class(buf.getvalue(), mimetype="text/csv; charset=utf-8",
                              headers={"Content-Disposition": "attachment; filename=orders.csv"})
 

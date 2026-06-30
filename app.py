@@ -26,7 +26,7 @@ DB = os.environ.get("DB_PATH") or os.path.join(APP_DIR, "orders.db")
 REPORTS = os.environ.get("REPORTS_DIR") or os.path.join(APP_DIR, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
-VERSION = "v94"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
+VERSION = "v95"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
 TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO").strip()  # .strip() — от случайных пробелов/переноса при вставке
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
@@ -564,9 +564,6 @@ a{color:inherit;text-decoration:none}
 .ord-hint{text-align:center;color:var(--muted);font-size:13.5px;margin-top:16px;line-height:1.55;max-width:480px;margin-left:auto;margin-right:auto}
 .ord-hint a{color:var(--muted);text-decoration:underline;text-underline-offset:2px}
 .ord-form .hp{position:absolute!important;left:-9999px;width:1px;height:1px;opacity:0;overflow:hidden;pointer-events:none}
-.ord-promo{align-self:center;max-width:220px;font-size:13.5px!important;padding:10px 14px!important;border-radius:10px!important;border-width:1px!important;border-color:#E4DED3!important;color:var(--ink-soft);text-align:center}
-.ord-promo::placeholder{color:#AAA294;letter-spacing:.01em}
-.ord-promo:focus{border-color:var(--muted)!important}
 .footer{border-top:1px solid var(--line-strong);padding:26px var(--pad);display:flex;flex-wrap:wrap;gap:6px 18px;justify-content:center;text-align:center;color:var(--muted);font-size:12.5px}
 .footer a{color:var(--muted);text-decoration:underline;text-underline-offset:2px}
 .footer a:hover{color:var(--ink)}
@@ -587,7 +584,7 @@ a{color:inherit;text-decoration:none}
     <input type="text" name="city" placeholder="Город (если важен регион для поиска)" aria-label="Город">
     <input type="email" name="email" placeholder="E-mail (для чека)" aria-label="E-mail для чека" required>
     <input class="hp" type="text" name="company" tabindex="-1" autocomplete="off" aria-hidden="true">
-    <input class="ord-promo" type="text" name="promo" placeholder="Промокод (если есть)" aria-label="Промокод" autocomplete="off" maxlength="40">
+    <input type="text" name="promo" placeholder="Промокод (если есть)" aria-label="Промокод" autocomplete="off" maxlength="40">
     <button class="ord-btn" type="submit">Получить отчёт за __PRICE__ ₽ &rarr;</button>
   </form>
   <div class="ord-badges"><span><b>7</b> нейросетей</span><span><b>140</b> проверок</span><span>отчёт за <b>10 минут</b></span></div>
@@ -1421,9 +1418,13 @@ def admin():
 <meta name=viewport content="width=device-width,initial-scale=1"><meta name=robots content=noindex>
 <title>CRM · заявки</title>
 <style>
+@font-face{{font-family:"Gilroy";src:url("/fonts/Gilroy-Regular.ttf") format("truetype");font-weight:400;font-display:swap}}
+@font-face{{font-family:"Gilroy";src:url("/fonts/Gilroy-Medium.ttf") format("truetype");font-weight:500;font-display:swap}}
+@font-face{{font-family:"Gilroy";src:url("/fonts/Gilroy-Semibold.ttf") format("truetype");font-weight:600;font-display:swap}}
+@font-face{{font-family:"Gilroy";src:url("/fonts/Gilroy-Bold.ttf") format("truetype");font-weight:700;font-display:swap}}
 :root{{--ink:#111;--soft:#444;--mut:#8a8a8a;--line:#e6e6e6;--line2:#efefef;--bg:#fff;--hov:#f6f6f6}}
 *{{box-sizing:border-box}}
-body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;margin:0;background:var(--bg);color:var(--ink);padding:22px clamp(14px,3vw,30px);font-size:13px;-webkit-font-smoothing:antialiased}}
+body{{font-family:"Gilroy",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;margin:0;background:var(--bg);color:var(--ink);padding:22px clamp(14px,3vw,30px);font-size:13px;-webkit-font-smoothing:antialiased}}
 a{{color:var(--ink)}}
 .top{{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:4px}}
 h1{{font-size:18px;font-weight:700;margin:0;letter-spacing:-.01em}}

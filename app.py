@@ -16,8 +16,9 @@
   TEST_MODE=1  -> движок в мок-режиме (без ключей, для проверки)
 """
 import os, json, time, hashlib, sqlite3, threading, smtplib, ssl, urllib.request, uuid, re, traceback, html, csv, io
+from datetime import timedelta
 from email.message import EmailMessage
-from flask import Flask, request, redirect, jsonify, send_file, abort
+from flask import Flask, request, redirect, jsonify, send_file, abort, session
 
 import engine, build_report
 
@@ -26,7 +27,7 @@ DB = os.environ.get("DB_PATH") or os.path.join(APP_DIR, "orders.db")
 REPORTS = os.environ.get("REPORTS_DIR") or os.path.join(APP_DIR, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
-VERSION = "v95"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
+VERSION = "v96"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
 TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO").strip()  # .strip() — от случайных пробелов/переноса при вставке
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
@@ -39,6 +40,12 @@ def tg_bot():   return os.environ.get("TELEGRAM_BOT_USERNAME", "").lstrip("@")
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 512 * 1024     # тело запроса не больше 512 КБ — отсекаем «толстые» мусорные POST
+# вход в CRM — по паролю (см. /admin/login). Куку входа подписываем; ключ берём из env или из ADMIN_TOKEN, отдельной настройки не нужно
+app.secret_key = os.environ.get("SECRET_KEY") or hashlib.sha256(("crm-sk:" + (os.environ.get("ADMIN_TOKEN") or "dev")).encode()).hexdigest()
+app.permanent_session_lifetime = timedelta(days=14)
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = os.environ.get("BASE_URL", "").startswith("https")
 
 # ───────────── конфиг безопасности и промокодов (всё из env, секретов в коде нет) ─────────────
 SITE_ORIGIN = "https://annakurbatova.ru"                                               # внешний домен (стили/иконки на странице «спасибо»)
@@ -1238,8 +1245,68 @@ _ST_COLOR = {"done":"#2E8B57","error":"#C13525","processing":"#C9791A","reviewin
 _PAID_STATES = {"paid","preparing","reviewing","await_niche","await_queries","processing","done","error"}
 
 def _admin_ok():
-    token = os.environ.get("ADMIN_TOKEN")
+    if session.get("admin"):                                         # вошёл по паролю (кука)
+        return True
+    token = os.environ.get("ADMIN_TOKEN")                            # либо прямой доступ по токену в ссылке (для CSV/закладок)
     return bool(token) and request.args.get("key") == token
+
+def _login_html(err=""):
+    err_html = f'<div class=err>{html.escape(err)}</div>' if err else ""
+    return f"""<!doctype html><html lang=ru><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1"><meta name=robots content=noindex>
+<title>Вход в CRM</title>
+<style>
+@font-face{{font-family:"Gilroy";src:url("/fonts/Gilroy-Regular.ttf") format("truetype");font-weight:400;font-display:swap}}
+@font-face{{font-family:"Gilroy";src:url("/fonts/Gilroy-Medium.ttf") format("truetype");font-weight:500;font-display:swap}}
+@font-face{{font-family:"Gilroy";src:url("/fonts/Gilroy-Semibold.ttf") format("truetype");font-weight:600;font-display:swap}}
+@font-face{{font-family:"Gilroy";src:url("/fonts/Gilroy-Bold.ttf") format("truetype");font-weight:700;font-display:swap}}
+*{{box-sizing:border-box}}
+body{{font-family:"Gilroy",-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;min-height:100vh;display:flex;
+  align-items:center;justify-content:center;background:#fff;color:#111;padding:20px}}
+.card{{width:100%;max-width:340px;border:1px solid #e6e6e6;border-radius:16px;padding:30px 26px}}
+h1{{font-size:19px;margin:0 0 4px;letter-spacing:-.01em}}
+.sub{{color:#8a8a8a;font-size:13px;margin:0 0 20px}}
+label{{display:block;font-size:12px;color:#8a8a8a;margin:0 0 6px;text-transform:uppercase;letter-spacing:.05em}}
+input{{width:100%;border:1px solid #d9d9d9;border-radius:10px;padding:13px 14px;font:inherit;font-size:16px;color:#111;outline:0}}
+input:focus{{border-color:#111}}
+button{{width:100%;margin-top:14px;border:0;border-radius:10px;padding:14px;background:#111;color:#fff;
+  font:inherit;font-size:15px;font-weight:600;cursor:pointer}}
+button:hover{{background:#000}}
+.err{{background:#f5f5f5;border:1px solid #e0e0e0;color:#111;border-radius:9px;padding:9px 12px;font-size:13px;margin-bottom:14px}}
+</style></head><body>
+<form class=card method=post action="/admin/login">
+  <h1>CRM · вход</h1>
+  <div class=sub>Заявки и клиенты сервиса AI-видимости</div>
+  {err_html}
+  <label for=pw>Пароль</label>
+  <input id=pw type=password name=password autocomplete=current-password autofocus required>
+  <button type=submit>Войти</button>
+</form>
+</body></html>"""
+
+@app.get("/admin/login")
+def admin_login_form():
+    if session.get("admin"):
+        return redirect("/admin")
+    return _login_html()
+
+@app.post("/admin/login")
+def admin_login():
+    if not rate_ok(f"login:{client_ip()}", 8, 300):                  # не больше 8 попыток за 5 минут с одного IP
+        return _login_html("Слишком много попыток. Подождите пару минут."), 429
+    token = (os.environ.get("ADMIN_TOKEN") or "").strip()
+    pw = (request.form.get("password") or "").strip()
+    if token and pw == token:
+        session["admin"] = True; session.permanent = True
+        return redirect("/admin")
+    if not token:
+        return _login_html("На сервере не задан ADMIN_TOKEN — впишите его в переменные окружения."), 401
+    return _login_html("Неверный пароль."), 401
+
+@app.get("/admin/logout")
+def admin_logout():
+    session.pop("admin", None)
+    return redirect("/admin/login")
 
 def _order_amount(r):
     try:
@@ -1355,7 +1422,7 @@ def _tg_cell(r):
 @app.get("/admin")
 def admin():
     if not _admin_ok():
-        abort(403)
+        return redirect("/admin/login")
     flt = (request.args.get("status") or "").strip()
     lo, hi, frm, to, rng = _admin_range()
     with db() as c:
@@ -1429,6 +1496,7 @@ a{{color:var(--ink)}}
 .top{{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:4px}}
 h1{{font-size:18px;font-weight:700;margin:0;letter-spacing:-.01em}}
 .sub{{color:var(--mut);font-size:12px;margin:2px 0 16px}}
+.acts{{display:flex;gap:8px;flex-shrink:0}}
 .csv{{font-size:12px;font-weight:600;border:1px solid var(--ink);border-radius:7px;padding:7px 12px;text-decoration:none;white-space:nowrap}}
 .csv:hover{{background:var(--ink);color:#fff}}
 .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:9px;margin-bottom:18px}}
@@ -1458,7 +1526,7 @@ tr:last-child td{{border-bottom:0}} tbody tr:hover td{{background:var(--hov)}}
 .s-mid{{background:#ececec;color:#333}} .s-new{{background:#f5f5f5;color:#8a8a8a}}
 .empty{{padding:30px;text-align:center;color:var(--mut)}}
 </style></head><body>
-<div class=top><h1>CRM · заявки и клиенты</h1><a class=csv href="/admin/export.csv{_url()}">Скачать CSV</a></div>
+<div class=top><h1>CRM · заявки и клиенты</h1><div class=acts><a class=csv href="/admin/export.csv{_url()}">Скачать CSV</a><a class=csv href="/admin/logout">Выйти</a></div></div>
 <div class=sub>Период: {period} · показано {len(show)} из {len(rows)}</div>
 <div class=cards>{cardhtml}</div>
 <div class=filters>
@@ -1476,7 +1544,7 @@ tr:last-child td{{border-bottom:0}} tbody tr:hover td{{background:var(--hov)}}
 @app.get("/admin/export.csv")
 def admin_export():
     if not _admin_ok():
-        abort(403)
+        return redirect("/admin/login")
     lo, hi, frm, to, rng = _admin_range()                                       # та же фильтрация по датам, что и в CRM
     flt = (request.args.get("status") or "").strip()
     with db() as c:

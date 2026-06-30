@@ -27,7 +27,7 @@ DB = os.environ.get("DB_PATH") or os.path.join(APP_DIR, "orders.db")
 REPORTS = os.environ.get("REPORTS_DIR") or os.path.join(APP_DIR, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
-VERSION = "v103"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
+VERSION = "v104"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
 TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO").strip()  # .strip() — от случайных пробелов/переноса при вставке
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
@@ -1522,11 +1522,11 @@ _ADMIN_JS = r"""
     var DEF=chks.filter(function(c){return c.defaultChecked;}).map(function(c){return c.value;});
     function applyCols(vis){ chks.forEach(function(c){ var on=vis.indexOf(c.value)>=0;
       document.querySelectorAll('.c-'+c.value).forEach(function(el){ el.style.display=on?'':'none'; }); }); }
-    function getVis(){ try{var v=JSON.parse(localStorage.getItem('crm_cols')); if(Array.isArray(v)&&v.length) return v;}catch(e){} return DEF; }
+    function getVis(){ try{var v=JSON.parse(localStorage.getItem('crm_cols2')); if(Array.isArray(v)&&v.length) return v;}catch(e){} return DEF; }
     var vis=getVis();
     chks.forEach(function(c){ c.checked=vis.indexOf(c.value)>=0; c.addEventListener('change',function(){
       var v=chks.filter(function(x){return x.checked;}).map(function(x){return x.value;});
-      try{localStorage.setItem('crm_cols',JSON.stringify(v));}catch(e){} applyCols(v); }); });
+      try{localStorage.setItem('crm_cols2',JSON.stringify(v));}catch(e){} applyCols(v); }); });
     applyCols(vis);
     var cbtn=document.getElementById('colbtn'), cpan=document.getElementById('colpan');
     if(cbtn&&cpan){
@@ -1558,10 +1558,12 @@ def admin():
         return "?" + "&".join(f"{k}={html.escape(str(v), quote=True)}" for k, v in p.items())
     paid = [r for r in rows if _is_revenue(r)]
     revenue = sum(_order_amount(r) for r in paid)
+    deals_sum = sum((r["deal_amount"] or 0) for r in rows)                       # сумма сделок за период (заполняется вручную в карточке)
     rated = [r["rating"] for r in rows if r["rating"] is not None]
     avg = round(sum(rated) / len(rated), 1) if rated else "—"
     cards = [("Заявок", len(rows)), ("Оплачено", len(paid)),
              ("Выручка, ₽", f"{revenue:,}".replace(",", " ")),
+             ("Сумма сделок, ₽", f"{deals_sum:,}".replace(",", " ")),
              ("Выиграно", sum(1 for r in rows if r["status"] == "done")),
              ("Ошибок", sum(1 for r in rows if r["status"] == "error")),
              ("Промо/тест", sum(1 for r in rows if (r["promo"] or ""))),
@@ -1643,7 +1645,7 @@ def admin():
     # колонки списка: (id, заголовок, показывать по умолчанию). Контактные поля по умолчанию скрыты — включаются галочкой.
     COLS = [("date","Дата",1),("brand","Бренд / имя",1),("tg","Telegram",1),("site","Сайт",1),("niche","Ниша",1),
             ("kind","Тип",1),("status","Статус",1),("report","Отчёт",1),("amount","₽ отчёт",1),("email","Email",1),
-            ("phone","Телефон",0),("address","Адрес",0),("product","Продукт",0),("deal","Сделка ₽",0),
+            ("phone","Телефон",0),("address","Адрес",0),("product","Продукт",0),("deal","Сделка ₽",1),
             ("rating","Оценка",1),("fb","Отзыв",1),("comment","Коммент",0),("queries","Запросы",1)]
     thead = "".join(f'<th class=c-{cid}>{lbl}</th>' for cid, lbl, _ in COLS)
     colchecks = "".join(f'<label class=colc><input type=checkbox class=colchk value="{cid}"'

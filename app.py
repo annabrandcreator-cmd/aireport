@@ -26,7 +26,7 @@ DB = os.environ.get("DB_PATH") or os.path.join(APP_DIR, "orders.db")
 REPORTS = os.environ.get("REPORTS_DIR") or os.path.join(APP_DIR, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
-VERSION = "v93"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
+VERSION = "v94"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
 TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO").strip()  # .strip() — от случайных пробелов/переноса при вставке
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
@@ -133,7 +133,7 @@ def init_db():
             c.execute("ALTER TABLE orders ADD COLUMN prep TEXT")   # JSON: запросы + контекст для подтверждения
         for col, ddl in [("rating","INTEGER"),("feedback","TEXT"),("awaiting","TEXT"),
                          ("kind","TEXT"),("parent","TEXT"),("qn","INTEGER"),("amount","INTEGER"),("err","TEXT"),
-                         ("promo","TEXT")]:
+                         ("promo","TEXT"),("tg_username","TEXT"),("tg_name","TEXT")]:
             if col not in cols:
                 c.execute(f"ALTER TABLE orders ADD COLUMN {col} {ddl}")
 init_db()
@@ -1025,6 +1025,16 @@ def tg_webhook():
     text = (msg.get("text") or "").strip()
     if not chat:
         return "OK"
+    frm = msg.get("from") or {}; chobj = msg.get("chat") or {}        # профиль клиента из телеграма (для CRM)
+    tg_uname = (frm.get("username") or chobj.get("username") or "").strip().lstrip("@")[:64]
+    tg_nm = " ".join(x for x in [frm.get("first_name") or chobj.get("first_name"),
+                                 frm.get("last_name") or chobj.get("last_name")] if x).strip()[:120]
+    if tg_uname or tg_nm:                                             # дописываем профиль во все заказы этого чата, где он пуст
+        try:
+            with db() as c:
+                c.execute("UPDATE orders SET tg_username=COALESCE(NULLIF(?,''),tg_username), "
+                          "tg_name=COALESCE(NULLIF(?,''),tg_name) WHERE tg_chat_id=?", (tg_uname, tg_nm, str(chat)))
+        except Exception: pass
     if text.startswith("/start"):
         parts = text.split(maxsplit=1)
         oid = parts[1].strip() if len(parts) > 1 else ""
@@ -1033,7 +1043,8 @@ def tg_webhook():
                 o = c.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
             if o:
                 with db() as c:
-                    c.execute("UPDATE orders SET tg_chat_id=? WHERE id=?", (str(chat), oid))
+                    c.execute("UPDATE orders SET tg_chat_id=?, tg_username=COALESCE(NULLIF(?,''),tg_username), "
+                              "tg_name=COALESCE(NULLIF(?,''),tg_name) WHERE id=?", (str(chat), tg_uname, tg_nm, oid))
                 st = o["status"]
                 if st == "done" and o["pdf"] and os.path.exists(o["pdf"]):
                     try: tg_send_report(chat, o["pdf"], o)
@@ -1221,9 +1232,9 @@ def selftest():
     return jsonify(prompt=prompt, test_mode=os.environ.get("TEST_MODE") == "1", engines=out)
 
 # ───────────────────────── мини-CRM (заказы и клиенты) ───────────────
-_ST_RU = {"new":"новый","pending":"ожидает оплаты","paid":"оплачен","preparing":"готовлю запросы",
-          "reviewing":"подтверждение","await_niche":"жду нишу","await_queries":"жду запросы",
-          "processing":"генерация","done":"готов","error":"ошибка"}
+_ST_RU = {"new":"Новая заявка","pending":"Ожидает оплаты","paid":"Оплачено","preparing":"В работе",
+          "reviewing":"Согласование","await_niche":"Уточнение ниши","await_queries":"Ожидание запросов",
+          "processing":"Генерация отчёта","done":"Выиграно","error":"Ошибка"}
 _ST_COLOR = {"done":"#2E8B57","error":"#C13525","processing":"#C9791A","reviewing":"#C9791A",
              "await_niche":"#C9791A","await_queries":"#C9791A","paid":"#2D5AA0","preparing":"#2D5AA0",
              "pending":"#8a8a8a","new":"#8a8a8a"}
@@ -1322,6 +1333,28 @@ def _order_kind_ru(r):
 def _is_revenue(r):
     return r["status"] in _PAID_STATES and not (r["promo"] or "")               # промо/тест в выручку не идёт
 
+def _tg_profile(r):
+    """Текстовое представление телеграм-профиля клиента (для CSV)."""
+    u = (r["tg_username"] or "").strip().lstrip("@")
+    nm = (r["tg_name"] or "").strip()
+    cid = (r["tg_chat_id"] or "").strip()
+    parts = [nm] if nm else []
+    if u: parts.append("@" + u)
+    elif cid: parts.append("id" + cid)
+    return " · ".join(parts)
+
+def _tg_cell(r):
+    """Кликабельный профиль клиента в Telegram для CRM: имя + @username (ссылка на чат)."""
+    u = (r["tg_username"] or "").strip().lstrip("@")
+    nm = html.escape((r["tg_name"] or "").strip())
+    cid = (r["tg_chat_id"] or "").strip()
+    if u:
+        label = f"{nm} · @{html.escape(u)}" if nm else "@" + html.escape(u)
+        return f'<a class=tg href="https://t.me/{html.escape(u, quote=True)}" target=_blank rel=noopener>{label}</a>'
+    if cid:                                                                      # без username — открываем профиль по id (Telegram Desktop)
+        return f'<a class=tg href="tg://user?id={html.escape(cid, quote=True)}">{nm or "Профиль"}</a>'
+    return '<span class=mut>—</span>'
+
 @app.get("/admin")
 def admin():
     if not _admin_ok():
@@ -1346,7 +1379,7 @@ def admin():
     avg = round(sum(rated) / len(rated), 1) if rated else "—"
     cards = [("Заявок", len(rows)), ("Оплачено", len(paid)),
              ("Выручка, ₽", f"{revenue:,}".replace(",", " ")),
-             ("Готово", sum(1 for r in rows if r["status"] == "done")),
+             ("Выиграно", sum(1 for r in rows if r["status"] == "done")),
              ("Ошибок", sum(1 for r in rows if r["status"] == "error")),
              ("Промо/тест", sum(1 for r in rows if (r["promo"] or ""))),
              ("Ср. оценка", avg)]
@@ -1369,6 +1402,7 @@ def admin():
         rating = f'{r["rating"]}/5' if r["rating"] is not None else ""
         fb = html.escape((r["feedback"] or "")[:120])
         trs += (f'<tr><td class=dt>{dt}</td><td class=b>{html.escape(r["brand"] or "")}</td>'
+                f'<td>{_tg_cell(r)}</td>'
                 f'<td>{site_cell}</td><td>{html.escape((r["niche"] or "")[:44])}</td>'
                 f'<td>{_order_kind_ru(r)}</td>'
                 f'<td><span class="st {_stcls(st)}">{_ST_RU.get(st, st)}</span></td>'
@@ -1415,7 +1449,8 @@ th,td{{text-align:left;padding:9px 11px;border-bottom:1px solid var(--line2);ver
 th{{color:var(--mut);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em;position:sticky;top:0;background:#fafafa}}
 tr:last-child td{{border-bottom:0}} tbody tr:hover td{{background:var(--hov)}}
 .b{{font-weight:600}} .dt{{white-space:nowrap;color:var(--soft)}} .num{{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}}
-.em{{color:var(--soft);white-space:nowrap}} .fb{{color:var(--soft);max-width:230px}}
+.em{{color:var(--soft);white-space:nowrap}} .fb{{color:var(--soft);max-width:220px}}
+.tg{{white-space:nowrap;text-decoration:underline;text-underline-offset:2px}} .tg:hover{{color:#000}} .mut{{color:var(--mut)}}
 .st{{display:inline-block;border-radius:20px;padding:2px 9px;font-size:11px;white-space:nowrap;border:1px solid var(--line)}}
 .s-done{{background:var(--ink);color:#fff;border-color:var(--ink)}}
 .s-err{{background:#fff;color:var(--ink);border-color:var(--ink);font-weight:600}}
@@ -1433,8 +1468,8 @@ tr:last-child td{{border-bottom:0}} tbody tr:hover td{{background:var(--hov)}}
   <span class=sep></span>
   <span class=lbl>Статус</span>{sbar}
 </div>
-<div class=wrap><table><thead><tr><th>Дата</th><th>Бренд</th><th>Сайт</th><th>Ниша</th><th>Тип</th><th>Статус</th><th>₽</th><th>Email</th><th>Оценка</th><th>Отзыв</th></tr></thead>
-<tbody>{trs or '<tr><td colspan=10 class=empty>За выбранный период заявок нет</td></tr>'}</tbody></table></div>
+<div class=wrap><table><thead><tr><th>Дата</th><th>Бренд</th><th>Telegram</th><th>Сайт</th><th>Ниша</th><th>Тип</th><th>Статус</th><th>₽</th><th>Email</th><th>Оценка</th><th>Отзыв</th></tr></thead>
+<tbody>{trs or '<tr><td colspan=11 class=empty>За выбранный период заявок нет</td></tr>'}</tbody></table></div>
 </body></html>"""
 
 @app.get("/admin/export.csv")
@@ -1449,13 +1484,14 @@ def admin_export():
     if flt:
         rows = [r for r in rows if r["status"] == flt]
     buf = io.StringIO(); w = csv.writer(buf)
-    w.writerow(["id","дата","бренд","сайт","ниша","город","тип","статус","сумма","email","telegram","оценка","отзыв","payment_id"])
+    w.writerow(["id","дата","бренд","сайт","ниша","город","тип","статус","сумма","email",
+                "телеграм","telegram_id","оценка","отзыв","payment_id"])
     for r in rows:
         dt = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["created"] or 0))
         w.writerow([r["id"], dt, r["brand"] or "", r["site"] or "", r["niche"] or "", r["city"] or "",
                     _order_kind_ru(r), r["status"] or "",
                     (_order_amount(r) if r["status"] in _PAID_STATES else 0), _mask_email(r["email"]),
-                    r["tg_chat_id"] or "", (r["rating"] if r["rating"] is not None else ""),
+                    _tg_profile(r), r["tg_chat_id"] or "", (r["rating"] if r["rating"] is not None else ""),
                     (r["feedback"] or "").replace("\n"," "), r["payment_id"] or ""])
     return app.response_class(buf.getvalue(), mimetype="text/csv; charset=utf-8",
                              headers={"Content-Disposition": "attachment; filename=orders.csv"})

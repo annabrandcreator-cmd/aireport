@@ -26,7 +26,7 @@ DB = os.environ.get("DB_PATH") or os.path.join(APP_DIR, "orders.db")
 REPORTS = os.environ.get("REPORTS_DIR") or os.path.join(APP_DIR, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
-VERSION = "v92"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
+VERSION = "v93"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
 TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO").strip()  # .strip() — от случайных пробелов/переноса при вставке
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
@@ -38,6 +38,76 @@ def tg_token(): return os.environ.get("TELEGRAM_BOT_TOKEN", "")            # ч�
 def tg_bot():   return os.environ.get("TELEGRAM_BOT_USERNAME", "").lstrip("@")
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 512 * 1024     # тело запроса не больше 512 КБ — отсекаем «толстые» мусорные POST
+
+# ───────────── конфиг безопасности и промокодов (всё из env, секретов в коде нет) ─────────────
+SITE_ORIGIN = "https://annakurbatova.ru"                                               # внешний домен (стили/иконки на странице «спасибо»)
+PROMO_FREE_CODE = (os.environ.get("PROMO_FREE_CODE", "ascend") or "").strip().lower()   # промокод 100% скидки (для тестов); меняется через env
+PROMO_FREE_DAILY_MAX = int(os.environ.get("PROMO_FREE_DAILY_MAX", "25") or 25)          # потолок бесплатных заказов в сутки — страховка, если код утечёт
+TG_WEBHOOK_SECRET = os.environ.get("TG_WEBHOOK_SECRET", "").strip()                     # секрет телеграм-вебхука: задан -> проверяем заголовок
+RATE_LIMIT_OFF = os.environ.get("RATE_LIMIT_OFF") == "1"                                # аварийный выключатель лимитов
+
+_RL = {}; _RL_LOCK = threading.Lock()                                                   # простой счётчик частоты запросов (в памяти воркера)
+def rate_ok(key, limit, per_sec):
+    """True, пока для ключа (обычно IP+маршрут) не превышен лимит за окно per_sec секунд."""
+    if RATE_LIMIT_OFF:
+        return True
+    now = time.time(); cutoff = now - per_sec
+    with _RL_LOCK:
+        q = _RL.setdefault(key, [])
+        while q and q[0] < cutoff:
+            q.pop(0)
+        if len(q) >= limit:
+            return False
+        q.append(now)
+        if len(_RL) > 5000:                                                             # лёгкая уборка, чтобы словарь не рос
+            for k in [k for k, v in list(_RL.items()) if not v or v[-1] < cutoff]:
+                _RL.pop(k, None)
+        return True
+
+def client_ip():
+    """IP клиента за прокси (Railway/Caddy): первый из X-Forwarded-For, иначе remote_addr."""
+    xff = request.headers.get("X-Forwarded-For", "")
+    return (xff.split(",")[0].strip() if xff else "") or (request.remote_addr or "?")
+
+def _mask_email(e):
+    """a***@mail.ru — почту клиента в наших интерфейсах целиком не показываем (персональные данные)."""
+    e = (e or "").strip()
+    if "@" not in e:
+        return ""
+    name, dom = e.split("@", 1)
+    return ((name[0] + "***") if name else "***") + "@" + dom
+
+_EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}\.[A-Za-z]{2,24}$")
+def _valid_email(e):
+    return bool(_EMAIL_RE.match((e or "").strip()))
+
+@app.after_request
+def _security_headers(resp):
+    """Базовые заголовки безопасности на каждый ответ (п.4 чек-листа)."""
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    resp.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+    resp.headers.setdefault("Content-Security-Policy",
+        "default-src 'self'; "
+        f"img-src 'self' data: {SITE_ORIGIN}; "
+        f"style-src 'self' 'unsafe-inline' {SITE_ORIGIN}; "
+        "script-src 'self' 'unsafe-inline'; "
+        f"font-src 'self' data: {SITE_ORIGIN}; "
+        "connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'self'")
+    if request.headers.get("X-Forwarded-Proto") == "https" or request.is_secure:
+        resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return resp
+
+@app.errorhandler(Exception)
+def _on_error(e):
+    """Клиенту — нейтральное сообщение, подробности только в лог сервера (п.11 чек-листа)."""
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return e                                       # 403/404/405 и т.п. отдаём как есть
+    print("[error]", repr(e), flush=True)
+    return err_page("Что-то пошло не так. Попробуйте ещё раз или напишите нам.", 500)
 
 # ───────────────────────── хранилище заказов ─────────────────────────
 def db():
@@ -62,7 +132,8 @@ def init_db():
         if "prep" not in cols:
             c.execute("ALTER TABLE orders ADD COLUMN prep TEXT")   # JSON: запросы + контекст для подтверждения
         for col, ddl in [("rating","INTEGER"),("feedback","TEXT"),("awaiting","TEXT"),
-                         ("kind","TEXT"),("parent","TEXT"),("qn","INTEGER"),("amount","INTEGER"),("err","TEXT")]:
+                         ("kind","TEXT"),("parent","TEXT"),("qn","INTEGER"),("amount","INTEGER"),("err","TEXT"),
+                         ("promo","TEXT")]:
             if col not in cols:
                 c.execute(f"ALTER TABLE orders ADD COLUMN {col} {ddl}")
 init_db()
@@ -491,6 +562,11 @@ a{color:inherit;text-decoration:none}
 .ord-badges span{display:inline-flex;align-items:center;gap:7px}
 .ord-badges b{color:var(--ink);font-weight:600}
 .ord-hint{text-align:center;color:var(--muted);font-size:13.5px;margin-top:16px;line-height:1.55;max-width:480px;margin-left:auto;margin-right:auto}
+.ord-hint a{color:var(--muted);text-decoration:underline;text-underline-offset:2px}
+.ord-form .hp{position:absolute!important;left:-9999px;width:1px;height:1px;opacity:0;overflow:hidden;pointer-events:none}
+.ord-promo{align-self:center;max-width:220px;font-size:13.5px!important;padding:10px 14px!important;border-radius:10px!important;border-width:1px!important;border-color:#E4DED3!important;color:var(--ink-soft);text-align:center}
+.ord-promo::placeholder{color:#AAA294;letter-spacing:.01em}
+.ord-promo:focus{border-color:var(--muted)!important}
 .footer{border-top:1px solid var(--line-strong);padding:26px var(--pad);display:flex;flex-wrap:wrap;gap:6px 18px;justify-content:center;text-align:center;color:var(--muted);font-size:12.5px}
 .footer a{color:var(--muted);text-decoration:underline;text-underline-offset:2px}
 .footer a:hover{color:var(--ink)}
@@ -510,10 +586,12 @@ a{color:inherit;text-decoration:none}
     <input type="text" name="niche" placeholder="Чем занимаетесь — напр. стоматология" aria-label="Чем занимаетесь" required>
     <input type="text" name="city" placeholder="Город (если важен регион для поиска)" aria-label="Город">
     <input type="email" name="email" placeholder="E-mail (для чека)" aria-label="E-mail для чека" required>
+    <input class="hp" type="text" name="company" tabindex="-1" autocomplete="off" aria-hidden="true">
+    <input class="ord-promo" type="text" name="promo" placeholder="Промокод (если есть)" aria-label="Промокод" autocomplete="off" maxlength="40">
     <button class="ord-btn" type="submit">Получить отчёт за __PRICE__ ₽ &rarr;</button>
   </form>
   <div class="ord-badges"><span><b>7</b> нейросетей</span><span><b>140</b> проверок</span><span>отчёт за <b>10 минут</b></span></div>
-  <div class="ord-hint">Оплата картой или СБП. После оплаты — переход в Telegram-бот за отчётом. Чек придёт на указанный e-mail.</div>
+  <div class="ord-hint">Оплата картой или СБП. После оплаты — переход в Telegram-бот за отчётом. Чек придёт на указанный e-mail.<br>Нажимая кнопку, вы соглашаетесь с <a href="https://annakurbatova.ru/privacy.html" target="_blank" rel="noopener">политикой конфиденциальности</a>.</div>
 </div></main>
 <footer class="footer">
   <span>© 2026 Анна Курбатова</span><span>ИНН 504508244657</span>
@@ -648,22 +726,43 @@ def fonts(fn):                                                # отдаём ш�
 
 @app.post("/create-payment")
 def create_payment():
+    if not rate_ok(f"cp:{client_ip()}", 6, 120):                      # не больше 6 заявок за 2 минуты с одного IP
+        return err_page("Слишком много попыток подряд. Подождите минуту и попробуйте снова.", 429)
     f = request.get_json(force=True, silent=True) or request.form
-    site = (f.get("site") or "").strip()
-    email = (f.get("email") or "").strip()     # опционально, как резерв
-    niche = (f.get("niche") or "").strip()
-    if not site or "." not in site:
+    if (f.get("company") or "").strip():                              # honeypot: настоящий клиент это скрытое поле не видит -> заполнил бот
+        return redirect("/", code=302)                               # тихо уводим, заказ не создаём
+    site = (f.get("site") or "").strip()[:200]
+    email = (f.get("email") or "").strip()[:200]
+    niche = (f.get("niche") or "").strip()[:200]
+    city = (f.get("city") or "").strip()[:100]
+    promo = (f.get("promo") or "").strip()[:40]
+    if not site or "." not in site or len(site) < 4:
         return err_page("Укажите корректный адрес сайта.", 400)
-    brand = (f.get("brand") or "").strip() or engine._host(site)
-    short = (f.get("brand_short") or "").strip() or re.sub(r"[«»\"']", "", brand).split(",")[0]
+    if not _valid_email(email):                                      # чек по 54-ФЗ уходит на эту почту -> она должна быть валидной
+        return err_page("Укажите корректный e-mail — на него придёт чек.", 400)
+    if not niche:
+        return err_page("Коротко укажите, чем вы занимаетесь.", 400)
+    brand = ((f.get("brand") or "").strip() or engine._host(site))[:200]
+    short = ((f.get("brand_short") or "").strip() or re.sub(r"[«»\"']", "", brand).split(",")[0])[:200]
+    # промокод 100% скидки: заказ становится бесплатным (для тестов). Защита от утечки — суточный лимит.
+    free = bool(promo) and PROMO_FREE_CODE and promo.lower() == PROMO_FREE_CODE
+    if free:
+        since = time.time() - 86400
+        with db() as c:
+            used = c.execute("SELECT COUNT(*) FROM orders WHERE promo IS NOT NULL AND promo<>'' AND created>=?",
+                             (since,)).fetchone()[0]
+        if used >= PROMO_FREE_DAILY_MAX:
+            free = False                                            # суточный лимит бесплатных исчерпан -> обычная оплата
     order_id = uuid.uuid4().hex[:16]
     with db() as c:
-        c.execute("INSERT INTO orders(id,created,status,brand,brand_short,site,niche,city,email) VALUES(?,?,?,?,?,?,?,?,?)",
-                  (order_id, time.time(), "new", brand, short, site, niche, (f.get("city") or "").strip(), email))
+        c.execute("INSERT INTO orders(id,created,status,brand,brand_short,site,niche,city,email,amount,promo) "
+                  "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                  (order_id, time.time(), "new", brand, short, site, niche, city, email,
+                   (0 if free else None), (PROMO_FREE_CODE if free else None)))
     bot = tg_bot()
     if not bot:
         return err_page("Сервис временно недоступен, напишите нам в Telegram.", 503)
-    # Ведём клиента в бот: там он жмёт Старт, получает кнопку оплаты, а после оплаты отчёт приходит в чат сам.
+    # Ведём клиента в бот: там он жмёт Старт. Платный заказ -> кнопка оплаты; бесплатный по промо -> сразу к отчёту.
     link = f"https://t.me/{bot}?start={order_id}"
     if request.is_json:
         return jsonify(redirect=link, orderId=order_id)
@@ -914,6 +1013,10 @@ def _handle_callback(cq):
 
 @app.post("/telegram/webhook")
 def tg_webhook():
+    if TG_WEBHOOK_SECRET and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != TG_WEBHOOK_SECRET:
+        abort(403)                                                   # секрет задан, но не совпал -> чужой запрос
+    if not rate_ok(f"tw:{client_ip()}", 120, 60):
+        return "OK"                                                  # перебор частоты -> молча игнорируем, Телеграму не ошибаемся
     upd = request.get_json(force=True, silent=True) or {}
     if upd.get("callback_query"):
         return _handle_callback(upd["callback_query"])
@@ -958,6 +1061,9 @@ def tg_webhook():
                     else:
                         tg_send_buttons(chat, "Прошлая проверка не завершилась. Отправьте проблему в поддержку — мы увидим и поможем вручную.",
                                         [[{"text": "✉️ Сообщить о проблеме в поддержку", "callback_data": f"problem:{oid}"}]])
+                elif st == "new" and (o["promo"] or ""):   # бесплатный заказ по промокоду -> без оплаты сразу к отчёту
+                    tg_send_message(chat, "Промокод принят, проверка бесплатна. Готовлю запросы — пришлю их сюда на подтверждение.")
+                    _on_payment_confirmed(oid, src="promo")
                 elif st == "new":       # создаём платёж и шлём кнопку оплаты прямо в чат
                     try:
                         res = tbank_init(oid, o["email"])
@@ -1091,10 +1197,12 @@ def health():
 @app.get("/selftest")
 def selftest():
     """Диагностика: 1 запрос на каждую ПОДКЛЮЧЁННУЮ нейросеть, показывает ответ или ошибку.
-    Стоит копейки (по 1 короткому запросу). Если задан SELFTEST_TOKEN — требуем ?token=."""
-    tok = os.environ.get("SELFTEST_TOKEN")
-    if tok and request.args.get("token") != tok:
+    Дёргает платные API, поэтому ВСЕГДА под токеном: ?token=<SELFTEST_TOKEN или ADMIN_TOKEN>."""
+    tok = (os.environ.get("SELFTEST_TOKEN") or os.environ.get("ADMIN_TOKEN") or "").strip()
+    if not tok or request.args.get("token") != tok:                  # нет токена в env или не совпал -> закрыто
         abort(403)
+    if not rate_ok(f"st:{client_ip()}", 6, 60):
+        abort(429)
     niche = request.args.get("niche", "мебель на заказ")
     city = request.args.get("city", "")
     prompt = engine.generate_queries(niche, city)[0]["q"]
@@ -1126,7 +1234,10 @@ def _admin_ok():
     return bool(token) and request.args.get("key") == token
 
 def _order_amount(r):
-    try: return r["amount"] or (PRICE if (r["kind"] or "main") == "main" else 0)
+    try:
+        a = r["amount"]
+        if a is not None: return a                       # явная сумма (в т.ч. 0 для бесплатного промо) уважается
+        return PRICE if (r["kind"] or "main") == "main" else 0
     except Exception: return PRICE
 
 @app.get("/tbank/selftest")
@@ -1185,75 +1296,168 @@ def tbank_refund():
                    error_code=res.get("ErrorCode"), message=res.get("Message"),
                    status=res.get("Status"), details=res.get("Details")), 200
 
+def _admin_range():
+    """Диапазон дат для CRM. Возвращает (lo_ts, hi_ts, frm, to, rng). Пусто -> всё время."""
+    rng = (request.args.get("range") or "").strip()
+    frm = (request.args.get("from") or "").strip()
+    to  = (request.args.get("to") or "").strip()
+    now = time.time()
+    if rng in ("today", "7", "30"):
+        lo = (time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d")) if rng == "today"
+              else now - int(rng) * 86400)
+        return lo, now + 1, "", "", rng
+    lo, hi = 0.0, now + 1
+    try:
+        if frm: lo = time.mktime(time.strptime(frm, "%Y-%m-%d"))
+    except Exception: frm = ""
+    try:
+        if to: hi = time.mktime(time.strptime(to, "%Y-%m-%d")) + 86400          # день «to» включительно
+    except Exception: to = ""
+    return lo, hi, frm, to, ("custom" if (frm or to) else "all")
+
+def _order_kind_ru(r):
+    if r["promo"] or "": return "промо"
+    return "доп" if (r["kind"] or "main") == "addon" else "основной"
+
+def _is_revenue(r):
+    return r["status"] in _PAID_STATES and not (r["promo"] or "")               # промо/тест в выручку не идёт
+
 @app.get("/admin")
 def admin():
     if not _admin_ok():
         abort(403)
     flt = (request.args.get("status") or "").strip()
+    lo, hi, frm, to, rng = _admin_range()
     with db() as c:
-        rows = c.execute("SELECT * FROM orders ORDER BY created DESC LIMIT 500").fetchall()
-    paid = [r for r in rows if r["status"] in _PAID_STATES]
+        rows = c.execute("SELECT * FROM orders WHERE created>=? AND created<? ORDER BY created DESC LIMIT 3000",
+                         (lo, hi)).fetchall()
+    key = html.escape(request.args.get("key") or "")
+    def _url(**over):                                                            # ссылка с сохранением текущих параметров
+        p = {"key": request.args.get("key") or ""}
+        for k in ("range", "from", "to", "status"):
+            v = request.args.get(k)
+            if v: p[k] = v
+        p.update(over)
+        p = {k: v for k, v in p.items() if v not in ("", None)}
+        return "?" + "&".join(f"{k}={html.escape(str(v), quote=True)}" for k, v in p.items())
+    paid = [r for r in rows if _is_revenue(r)]
     revenue = sum(_order_amount(r) for r in paid)
     rated = [r["rating"] for r in rows if r["rating"] is not None]
-    avg = round(sum(rated)/len(rated), 1) if rated else "—"
-    cards = [("Заказов всего", len(rows)), ("Оплачено", len(paid)),
-             ("Готово", sum(1 for r in rows if r["status"]=="done")),
-             ("Ошибок", sum(1 for r in rows if r["status"]=="error")),
-             ("Выручка, ₽", f"{revenue:,}".replace(",", " ")), ("Средняя оценка", avg)]
+    avg = round(sum(rated) / len(rated), 1) if rated else "—"
+    cards = [("Заявок", len(rows)), ("Оплачено", len(paid)),
+             ("Выручка, ₽", f"{revenue:,}".replace(",", " ")),
+             ("Готово", sum(1 for r in rows if r["status"] == "done")),
+             ("Ошибок", sum(1 for r in rows if r["status"] == "error")),
+             ("Промо/тест", sum(1 for r in rows if (r["promo"] or ""))),
+             ("Ср. оценка", avg)]
+    cardhtml = "".join(f'<div class=card><div class=cv>{v}</div><div class=cl>{l}</div></div>' for l, v in cards)
     show = [r for r in rows if (not flt or r["status"] == flt)]
+    def _stcls(st):
+        if st == "done": return "s-done"
+        if st == "error": return "s-err"
+        if st in ("new", "pending"): return "s-new"
+        return "s-mid"
     trs = ""
     for r in show:
         dt = time.strftime("%d.%m.%Y %H:%M", time.localtime(r["created"] or 0))
         st = r["status"] or ""
-        kind = "доп" if (r["kind"] or "main") == "addon" else "основной"
-        site = html.escape(r["site"] or "")
+        raw_site = (r["site"] or "").strip()
+        site_disp = html.escape(raw_site[:60])
+        site_href = html.escape("https://" + re.sub(r"^https?://", "", raw_site), quote=True)
+        site_cell = f'<a href="{site_href}" target=_blank rel=noopener>{site_disp}</a>' if raw_site else ""
+        amt = _order_amount(r) if r["status"] in _PAID_STATES else None
         rating = f'{r["rating"]}/5' if r["rating"] is not None else ""
         fb = html.escape((r["feedback"] or "")[:120])
-        trs += (f'<tr><td class=dt>{dt}</td><td>{html.escape(r["brand"] or "")}</td>'
-                f'<td><a href="https://{site}" target=_blank>{site}</a></td>'
-                f'<td>{html.escape((r["niche"] or "")[:40])}</td><td>{kind}</td>'
-                f'<td><span class=st style="background:{_ST_COLOR.get(st,"#777")}">{_ST_RU.get(st, st)}</span></td>'
-                f'<td class=num>{_order_amount(r) if r["status"] in _PAID_STATES else ""}</td>'
-                f'<td>{html.escape(r["email"] or "")}</td><td class=num>{rating}</td><td class=fb>{fb}</td></tr>')
-    cardhtml = "".join(f'<div class=card><div class=cv>{v}</div><div class=cl>{l}</div></div>' for l, v in cards)
-    key = html.escape(request.args.get("key") or "")
-    filt = ("".join(f'<a href="?key={key}&status={s}" class="{"f on" if flt==s else "f"}">{_ST_RU[s]}</a>'
-                    for s in ("done","processing","reviewing","error","pending")))
-    return f"""<!doctype html><meta charset=utf-8><title>CRM · заказы</title>
-<style>body{{font-family:-apple-system,Segoe UI,Roboto,Arial;margin:0;background:#141210;color:#eee;padding:20px}}
-h1{{font-size:20px;margin:0 0 14px}} a{{color:#DE7A2C}}
-.cards{{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}}
-.card{{background:#1e1b18;border:1px solid #322d28;border-radius:12px;padding:12px 16px;min-width:120px}}
-.cv{{font-size:22px;font-weight:800}} .cl{{font-size:11px;color:#9a9088;margin-top:2px}}
-.bar{{margin:0 0 12px;font-size:13px}} .f{{display:inline-block;padding:4px 10px;margin-right:6px;border-radius:20px;background:#1e1b18;border:1px solid #322d28;color:#cbb;text-decoration:none}}
-.f.on{{background:#DE4A2C;color:#fff;border-color:#DE4A2C}}
+        trs += (f'<tr><td class=dt>{dt}</td><td class=b>{html.escape(r["brand"] or "")}</td>'
+                f'<td>{site_cell}</td><td>{html.escape((r["niche"] or "")[:44])}</td>'
+                f'<td>{_order_kind_ru(r)}</td>'
+                f'<td><span class="st {_stcls(st)}">{_ST_RU.get(st, st)}</span></td>'
+                f'<td class=num>{"" if amt is None else amt}</td>'
+                f'<td class=em>{html.escape(_mask_email(r["email"]))}</td>'
+                f'<td class=num>{rating}</td><td class=fb>{fb}</td></tr>')
+    ranges = [("today", "Сегодня"), ("7", "7 дней"), ("30", "30 дней"), ("", "Всё время")]
+    rbar = "".join(f'<a class="q{" on" if (rng==rk or (rk=="" and rng=="all")) else ""}" '
+                   f'href="{_url(range=rk, **{"from":"", "to":""})}">{lbl}</a>' for rk, lbl in ranges)
+    statuses = [("", "все")] + [(s, _ST_RU[s]) for s in ("done", "processing", "reviewing", "pending", "error")]
+    sbar = "".join(f'<a class="q{" on" if flt==sk else ""}" href="{_url(status=sk)}">{lbl}</a>' for sk, lbl in statuses)
+    st_hidden = f'<input type=hidden name=status value="{html.escape(flt, quote=True)}">' if flt else ""
+    period = (f"{frm or '…'} — {to or '…'}" if rng == "custom" else
+              {"today": "сегодня", "7": "последние 7 дней", "30": "последние 30 дней"}.get(rng, "всё время"))
+    return f"""<!doctype html><html lang=ru><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1"><meta name=robots content=noindex>
+<title>CRM · заявки</title>
+<style>
+:root{{--ink:#111;--soft:#444;--mut:#8a8a8a;--line:#e6e6e6;--line2:#efefef;--bg:#fff;--hov:#f6f6f6}}
+*{{box-sizing:border-box}}
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;margin:0;background:var(--bg);color:var(--ink);padding:22px clamp(14px,3vw,30px);font-size:13px;-webkit-font-smoothing:antialiased}}
+a{{color:var(--ink)}}
+.top{{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:4px}}
+h1{{font-size:18px;font-weight:700;margin:0;letter-spacing:-.01em}}
+.sub{{color:var(--mut);font-size:12px;margin:2px 0 16px}}
+.csv{{font-size:12px;font-weight:600;border:1px solid var(--ink);border-radius:7px;padding:7px 12px;text-decoration:none;white-space:nowrap}}
+.csv:hover{{background:var(--ink);color:#fff}}
+.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:9px;margin-bottom:18px}}
+.card{{border:1px solid var(--line);border-radius:11px;padding:13px 15px;background:#fff}}
+.cv{{font-size:22px;font-weight:750;letter-spacing:-.02em;line-height:1}}
+.cl{{font-size:11px;color:var(--mut);margin-top:6px;text-transform:uppercase;letter-spacing:.05em}}
+.filters{{display:flex;flex-wrap:wrap;align-items:center;gap:7px 8px;margin-bottom:14px}}
+.lbl{{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.06em;margin-right:2px}}
+.q{{display:inline-block;padding:5px 11px;border:1px solid var(--line);border-radius:20px;color:var(--soft);text-decoration:none;font-size:12px;background:#fff}}
+.q:hover{{border-color:#bbb}} .q.on{{background:var(--ink);color:#fff;border-color:var(--ink)}}
+.dr{{display:inline-flex;align-items:center;gap:6px;margin-left:auto}}
+.dr input[type=date]{{border:1px solid var(--line);border-radius:7px;padding:5px 8px;font:inherit;font-size:12px;color:var(--ink)}}
+.dr button{{border:1px solid var(--ink);background:#fff;border-radius:7px;padding:6px 12px;font:inherit;font-size:12px;font-weight:600;cursor:pointer}}
+.dr button:hover{{background:var(--ink);color:#fff}}
+.sep{{flex-basis:100%;height:0}}
+.wrap{{border:1px solid var(--line);border-radius:12px;overflow:hidden}}
 table{{width:100%;border-collapse:collapse;font-size:12.5px}}
-th,td{{text-align:left;padding:7px 9px;border-bottom:1px solid #2a2622;vertical-align:top}}
-th{{color:#9a9088;font-weight:600;position:sticky;top:0;background:#141210}}
-.dt{{white-space:nowrap;color:#b8aea4}} .num{{text-align:right;white-space:nowrap}}
-.st{{color:#fff;border-radius:20px;padding:2px 9px;font-size:11px;white-space:nowrap}} .fb{{color:#b8aea4;max-width:240px}}
-tr:hover td{{background:#1a1714}}</style>
-<h1>CRM · заказы и клиенты <a href="/admin/export.csv?key={key}" style="font-size:13px;float:right">Скачать CSV</a></h1>
+th,td{{text-align:left;padding:9px 11px;border-bottom:1px solid var(--line2);vertical-align:top}}
+th{{color:var(--mut);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em;position:sticky;top:0;background:#fafafa}}
+tr:last-child td{{border-bottom:0}} tbody tr:hover td{{background:var(--hov)}}
+.b{{font-weight:600}} .dt{{white-space:nowrap;color:var(--soft)}} .num{{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}}
+.em{{color:var(--soft);white-space:nowrap}} .fb{{color:var(--soft);max-width:230px}}
+.st{{display:inline-block;border-radius:20px;padding:2px 9px;font-size:11px;white-space:nowrap;border:1px solid var(--line)}}
+.s-done{{background:var(--ink);color:#fff;border-color:var(--ink)}}
+.s-err{{background:#fff;color:var(--ink);border-color:var(--ink);font-weight:600}}
+.s-mid{{background:#ececec;color:#333}} .s-new{{background:#f5f5f5;color:#8a8a8a}}
+.empty{{padding:30px;text-align:center;color:var(--mut)}}
+</style></head><body>
+<div class=top><h1>CRM · заявки и клиенты</h1><a class=csv href="/admin/export.csv{_url()}">Скачать CSV</a></div>
+<div class=sub>Период: {period} · показано {len(show)} из {len(rows)}</div>
 <div class=cards>{cardhtml}</div>
-<div class=bar>Фильтр: <a href="?key={key}" class="{'f on' if not flt else 'f'}">все</a>{filt}</div>
-<table><tr><th>Дата</th><th>Бренд</th><th>Сайт</th><th>Ниша</th><th>Тип</th><th>Статус</th><th>₽</th><th>Email</th><th>Оценка</th><th>Отзыв</th></tr>{trs}</table>"""
+<div class=filters>
+  <span class=lbl>Период</span>{rbar}
+  <form class=dr method=get><input type=hidden name=key value="{key}">{st_hidden}
+    <input type=date name=from value="{html.escape(frm, quote=True)}">
+    <input type=date name=to value="{html.escape(to, quote=True)}"><button>Применить</button></form>
+  <span class=sep></span>
+  <span class=lbl>Статус</span>{sbar}
+</div>
+<div class=wrap><table><thead><tr><th>Дата</th><th>Бренд</th><th>Сайт</th><th>Ниша</th><th>Тип</th><th>Статус</th><th>₽</th><th>Email</th><th>Оценка</th><th>Отзыв</th></tr></thead>
+<tbody>{trs or '<tr><td colspan=10 class=empty>За выбранный период заявок нет</td></tr>'}</tbody></table></div>
+</body></html>"""
 
 @app.get("/admin/export.csv")
 def admin_export():
     if not _admin_ok():
         abort(403)
+    lo, hi, frm, to, rng = _admin_range()                                       # та же фильтрация по датам, что и в CRM
+    flt = (request.args.get("status") or "").strip()
     with db() as c:
-        rows = c.execute("SELECT * FROM orders ORDER BY created DESC").fetchall()
+        rows = c.execute("SELECT * FROM orders WHERE created>=? AND created<? ORDER BY created DESC",
+                         (lo, hi)).fetchall()
+    if flt:
+        rows = [r for r in rows if r["status"] == flt]
     buf = io.StringIO(); w = csv.writer(buf)
     w.writerow(["id","дата","бренд","сайт","ниша","город","тип","статус","сумма","email","telegram","оценка","отзыв","payment_id"])
     for r in rows:
         dt = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["created"] or 0))
         w.writerow([r["id"], dt, r["brand"] or "", r["site"] or "", r["niche"] or "", r["city"] or "",
-                    ("доп" if (r["kind"] or "main")=="addon" else "основной"), r["status"] or "",
-                    (_order_amount(r) if r["status"] in _PAID_STATES else 0), r["email"] or "",
+                    _order_kind_ru(r), r["status"] or "",
+                    (_order_amount(r) if r["status"] in _PAID_STATES else 0), _mask_email(r["email"]),
                     r["tg_chat_id"] or "", (r["rating"] if r["rating"] is not None else ""),
                     (r["feedback"] or "").replace("\n"," "), r["payment_id"] or ""])
-    return app.response_class(buf.getvalue(), mimetype="text/csv",
+    return app.response_class(buf.getvalue(), mimetype="text/csv; charset=utf-8",
                              headers={"Content-Disposition": "attachment; filename=orders.csv"})
 
 # Фоновый опрос статуса оплаты (подстраховка к вебхуку) — запускается при импорте модуля,

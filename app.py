@@ -27,7 +27,7 @@ DB = os.environ.get("DB_PATH") or os.path.join(APP_DIR, "orders.db")
 REPORTS = os.environ.get("REPORTS_DIR") or os.path.join(APP_DIR, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
-VERSION = "v101"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
+VERSION = "v102"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
 TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO").strip()  # .strip() — от случайных пробелов/переноса при вставке
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
@@ -1468,15 +1468,20 @@ _ADMIN_JS = r"""
            tg_username:'tgu',tg_name:'tgn',phone:'phone',address:'address',product_type:'product',deal_amount:'deal',
            comment:'comment',feedback:'fb'};
   function fill(tr){ Object.keys(MAP).forEach(function(n){ var el=f.elements[n]; if(el) el.value=(tr?(tr.dataset[MAP[n]]||''):''); }); f.email.value=''; }
+  function setPdf(tr){
+    var pl=document.getElementById('pdflink'); if(!pl) return;
+    if(tr && tr.dataset.report==='1'){ pl.href='/report/'+encodeURIComponent(tr.dataset.id); pl.style.display=''; }
+    else pl.style.display='none';
+  }
   function openRow(tr){
     if(mh) mh.textContent='Изменить заявку';
-    f.oid.value=tr.dataset.id||''; fill(tr);
+    f.oid.value=tr.dataset.id||''; fill(tr); setPdf(tr);
     f.email.placeholder = tr.dataset.emask ? ('сейчас: '+tr.dataset.emask+' · пусто = не менять') : 'e-mail';
     ov.style.display='flex'; setTimeout(function(){f.brand.focus();},30);
   }
   function openNew(){
     if(mh) mh.textContent='Новый клиент';
-    f.oid.value=''; fill(null); f.email.placeholder='e-mail'; if(f.status) f.status.value='new';
+    f.oid.value=''; fill(null); setPdf(null); f.email.placeholder='e-mail'; if(f.status) f.status.value='new';
     ov.style.display='flex'; setTimeout(function(){f.brand.focus();},30);
   }
   function close(){ ov.style.display='none'; }
@@ -1587,6 +1592,9 @@ def admin():
         fb = html.escape((r["feedback"] or "")[:120])
         dv = r["deal_amount"]
         deal_disp = f"{int(dv):,}".replace(",", " ") if dv not in (None, "") else ""
+        has_pdf = bool(r["pdf"]) and r["status"] == "done"
+        report_cell = (f'<a href="/report/{html.escape(r["id"], quote=True)}" target=_blank rel=noopener>Открыть</a>'
+                       if has_pdf else '<span class=mut>—</span>')
         srch = " ".join(x for x in [r["brand"], r["brand_short"], r["site"], r["niche"], r["city"], r["tg_username"],
                                     r["tg_name"], r["phone"], r["product_type"], r["address"]] if x).lower()
         data = (f'data-id="{_attr(r["id"])}" data-brand="{_attr(r["brand"])}" data-short="{_attr(r["brand_short"])}" '
@@ -1594,13 +1602,15 @@ def admin():
                 f'data-status="{_attr(r["status"])}" data-rating="{_attr(r["rating"])}" data-tgu="{_attr(r["tg_username"])}" '
                 f'data-tgn="{_attr(r["tg_name"])}" data-fb="{_attr(r["feedback"])}" data-emask="{_attr(_mask_email(r["email"]))}" '
                 f'data-phone="{_attr(r["phone"])}" data-address="{_attr(r["address"])}" data-product="{_attr(r["product_type"])}" '
-                f'data-deal="{_attr(r["deal_amount"])}" data-comment="{_attr(r["comment"])}" data-s="{_attr(srch)}"')
+                f'data-deal="{_attr(r["deal_amount"])}" data-comment="{_attr(r["comment"])}" '
+                f'data-report="{1 if has_pdf else 0}" data-s="{_attr(srch)}"')
         return (f'<tr class=row {data}>'
                 f'<td class="c-date dt">{dt}</td><td class="c-brand b">{html.escape(r["brand"] or "")}</td>'
                 f'<td class=c-tg>{_tg_cell(r)}</td><td class=c-site>{site_cell}</td>'
                 f'<td class=c-niche>{html.escape((r["niche"] or "")[:44])}</td>'
                 f'<td class=c-kind>{_order_kind_ru(r)}</td>'
                 f'<td class=c-status><span class="st {_stcls(st)}">{_ST_RU.get(st, st)}</span></td>'
+                f'<td class=c-report>{report_cell}</td>'
                 f'<td class="c-amount num">{"" if amt is None else amt}</td>'
                 f'<td class="c-email em">{html.escape(_mask_email(r["email"]))}</td>'
                 f'<td class=c-phone>{html.escape(r["phone"] or "")}</td>'
@@ -1616,7 +1626,7 @@ def admin():
             nn = (r["niche"] or "").strip() or "(без ниши)"
             if nn != last_niche:
                 last_niche = nn
-                trs += f'<tr class=grp><td colspan=17>{html.escape(nn)} · {niche_counts[nn]}</td></tr>'
+                trs += f'<tr class=grp><td colspan=18>{html.escape(nn)} · {niche_counts[nn]}</td></tr>'
         trs += _row_html(r)
     ranges = [("today", "Сегодня"), ("7", "7 дней"), ("30", "30 дней"), ("", "Всё время")]
     rbar = "".join(f'<a class="q{" on" if (rng==rk or (rk=="" and rng=="all")) else ""}" '
@@ -1632,7 +1642,7 @@ def admin():
     rating_opts = '<option value="">— нет</option>' + "".join(f'<option value="{n}">{n}</option>' for n in range(1, 6))
     # колонки списка: (id, заголовок, показывать по умолчанию). Контактные поля по умолчанию скрыты — включаются галочкой.
     COLS = [("date","Дата",1),("brand","Бренд / имя",1),("tg","Telegram",1),("site","Сайт",1),("niche","Ниша",1),
-            ("kind","Тип",1),("status","Статус",1),("amount","₽ отчёт",1),("email","Email",1),
+            ("kind","Тип",1),("status","Статус",1),("report","Отчёт",1),("amount","₽ отчёт",1),("email","Email",1),
             ("phone","Телефон",0),("address","Адрес",0),("product","Продукт",0),("deal","Сделка ₽",0),
             ("rating","Оценка",1),("fb","Отзыв",1),("comment","Коммент",0),("queries","Запросы",1)]
     thead = "".join(f'<th class=c-{cid}>{lbl}</th>' for cid, lbl, _ in COLS)
@@ -1657,6 +1667,7 @@ def admin():
              '<label>Имя в Telegram<input name=tg_name></label></div>'
              '<label>Отзыв<textarea name=feedback rows=2></textarea></label>'
              '<label>Комментарий<textarea name=comment rows=2></textarea></label>'
+             '<a id=pdflink class=pdflink target=_blank rel=noopener style="display:none">📄 Открыть PDF-отчёт</a>'
              '<div class=mb><button type=button id=cancel class=btng>Отмена</button>'
              '<button type=submit class=btnp>Сохранить</button></div></form></div>')
     page = f"""<!doctype html><html lang=ru><head><meta charset=utf-8>
@@ -1690,7 +1701,7 @@ h1{{font-size:18px;font-weight:700;margin:0;letter-spacing:-.01em;white-space:no
 .dr button{{border:1px solid var(--ink);background:#fff;border-radius:7px;padding:6px 12px;font:inherit;font-size:12px;font-weight:600;cursor:pointer}}
 .dr button:hover{{background:var(--ink);color:#fff}}
 .sep{{flex-basis:100%;height:0}}
-.wrap{{border:1px solid var(--line);border-radius:12px;overflow:hidden}}
+.wrap{{border:1px solid var(--line);border-radius:12px;overflow-x:auto}}
 table{{width:100%;border-collapse:collapse;font-size:12.5px}}
 th,td{{text-align:left;padding:9px 11px;border-bottom:1px solid var(--line2);vertical-align:top}}
 th{{color:var(--mut);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em;position:sticky;top:0;background:#fafafa}}
@@ -1726,6 +1737,9 @@ tr.grp td{{background:#f3f3f3;font-weight:700;font-size:11px;text-transform:uppe
 .btng:hover{{border-color:#bbb}}
 .btnp{{border:1px solid var(--ink);background:var(--ink);color:#fff;border-radius:8px;padding:9px 18px;font:inherit;font-weight:600;cursor:pointer}}
 button.csv{{font-family:inherit;background:#fff;cursor:pointer}}
+.pdflink{{display:inline-block;text-align:center;border:1px solid var(--ink);border-radius:8px;padding:9px;font-weight:600;font-size:13px;text-decoration:none;color:var(--ink);margin-top:2px}}
+.pdflink:hover{{background:var(--ink);color:#fff}}
+td.c-report a{{font-weight:600;text-decoration:underline;text-underline-offset:2px;white-space:nowrap}}
 .csv.pri{{background:var(--ink);color:#fff;border-color:var(--ink)}} .csv.pri:hover{{background:#000}}
 .coldd{{position:relative}}
 .colpan{{display:none;position:absolute;right:0;top:calc(100% + 6px);background:#fff;border:1px solid var(--line);border-radius:10px;padding:7px;min-width:172px;box-shadow:0 16px 44px -18px rgba(0,0,0,.4);z-index:40;max-height:62vh;overflow:auto}}
@@ -1748,7 +1762,7 @@ button.csv{{font-family:inherit;background:#fff;cursor:pointer}}
 </div>
 <div class=sub style="margin:-6px 0 12px">Клик по строке — редактировать любое поле.</div>
 <div class=wrap><table><thead><tr>{thead}</tr></thead>
-<tbody>{trs or '<tr><td colspan=17 class=empty>За выбранный период заявок нет</td></tr>'}</tbody></table></div>"""
+<tbody>{trs or '<tr><td colspan=18 class=empty>За выбранный период заявок нет</td></tr>'}</tbody></table></div>"""
     return page + modal + "<script>" + _ADMIN_JS + "</script></body></html>"
 
 @app.get("/admin/export.csv")

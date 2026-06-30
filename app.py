@@ -27,7 +27,7 @@ DB = os.environ.get("DB_PATH") or os.path.join(APP_DIR, "orders.db")
 REPORTS = os.environ.get("REPORTS_DIR") or os.path.join(APP_DIR, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
-VERSION = "v100"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
+VERSION = "v101"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
 TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO").strip()  # .strip() — от случайных пробелов/переноса при вставке
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
@@ -141,7 +141,9 @@ def init_db():
         for col, ddl in [("rating","INTEGER"),("feedback","TEXT"),("awaiting","TEXT"),
                          ("kind","TEXT"),("parent","TEXT"),("qn","INTEGER"),("amount","INTEGER"),("err","TEXT"),
                          ("promo","TEXT"),("tg_username","TEXT"),("tg_name","TEXT"),
-                         ("q_proposed","TEXT"),("q_final","TEXT")]:
+                         ("q_proposed","TEXT"),("q_final","TEXT"),
+                         ("phone","TEXT"),("address","TEXT"),("comment","TEXT"),
+                         ("product_type","TEXT"),("deal_amount","INTEGER")]:
             if col not in cols:
                 c.execute(f"ALTER TABLE orders ADD COLUMN {col} {ddl}")
 init_db()
@@ -1408,7 +1410,8 @@ def _admin_range():
 
 def _order_kind_ru(r):
     if r["promo"] or "": return "промо"
-    return "доп" if (r["kind"] or "main") == "addon" else "основной"
+    k = (r["kind"] or "main")
+    return {"addon": "доп", "manual": "ручной"}.get(k, "основной")
 
 def _is_revenue(r):
     return r["status"] in _PAID_STATES and not (r["promo"] or "")               # промо/тест в выручку не идёт
@@ -1457,19 +1460,27 @@ def _queries_cell(r):
         parts.append("<b>Клиент отправил</b>" + ol(fin))
     return f'<details><summary>{len(fin or prop)}</summary><div class=qd>{"".join(parts)}</div></details>'
 
-# JS для CRM: клик по строке открывает модалку редактирования; живой поиск; группы по нишам сворачиваются при поиске.
+# JS для CRM: создание клиента, клик по строке — правка всех полей, живой поиск, группы по нишам, выбор колонок списка.
 _ADMIN_JS = r"""
 (function(){
-  var ov=document.getElementById('ov'), f=document.getElementById('ef'), box=document.getElementById('srch');
+  var ov=document.getElementById('ov'), f=document.getElementById('ef'), box=document.getElementById('srch'), mh=document.getElementById('mh');
+  var MAP={brand:'brand',brand_short:'short',site:'site',niche:'niche',city:'city',status:'status',rating:'rating',
+           tg_username:'tgu',tg_name:'tgn',phone:'phone',address:'address',product_type:'product',deal_amount:'deal',
+           comment:'comment',feedback:'fb'};
+  function fill(tr){ Object.keys(MAP).forEach(function(n){ var el=f.elements[n]; if(el) el.value=(tr?(tr.dataset[MAP[n]]||''):''); }); f.email.value=''; }
   function openRow(tr){
-    f.oid.value=tr.dataset.id||'';
-    ['brand','brand_short','site','niche','city','status','rating','tg_username','tg_name','feedback'].forEach(function(k){
-      var el=f.elements[k]; if(el) el.value = tr.dataset[ ({brand_short:'short',tg_username:'tgu',tg_name:'tgn',feedback:'fb'})[k] || k ] || '';
-    });
-    f.email.value=''; f.email.placeholder = tr.dataset.emask ? ('сейчас: '+tr.dataset.emask+' · пусто = не менять') : 'e-mail';
+    if(mh) mh.textContent='Изменить заявку';
+    f.oid.value=tr.dataset.id||''; fill(tr);
+    f.email.placeholder = tr.dataset.emask ? ('сейчас: '+tr.dataset.emask+' · пусто = не менять') : 'e-mail';
+    ov.style.display='flex'; setTimeout(function(){f.brand.focus();},30);
+  }
+  function openNew(){
+    if(mh) mh.textContent='Новый клиент';
+    f.oid.value=''; fill(null); f.email.placeholder='e-mail'; if(f.status) f.status.value='new';
     ov.style.display='flex'; setTimeout(function(){f.brand.focus();},30);
   }
   function close(){ ov.style.display='none'; }
+  var nb=document.getElementById('newbtn'); if(nb) nb.addEventListener('click',openNew);
   var tb=document.querySelector('tbody');
   if(tb) tb.addEventListener('click',function(e){
     if(e.target.closest('a,summary,details,button,input,select,textarea,label')) return;
@@ -1482,7 +1493,8 @@ _ADMIN_JS = r"""
     e.preventDefault();
     var body=new URLSearchParams(new FormData(f));
     var ks=new URLSearchParams(location.search).get('key');           // вошли по ссылке ?key= -> пробрасываем; иначе работает кука входа
-    var url='/admin/order/'+encodeURIComponent(f.oid.value)+(ks?('?key='+encodeURIComponent(ks)):'');
+    var base=f.oid.value ? ('/admin/order/'+encodeURIComponent(f.oid.value)) : '/admin/order-new';
+    var url=base+(ks?('?key='+encodeURIComponent(ks)):'');
     fetch(url,{method:'POST',body:body})
       .then(function(r){ if(!r.ok) throw 0; location.reload(); })
       .catch(function(){ alert('Не удалось сохранить. Обновите страницу и попробуйте ещё раз.'); });
@@ -1498,6 +1510,25 @@ _ADMIN_JS = r"""
       });
       if(grp) grp.style.display=has?'':'none';
     });
+  }
+  // выбор колонок списка (сохраняется в браузере)
+  var chks=[].slice.call(document.querySelectorAll('.colchk'));
+  if(chks.length){
+    var DEF=chks.filter(function(c){return c.defaultChecked;}).map(function(c){return c.value;});
+    function applyCols(vis){ chks.forEach(function(c){ var on=vis.indexOf(c.value)>=0;
+      document.querySelectorAll('.c-'+c.value).forEach(function(el){ el.style.display=on?'':'none'; }); }); }
+    function getVis(){ try{var v=JSON.parse(localStorage.getItem('crm_cols')); if(Array.isArray(v)&&v.length) return v;}catch(e){} return DEF; }
+    var vis=getVis();
+    chks.forEach(function(c){ c.checked=vis.indexOf(c.value)>=0; c.addEventListener('change',function(){
+      var v=chks.filter(function(x){return x.checked;}).map(function(x){return x.value;});
+      try{localStorage.setItem('crm_cols',JSON.stringify(v));}catch(e){} applyCols(v); }); });
+    applyCols(vis);
+    var cbtn=document.getElementById('colbtn'), cpan=document.getElementById('colpan');
+    if(cbtn&&cpan){
+      cbtn.addEventListener('click',function(e){ e.stopPropagation(); cpan.style.display=(cpan.style.display==='block')?'none':'block'; });
+      cpan.addEventListener('click',function(e){ e.stopPropagation(); });
+      document.addEventListener('click',function(){ cpan.style.display='none'; });
+    }
   }
 })();
 """
@@ -1554,28 +1585,38 @@ def admin():
         amt = _order_amount(r) if r["status"] in _PAID_STATES else None
         rating = f'{r["rating"]}/5' if r["rating"] is not None else ""
         fb = html.escape((r["feedback"] or "")[:120])
-        srch = " ".join(x for x in [r["brand"], r["brand_short"], r["site"], r["niche"], r["city"],
-                                    r["tg_username"], r["tg_name"]] if x).lower()
+        dv = r["deal_amount"]
+        deal_disp = f"{int(dv):,}".replace(",", " ") if dv not in (None, "") else ""
+        srch = " ".join(x for x in [r["brand"], r["brand_short"], r["site"], r["niche"], r["city"], r["tg_username"],
+                                    r["tg_name"], r["phone"], r["product_type"], r["address"]] if x).lower()
         data = (f'data-id="{_attr(r["id"])}" data-brand="{_attr(r["brand"])}" data-short="{_attr(r["brand_short"])}" '
                 f'data-site="{_attr(r["site"])}" data-niche="{_attr(r["niche"])}" data-city="{_attr(r["city"])}" '
                 f'data-status="{_attr(r["status"])}" data-rating="{_attr(r["rating"])}" data-tgu="{_attr(r["tg_username"])}" '
                 f'data-tgn="{_attr(r["tg_name"])}" data-fb="{_attr(r["feedback"])}" data-emask="{_attr(_mask_email(r["email"]))}" '
-                f'data-s="{_attr(srch)}"')
-        return (f'<tr class=row {data}><td class=dt>{dt}</td><td class=b>{html.escape(r["brand"] or "")}</td>'
-                f'<td>{_tg_cell(r)}</td><td>{site_cell}</td><td>{html.escape((r["niche"] or "")[:44])}</td>'
-                f'<td>{_order_kind_ru(r)}</td>'
-                f'<td><span class="st {_stcls(st)}">{_ST_RU.get(st, st)}</span></td>'
-                f'<td class=num>{"" if amt is None else amt}</td>'
-                f'<td class=em>{html.escape(_mask_email(r["email"]))}</td>'
-                f'<td class=num>{rating}</td><td class=fb>{fb}</td>'
-                f'<td class=q>{_queries_cell(r)}</td></tr>')
+                f'data-phone="{_attr(r["phone"])}" data-address="{_attr(r["address"])}" data-product="{_attr(r["product_type"])}" '
+                f'data-deal="{_attr(r["deal_amount"])}" data-comment="{_attr(r["comment"])}" data-s="{_attr(srch)}"')
+        return (f'<tr class=row {data}>'
+                f'<td class="c-date dt">{dt}</td><td class="c-brand b">{html.escape(r["brand"] or "")}</td>'
+                f'<td class=c-tg>{_tg_cell(r)}</td><td class=c-site>{site_cell}</td>'
+                f'<td class=c-niche>{html.escape((r["niche"] or "")[:44])}</td>'
+                f'<td class=c-kind>{_order_kind_ru(r)}</td>'
+                f'<td class=c-status><span class="st {_stcls(st)}">{_ST_RU.get(st, st)}</span></td>'
+                f'<td class="c-amount num">{"" if amt is None else amt}</td>'
+                f'<td class="c-email em">{html.escape(_mask_email(r["email"]))}</td>'
+                f'<td class=c-phone>{html.escape(r["phone"] or "")}</td>'
+                f'<td class=c-address>{html.escape((r["address"] or "")[:50])}</td>'
+                f'<td class=c-product>{html.escape((r["product_type"] or "")[:40])}</td>'
+                f'<td class="c-deal num">{deal_disp}</td>'
+                f'<td class="c-rating num">{rating}</td><td class="c-fb fb">{fb}</td>'
+                f'<td class="c-comment fb">{html.escape((r["comment"] or "")[:120])}</td>'
+                f'<td class="c-queries q">{_queries_cell(r)}</td></tr>')
     trs = ""; last_niche = None
     for r in show:
         if group:
             nn = (r["niche"] or "").strip() or "(без ниши)"
             if nn != last_niche:
                 last_niche = nn
-                trs += f'<tr class=grp><td colspan=12>{html.escape(nn)} · {niche_counts[nn]}</td></tr>'
+                trs += f'<tr class=grp><td colspan=17>{html.escape(nn)} · {niche_counts[nn]}</td></tr>'
         trs += _row_html(r)
     ranges = [("today", "Сегодня"), ("7", "7 дней"), ("30", "30 дней"), ("", "Всё время")]
     rbar = "".join(f'<a class="q{" on" if (rng==rk or (rk=="" and rng=="all")) else ""}" '
@@ -1589,20 +1630,33 @@ def admin():
     grp_hidden = '<input type=hidden name=group value="niche">' if group else ""
     status_opts = "".join(f'<option value="{s}">{_ST_RU[s]}</option>' for s in _ST_RU)
     rating_opts = '<option value="">— нет</option>' + "".join(f'<option value="{n}">{n}</option>' for n in range(1, 6))
+    # колонки списка: (id, заголовок, показывать по умолчанию). Контактные поля по умолчанию скрыты — включаются галочкой.
+    COLS = [("date","Дата",1),("brand","Бренд / имя",1),("tg","Telegram",1),("site","Сайт",1),("niche","Ниша",1),
+            ("kind","Тип",1),("status","Статус",1),("amount","₽ отчёт",1),("email","Email",1),
+            ("phone","Телефон",0),("address","Адрес",0),("product","Продукт",0),("deal","Сделка ₽",0),
+            ("rating","Оценка",1),("fb","Отзыв",1),("comment","Коммент",0),("queries","Запросы",1)]
+    thead = "".join(f'<th class=c-{cid}>{lbl}</th>' for cid, lbl, _ in COLS)
+    colchecks = "".join(f'<label class=colc><input type=checkbox class=colchk value="{cid}"'
+                        f'{" checked" if dv else ""}>{lbl}</label>' for cid, lbl, dv in COLS)
     modal = ('<div id=ov class=ov><form id=ef class=modal autocomplete=off>'
-             '<div class=mh>Изменить заявку</div><input type=hidden name=oid>'
-             '<label>Бренд<input name=brand></label>'
-             '<label>Короткое имя бренда<input name=brand_short></label>'
+             '<div class=mh id=mh>Изменить заявку</div><input type=hidden name=oid>'
+             '<label>Бренд / имя клиента<input name=brand></label>'
+             '<label>Короткое имя<input name=brand_short></label>'
+             '<div class=row2><label>Телефон<input name=phone inputmode=tel></label>'
+             '<label>E-mail<input name=email></label></div>'
              '<label>Сайт<input name=site></label>'
-             '<label>Ниша<input name=niche></label>'
-             '<label>Город<input name=city></label>'
+             '<label>Адрес<input name=address></label>'
+             '<div class=row2><label>Ниша<input name=niche></label>'
+             '<label>Город<input name=city></label></div>'
+             '<div class=row2><label>Тип продукта<input name=product_type></label>'
+             '<label>Сумма сделки, ₽<input name=deal_amount inputmode=numeric></label></div>'
              '<div class=row2>'
              f'<label>Статус<select name=status>{status_opts}</select></label>'
              f'<label>Оценка<select name=rating>{rating_opts}</select></label></div>'
              '<div class=row2><label>Telegram @username<input name=tg_username></label>'
              '<label>Имя в Telegram<input name=tg_name></label></div>'
-             '<label>E-mail<input name=email></label>'
-             '<label>Отзыв<textarea name=feedback rows=3></textarea></label>'
+             '<label>Отзыв<textarea name=feedback rows=2></textarea></label>'
+             '<label>Комментарий<textarea name=comment rows=2></textarea></label>'
              '<div class=mb><button type=button id=cancel class=btng>Отмена</button>'
              '<button type=submit class=btnp>Сохранить</button></div></form></div>')
     page = f"""<!doctype html><html lang=ru><head><meta charset=utf-8>
@@ -1617,10 +1671,10 @@ def admin():
 *{{box-sizing:border-box}}
 body{{font-family:"Gilroy",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;margin:0;background:var(--bg);color:var(--ink);padding:22px clamp(14px,3vw,30px);font-size:13px;-webkit-font-smoothing:antialiased}}
 a{{color:var(--ink)}}
-.top{{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:4px}}
-h1{{font-size:18px;font-weight:700;margin:0;letter-spacing:-.01em}}
+.top{{display:flex;align-items:center;justify-content:space-between;gap:10px 12px;margin-bottom:4px;flex-wrap:wrap}}
+h1{{font-size:18px;font-weight:700;margin:0;letter-spacing:-.01em;white-space:nowrap}}
 .sub{{color:var(--mut);font-size:12px;margin:2px 0 16px}}
-.acts{{display:flex;gap:8px;flex-shrink:0}}
+.acts{{display:flex;gap:8px;flex-wrap:wrap;align-items:center}}
 .csv{{font-size:12px;font-weight:600;border:1px solid var(--ink);border-radius:7px;padding:7px 12px;text-decoration:none;white-space:nowrap}}
 .csv:hover{{background:var(--ink);color:#fff}}
 .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:9px;margin-bottom:18px}}
@@ -1671,8 +1725,14 @@ tr.grp td{{background:#f3f3f3;font-weight:700;font-size:11px;text-transform:uppe
 .btng{{border:1px solid var(--line);background:#fff;border-radius:8px;padding:9px 16px;font:inherit;font-weight:600;cursor:pointer}}
 .btng:hover{{border-color:#bbb}}
 .btnp{{border:1px solid var(--ink);background:var(--ink);color:#fff;border-radius:8px;padding:9px 18px;font:inherit;font-weight:600;cursor:pointer}}
+button.csv{{font-family:inherit;background:#fff;cursor:pointer}}
+.csv.pri{{background:var(--ink);color:#fff;border-color:var(--ink)}} .csv.pri:hover{{background:#000}}
+.coldd{{position:relative}}
+.colpan{{display:none;position:absolute;right:0;top:calc(100% + 6px);background:#fff;border:1px solid var(--line);border-radius:10px;padding:7px;min-width:172px;box-shadow:0 16px 44px -18px rgba(0,0,0,.4);z-index:40;max-height:62vh;overflow:auto}}
+.colc{{display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:500;padding:5px 8px;border-radius:6px;cursor:pointer;color:var(--ink)}}
+.colc:hover{{background:var(--hov)}} .colc input{{margin:0;width:auto}}
 </style></head><body>
-<div class=top><h1>CRM · заявки и клиенты</h1><div class=acts><a class=csv href="/admin/export.csv{_url()}">Скачать CSV</a><a class=csv href="/admin/logout">Выйти</a></div></div>
+<div class=top><h1>CRM · заявки и клиенты</h1><div class=acts><button id=newbtn class="csv pri" type=button>+ Клиент</button><div class=coldd><button id=colbtn class=csv type=button>Колонки</button><div id=colpan class=colpan>{colchecks}</div></div><a class=csv href="/admin/export.csv{_url()}">CSV</a><a class=csv href="/admin/logout">Выйти</a></div></div>
 <div class=sub>Период: {period} · показано {len(show)} из {len(rows)}</div>
 <div class=cards>{cardhtml}</div>
 <div class=filters>
@@ -1687,8 +1747,8 @@ tr.grp td{{background:#f3f3f3;font-weight:700;font-size:11px;text-transform:uppe
   {grp_link}
 </div>
 <div class=sub style="margin:-6px 0 12px">Клик по строке — редактировать любое поле.</div>
-<div class=wrap><table><thead><tr><th>Дата</th><th>Бренд</th><th>Telegram</th><th>Сайт</th><th>Ниша</th><th>Тип</th><th>Статус</th><th>₽</th><th>Email</th><th>Оценка</th><th>Отзыв</th><th>Запросы</th></tr></thead>
-<tbody>{trs or '<tr><td colspan=12 class=empty>За выбранный период заявок нет</td></tr>'}</tbody></table></div>"""
+<div class=wrap><table><thead><tr>{thead}</tr></thead>
+<tbody>{trs or '<tr><td colspan=17 class=empty>За выбранный период заявок нет</td></tr>'}</tbody></table></div>"""
     return page + modal + "<script>" + _ADMIN_JS + "</script></body></html>"
 
 @app.get("/admin/export.csv")
@@ -1723,7 +1783,8 @@ def admin_edit(oid):
         abort(403)
     f = request.form
     fields = {}
-    for col in ("brand", "brand_short", "site", "niche", "city", "feedback", "tg_name"):
+    for col in ("brand", "brand_short", "site", "niche", "city", "feedback", "tg_name",
+                "phone", "address", "comment", "product_type"):
         if col in f:
             fields[col] = (f.get(col) or "").strip()[:400]
     if "tg_username" in f:
@@ -1733,6 +1794,9 @@ def admin_edit(oid):
         fields["status"] = stt
     rt = (f.get("rating") or "").strip()
     fields["rating"] = int(rt) if (rt.isdigit() and 1 <= int(rt) <= 5) else None
+    if "deal_amount" in f:                                           # сумма сделки: оставляем только цифры
+        digits = re.sub(r"[^\d]", "", f.get("deal_amount") or "")
+        fields["deal_amount"] = int(digits) if digits else None
     em = (f.get("email") or "").strip()
     if em:                                                           # e-mail меняем, только если ввели новый (иначе оставляем как есть)
         fields["email"] = em[:200]
@@ -1740,6 +1804,34 @@ def admin_edit(oid):
         sets = ", ".join(f"{k}=?" for k in fields)                  # ключи из белого списка выше -> безопасно
         with db() as c:
             c.execute(f"UPDATE orders SET {sets} WHERE id=?", (*fields.values(), oid))
+    return ("OK", 200)
+
+@app.post("/admin/order-new")
+def admin_new():
+    """Ручное создание клиента из CRM (кнопка «+ Клиент»). Поля те же, что в карточке."""
+    if not _admin_ok():
+        abort(403)
+    f = request.form
+    stt = (f.get("status") or "").strip()
+    cols = {"id": "m" + uuid.uuid4().hex[:14], "created": time.time(), "kind": "manual",
+            "status": stt if stt in _ST_RU else "new"}
+    for col in ("brand", "brand_short", "site", "niche", "city", "feedback", "tg_name",
+                "phone", "address", "comment", "product_type", "email"):
+        v = (f.get(col) or "").strip()
+        if v:
+            cols[col] = v[:400]
+    tu = (f.get("tg_username") or "").strip().lstrip("@")
+    if tu:
+        cols["tg_username"] = tu[:64]
+    rt = (f.get("rating") or "").strip()
+    if rt.isdigit() and 1 <= int(rt) <= 5:
+        cols["rating"] = int(rt)
+    digits = re.sub(r"[^\d]", "", f.get("deal_amount") or "")
+    if digits:
+        cols["deal_amount"] = int(digits)
+    keys = ", ".join(cols); ph = ", ".join("?" * len(cols))         # ключи из белого списка -> безопасно
+    with db() as c:
+        c.execute(f"INSERT INTO orders({keys}) VALUES({ph})", tuple(cols.values()))
     return ("OK", 200)
 
 # Фоновый опрос статуса оплаты (подстраховка к вебхуку) — запускается при импорте модуля,

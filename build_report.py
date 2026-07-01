@@ -337,7 +337,7 @@ def p_summary(d):
         <div class="box"><h4>{strong_h}</h4><p>{esc(rm['strong'])}</p></div></div>
       <div class="box cream"><h4>Ближайшая цель</h4><p>{esc(rm['goal'])}</p></div>
       <div class="grid3" style="margin-top:5mm">
-        <div class="stat"><div class="n">{d['overall']}%</div><div class="l">{d['level']} видимость по {len([e for e in d['engines'] if not e.get('failed')])} {plural(len([e for e in d['engines'] if not e.get('failed')]),'рабочей нейросети','рабочим нейросетям','рабочим нейросетям')}</div></div>
+        <div class="stat"><div class="n">{d['overall']}%</div><div class="l">{("нет видимости" if d['overall']==0 else d['level']+" видимость")} по {len([e for e in d['engines'] if not e.get('failed')])} {plural(len([e for e in d['engines'] if not e.get('failed')]),'рабочей нейросети','рабочим нейросетям','рабочим нейросетям')}</div></div>
         <div class="stat"><div class="n">{d['stable_q']} из {len(d['queries'])}</div><div class="l">запросов с повторяемым упоминанием (2/2 хотя бы в одной сети)</div></div>
         <div class="stat"><div class="n">{stat3_n}</div><div class="l">{stat3_l}</div></div></div>
       <div class="note" style="margin-top:3mm">2/2 означает, что бренд появился в обоих ответах на один и тот же вопрос.</div>

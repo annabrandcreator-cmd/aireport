@@ -1993,6 +1993,7 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
     groups = _groups(queries)
     overall = round(sum(q["hits"][e["id"]] for q in queries for e in work) / (len(queries)*len(work)*RUNS) * 100)
     zero = overall == 0
+    level_word = "высокая" if overall >= 60 else "средняя" if overall >= 25 else "низкая"   # единый уровень видимости для ВСЕХ формулировок отчёта
     strong = [g[0] for g in groups if g[1] >= 45][:2]
     weak   = [g[0] for g in groups if g[1] <= 15]
     best = max(work, key=lambda e: rates[e["id"]]); worst = min(work, key=lambda e: rates[e["id"]])
@@ -2118,24 +2119,27 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
         "failed_engines": failed_names,
         "queries": queries,
         "result_meaning": {
-            "headline": ("упоминания не обнаружены" if zero else ("средняя видимость" if overall>=25 else "низкая видимость")),
+            "headline": ("упоминания не обнаружены" if zero else f"{level_word} видимость"),
             "text": (f"В {total} проверенных ответах {brand_short} {mentioned_neg} ни одной из {len([e for e in eng if e['id'] not in failed_set])} проверенных нейросетей. "
                      "Это не означает, что нейросети никогда не называют бренд. Результат относится к выбранным вопросам, системам и дате проверки."
                      if zero else
                      (f"В этой проверке бренд появился в {', '.join(mentioned_engines)}" + (f", но не появился в {', '.join(zero_engines)}." if zero_engines else ".")
-                      + " Видимость пока низкая и неравномерная.")),
+                      + f" Видимость {level_word}, распределена неравномерно по нейросетям.")),
             "loss": (f"{brand_short} {appeared_neg} ни по одному из проверенных вопросов: при поиске компании, выборе товара или услуги и оценке надёжности."
                      if zero else (f"Упоминаний пока нет по группам: {zero_grp_txt}." if zero_grp_txt else "Упоминания распределены неравномерно по запросам.")),
             "strong": ("Сначала нужно сделать понятнее существующие ключевые страницы, а затем увеличить число независимых "
                        "упоминаний компании: отзывов, публикаций, карточек и отраслевых подборок."
-                       if zero else (f"Повторяемые упоминания (2/2) есть по группам: {rep_txt}. На них можно опереться, но видимость всё ещё низкая." if rep_groups
+                       if zero else (f"Повторяемые упоминания (2/2) есть по группам: {rep_txt}. На них можно опереться и расширять охват на остальные запросы и нейросети." if rep_groups
                                      else (f"Пока только единичные упоминания (1/2) по группам: {pos_txt}." if pos_txt else "Опорных групп с повторяемым упоминанием пока нет."))),
             "goal": ("Добиться первых повторяемых упоминаний: чтобы нейросеть называла бренд не случайно, а в обоих повторных ответах на один и тот же вопрос."
                      if zero else
-                     (f"Увеличить число запросов с повторяемым упоминанием с {n_rep_q} до 4–5"
-                      + (" и добиться появления хотя бы во второй нейросети." if len(mentioned_engines) <= 1 else " и поднять долю ответов с упоминанием в каждой нейросети.")
-                      if n_rep_q >= 1 else
-                      "Добиться первых повторяемых упоминаний (2 из 2): чтобы бренд появлялся в обоих ответах на один вопрос, а не через раз.")),
+                     ("Поднять долю ответов с упоминанием в каждой нейросети и выровнять видимость между ними — "
+                      f"повторяемое упоминание (2/2) уже есть по всем {n_rep_q} запросам."
+                      if n_rep_q >= len(queries) else
+                      (f"Увеличить число запросов с повторяемым упоминанием с {n_rep_q} до {min(len(queries), n_rep_q + 3)} из {len(queries)}"
+                       + (" и добиться появления хотя бы во второй нейросети." if len(mentioned_engines) <= 1 else " и поднять долю ответов с упоминанием в каждой нейросети.")
+                       if n_rep_q >= 1 else
+                       "Добиться первых повторяемых упоминаний (2 из 2): чтобы бренд появлялся в обоих ответах на один вопрос, а не через раз."))),
         },
         "examples": examples,
         "full_answers": full_answers,
@@ -2284,7 +2288,7 @@ def _blockers(groups, zero, site_info=None, mentioned_engines=None, zero_engines
                 blk.append(f"Упоминания только в одной нейросети ({mentioned_engines[0]}); в {', '.join(zero_engines)} бренд не появился")
             else:
                 blk.append(f"В {', '.join(zero_engines)} упоминаний нет")
-        blk.append("Видимость низкая: бренд появляется не по всем запросам")
+        blk.append("Видимость неравномерная: бренд появляется не по всем запросам")
     s = site_info or {}
     if s.get("ok"):                                     # реальные пробелы сайта (проверено)
         sm = _schema_summary(s.get("schema"))

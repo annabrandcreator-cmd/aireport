@@ -73,6 +73,7 @@ def compute(d):
     work=[e for e in eng if not e.get('failed')] or eng     # рабочие движки (без ошибки API) — только по ним считаем %
     tot_m=sum(e['mentions'] for e in work); tot_a=sum(e['answers'] for e in work) or 1
     d['overall']=round(tot_m/tot_a*100)
+    d['level']="высокая" if d['overall']>=60 else "средняя" if d['overall']>=25 else "низкая"   # единый уровень видимости
     d['total_mentions']=tot_m; d['total_answers']=tot_a
     es=sorted(work,key=lambda e:-(e['rate'] or 0))
     d['best']=es[0]; d['worst']=es[-1]
@@ -340,7 +341,7 @@ def p_summary(d):
         <div class="box"><h4>{strong_h}</h4><p>{esc(rm['strong'])}</p></div></div>
       <div class="box cream"><h4>Ближайшая цель</h4><p>{esc(rm['goal'])}</p></div>
       <div class="grid3" style="margin-top:5mm">
-        <div class="stat"><div class="n">{d['overall']}%</div><div class="l">средняя видимость по {len([e for e in d['engines'] if not e.get('failed')])} {plural(len([e for e in d['engines'] if not e.get('failed')]),'рабочей нейросети','рабочим нейросетям','рабочим нейросетям')}</div></div>
+        <div class="stat"><div class="n">{d['overall']}%</div><div class="l">{d['level']} видимость по {len([e for e in d['engines'] if not e.get('failed')])} {plural(len([e for e in d['engines'] if not e.get('failed')]),'рабочей нейросети','рабочим нейросетям','рабочим нейросетям')}</div></div>
         <div class="stat"><div class="n">{d['stable_q']} из {len(d['queries'])}</div><div class="l">запросов с повторяемым упоминанием (2/2 хотя бы в одной сети)</div></div>
         <div class="stat"><div class="n">{stat3_n}</div><div class="l">{stat3_l}</div></div></div>
       <div class="note" style="margin-top:3mm">2/2 означает, что бренд появился в обоих ответах на один и тот же вопрос.</div>
@@ -409,7 +410,7 @@ def p_engines(d):
         if ze:
             h2,weak_p="Где пока не называют",f"В {_join(ze)} бренд не появился ни в одном из {ans} ответов."
         else:
-            h2,weak_p="Где наращивать","Упоминания есть во всех нейросетях, но видимость пока низкая. Задача — повышать долю ответов с упоминанием."
+            h2,weak_p="Где наращивать","Упоминания есть во всех нейросетях, но распределены неравномерно. Задача — повышать долю ответов с упоминанием в каждой нейросети."
     return f'''<div class="page"><h2><span class="num">02</span>Где вас находят нейросети</h2>
       <div class="sec-intro">Каждой нейросети задали {len(d['queries'])} вопросов, похожих на реальные вопросы потенциальных клиентов. Каждый вопрос проверили дважды — всего получено {total} ответов. Процент: доля ответов, где нейросеть упомянула бренд или сайт.</div>
       <div class="card">{bars}</div>
@@ -531,7 +532,7 @@ def p_groups(d):
         lean_h="На что опереться"
         rep=_join_groups(d.get('rep_groups',[])); zg=_join_groups(d.get('groups_zero',[]))
         loss_p=(f"Упоминаний пока нет по группам: {zg}. " if zg else "По большинству групп упоминаний мало. ") + "Эти вопросы относятся к этапу выбора компании."
-        lean_p=(f"Повторяемые упоминания есть по группам: {rep}. " if rep else "Повторяемых упоминаний пока мало. ") + "На них можно опереться, но видимость всё ещё низкая."
+        lean_p=(f"Повторяемые упоминания есть по группам: {rep}. " if rep else "Повторяемых упоминаний пока мало. ") + "На них можно опереться и расширять охват на остальные запросы и нейросети."
         prio_p="Двигаться стоит по двум линиям: усилить материалы под группы без упоминаний и закрепить то, что уже сработало. Группу из одного вопроса не стоит напрямую сравнивать с группой из нескольких."
     return f'''<div class="page"><h2><span class="num">04</span>Видимость по направлениям</h2>
       <div class="sec-intro">Те же вопросы, собранные по направлениям. Видно, в каких сценариях клиенты вас находят, а в каких нет. Рядом — сколько упоминаний из всех проверок в группе.</div>

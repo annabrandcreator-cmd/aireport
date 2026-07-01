@@ -53,14 +53,10 @@ def _matrix_verdict(d):
     if d.get('overall', 0) == 0:
         return (f"{esc(d['brand_short'])} {_aneg(d)} ни в одном из {d['total_answers']} ответов. Следующий шаг — определить "
                 "страницы сайта, которые должны отвечать на эти вопросы, и проверить, ясно ли на них описаны услуги, опыт и специализация.")
-    rep = _join_groups(d.get('rep_groups', []))
-    zero_g = _join_groups(d.get('groups_zero', []))
-    if rep:
-        s = f"Повторяемые упоминания (2 из 2) есть по группам: {rep}."
+    if d.get('rep_groups'):
+        s = "Повторяемое упоминание (2 из 2) уже есть по части вопросов: бренд появляется в обоих ответах на один и тот же вопрос."
     else:
         s = "Повторяемого упоминания (2 из 2) пока нет: бренд появлялся максимум в одной из двух проверок."
-    if zero_g:
-        s += f" По группам {zero_g} упоминаний не обнаружено."
     return s
 
 # ── расчёт всех чисел из матрицы ────────────────────────────────────────────
@@ -345,7 +341,7 @@ def p_summary(d):
         <div class="stat"><div class="n">{d['stable_q']} из {len(d['queries'])}</div><div class="l">запросов с повторяемым упоминанием (2/2 хотя бы в одной сети)</div></div>
         <div class="stat"><div class="n">{stat3_n}</div><div class="l">{stat3_l}</div></div></div>
       <div class="note" style="margin-top:3mm">2/2 означает, что бренд появился в обоих ответах на один и тот же вопрос.</div>
-      <div class="box"><h4>Что дальше в отчёте</h4><p>Дальше: видимость по каждой нейросети, таблица повторяемости ответов, разбор по группам вопросов, примеры реальных ответов, что показала проверка сайта и пошаговый план с приоритетами и ответственными.</p></div>
+      <div class="box"><h4>Что дальше в отчёте</h4><p>Дальше: видимость по каждой нейросети, таблица повторяемости ответов, примеры реальных ответов, что показала проверка сайта и пошаговый план с приоритетами и ответственными.</p></div>
       {footer(d)}</div>'''
 
 def _engine_bar(e):
@@ -432,7 +428,7 @@ def p_matrix(d):
                 cells+='<td class="c c0">—</td>'
             else:
                 v=q['hits'].get(e['id'],0); cells+=f'<td class="c c{v}">{v}/{RUNS}</td>'
-        rows+=f'<tr><td class="q">{esc(q["q"])}<div class="grp">{esc(q["group"])}</div></td>{cells}</tr>'
+        rows+=f'<tr><td class="q">{esc(q["q"])}</td>{cells}</tr>'
     legend=" · ".join(f'{esc(e["short"])}: {esc(e["name"])}' + (" (не проверено)" if e.get("failed") else "") for e in eng)
     return f'''<div class="page"><h2><span class="num">03</span>В каких ответах бренд появляется, а в каких нет</h2>
       <div class="sec-intro">Каждый запрос проверен по {RUNS} раза. 2/{RUNS}: упоминание повторилось в обеих проверках. 1/{RUNS}: в одной из двух. 0/{RUNS}: не появился.</div>
@@ -508,7 +504,7 @@ def p_query_detail(d):
         hit=any((q.get('hits') or {}).get(e['id'],0)>0 for e in eng if not e.get('failed'))   # бренд появился хотя бы в одной сети
         cls="qd qd--hit" if hit else "qd"
         badge='<span class="qd-badge">✓ бренд появился</span>' if hit else ''
-        cards.append(f'<div class="{cls}"><div class="qd-q">{i}. {esc(q["q"])}<span class="grp"> · {esc(q["group"])}</span>{badge}</div>{rows}</div>')
+        cards.append(f'<div class="{cls}"><div class="qd-q">{i}. {esc(q["q"])}{badge}</div>{rows}</div>')
     legend=" · ".join(f'{esc(e["short"])} — {esc(e["name"])}' for e in eng)
     # карточек на страницу по числу нейросетей: при 6-7 сетях строки длиннее -> берём 3, чтобы не резало
     pages=[]; per=(3 if len(eng)>=6 else (4 if len(eng)>=4 else 6))
@@ -912,7 +908,7 @@ def p_author(d):
 def build(data, out):
     d=compute(data)
     recs=d['recommendations']
-    pages=[p_cover(d), p_summary(d), p_engines(d), p_matrix(d)] + p_query_detail(d) + [p_groups(d), p_examples(d)]
+    pages=[p_cover(d), p_summary(d), p_engines(d), p_matrix(d)] + p_query_detail(d) + [p_examples(d)]
     fa_html=p_full_answers(d)                  # развёрнутые полные ответы (по одному на запрос)
     if fa_html:
         pages.append(fa_html)

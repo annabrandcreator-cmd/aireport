@@ -1414,7 +1414,7 @@ OPENROUTER_MODEL_ENV = {
 }
 OPENROUTER_MODEL_DEFAULT = {
     "perplexity": "perplexity/sonar",
-    "chatgpt": "~openai/gpt-latest",
+    "chatgpt": "openai/gpt-5-mini",
     "claude": "~anthropic/claude-sonnet-latest",
     "deepseek": "deepseek/deepseek-chat",
     "gemini": "google/gemini-2.5-flash",
@@ -1434,6 +1434,23 @@ def _openrouter_model(engine_id):
     if use_online and engine_id in OPENROUTER_ONLINE and ":online" not in model:
         model += ":online"
     return model
+
+def engine_model(engine_id):
+    """Человекочитаемая модель/режим для диагностики в /health и /selftest."""
+    src = engine_source(engine_id)
+    if src == "openrouter":
+        return _openrouter_model(engine_id)
+    if src == "direct":
+        return {
+            "perplexity": "sonar",
+            "chatgpt": os.environ.get("OPENAI_MODEL", "gpt-4o-mini-search-preview"),
+            "claude": os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5"),
+            "deepseek": "deepseek-chat",
+            "gemini": os.environ.get("GEMINI_MODEL", "gemini-2.5-flash,gemini-2.0-flash,gemini-2.5-flash-lite"),
+            "gigachat": os.environ.get("GIGACHAT_MODEL", "GigaChat"),
+            "yandex": os.environ.get("YANDEX_MODEL", "yandexgpt-lite"),
+        }.get(engine_id, "")
+    return src
 
 def ask_openrouter(engine_id, prompt):
     key = _openrouter_key()

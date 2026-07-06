@@ -1201,6 +1201,7 @@ def report(oid):
 def health():
     direct_keys = {k: bool(os.environ.get(v)) for k, v in engine.KEY_ENV.items()}
     sources = {k: engine.engine_source(k) for k in engine.KEY_ENV}
+    models = {k: engine.engine_model(k) for k in engine.KEY_ENV}
     keys = {k: engine.has_key(k) for k in engine.KEY_ENV}
     try:
         with db() as c:
@@ -1231,7 +1232,7 @@ def health():
                    notify_url=f"{BASE_URL}/tbank/notify", test_mode=os.environ.get("TEST_MODE") == "1",
                    telegram=bool(tg_token()), bot=tg_bot(), admin=bool(os.environ.get("ADMIN_CHAT_ID")),
                    readiness=readiness, orders=orders, last_order=last_order,
-                   keys=keys, direct_keys=direct_keys, engine_sources=sources)
+                   keys=keys, direct_keys=direct_keys, engine_sources=sources, engine_models=models)
 
 @app.get("/selftest")
 def selftest():
@@ -1255,9 +1256,10 @@ def selftest():
             else:
                 ans = engine.REAL_ADAPTERS[eid](prompt); mode = source
             out[eid] = {"ok": True, "mode": mode, "source": source, "ms": int((time.time()-t0)*1000),
-                        "len": len(ans or ""), "snippet": (ans or "")[:200]}
+                        "model": engine.engine_model(eid), "len": len(ans or ""), "snippet": (ans or "")[:200]}
         except Exception as ex:
             out[eid] = {"ok": False, "source": engine.engine_source(eid),
+                        "model": engine.engine_model(eid),
                         "ms": int((time.time()-t0)*1000), "error": f"{type(ex).__name__}: {str(ex)[:300]}"}
     return jsonify(prompt=prompt, test_mode=os.environ.get("TEST_MODE") == "1", engines=out)
 

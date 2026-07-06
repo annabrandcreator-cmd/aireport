@@ -1440,6 +1440,31 @@ def _openrouter_model(engine_id):
 def _openrouter_base_model(engine_id):
     return _openrouter_model(engine_id).replace(":online", "")
 
+def _openrouter_model_chain(engine_id):
+    """Список моделей-кандидатов для одного движка.
+
+    У ChatGPT через OpenRouter иногда бывает валидный HTTP-ответ с пустым content.
+    Тогда нельзя выпускать отчет без ChatGPT: пробуем резервные OpenAI-модели.
+    """
+    primary = _openrouter_model(engine_id)
+    models = [primary]
+    if engine_id == "chatgpt":
+        raw = os.environ.get(
+            "OPENROUTER_CHATGPT_FALLBACK_MODELS",
+            "openai/gpt-5-mini,openai/gpt-4.1-mini,openai/gpt-4o-mini-search-preview,openai/gpt-4o-mini",
+        )
+        models.extend(x.strip() for x in raw.split(",") if x.strip())
+    elif primary.endswith(":online"):
+        models.append(primary.replace(":online", ""))
+
+    out = []
+    seen = set()
+    for model in models:
+        if model and model not in seen:
+            seen.add(model)
+            out.append(model)
+    return out
+
 def engine_model(engine_id):
     """Человекочитаемая модель/режим для диагностики в /health и /selftest."""
     src = engine_source(engine_id)
@@ -1500,6 +1525,21 @@ def ask_openrouter(engine_id, prompt):
         "max_tokens": int(os.environ.get("OPENROUTER_MAX_TOKENS", "900") or 900),
         "temperature": float(os.environ.get("OPENROUTER_TEMPERATURE", "0.3") or 0.3),
     }
+    models = _openrouter_model_chain(engine_id)
+
+    def _try_models():
+        last = None
+        for model in models:
+            try:
+                return _post_openrouter_content(engine_id, headers, dict(payload, model=model))
+            except Exception as e:
+                last = e
+                if engine_id == "chatgpt":
+                    print(f"[openrouter] chatgpt model={model} не ответил: {type(e).__name__}: {str(e)[:160]}", flush=True)
+                    continue
+                raise
+        raise last or RuntimeError(f"OpenRouter не ответил для {engine_id}")
+
     if _openrouter_serial_call(engine_id):
         lock = _OPENROUTER_LOCKS.setdefault(engine_id, threading.Lock())
         with lock:
@@ -1507,25 +1547,11 @@ def ask_openrouter(engine_id, prompt):
             wait = _OPENROUTER_NEXT.get(engine_id, 0.0) - time.time()
             if wait > 0:
                 time.sleep(wait)
-            try:
-                content = _post_openrouter_content(engine_id, headers, payload)
-            except Exception:
-                if engine_id == "chatgpt" and payload["model"].endswith(":online"):
-                    payload = dict(payload, model=_openrouter_base_model(engine_id))
-                    content = _post_openrouter_content(engine_id, headers, payload)
-                else:
-                    raise
+            content = _try_models()
             if gap > 0:
                 _OPENROUTER_NEXT[engine_id] = time.time() + gap
     else:
-        try:
-            content = _post_openrouter_content(engine_id, headers, payload)
-        except Exception:
-            if engine_id == "chatgpt" and payload["model"].endswith(":online"):
-                payload = dict(payload, model=_openrouter_base_model(engine_id))
-                content = _post_openrouter_content(engine_id, headers, payload)
-            else:
-                raise
+        content = _try_models()
     return content
 
 def ask_perplexity(prompt):

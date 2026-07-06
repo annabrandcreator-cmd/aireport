@@ -11,6 +11,7 @@
 Ключи (env), подключаются по мере появления:
   PERPLEXITY_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY,
   DEEPSEEK_API_KEY, GIGACHAT_API_KEY, YANDEX_API_KEY, YANDEX_FOLDER_ID
+  OPENROUTER_API_KEY -> единый шлюз для зарубежных моделей, если прямого ключа нет
 """
 import os, re, json, time, hashlib, datetime, urllib.request, urllib.error, ssl, uuid, threading
 from concurrent.futures import ThreadPoolExecutor
@@ -1403,7 +1404,60 @@ def _post_json(url, headers, payload, timeout=40):
         body = ex.read().decode("utf-8", "replace")[:500]   # тело ошибки -> видно точную причину
         raise RuntimeError(f"HTTP {ex.code}: {body}")
 
+OPENROUTER_ENGINES = {"perplexity", "chatgpt", "claude", "deepseek", "gemini"}
+OPENROUTER_MODEL_ENV = {
+    "perplexity": "OPENROUTER_PERPLEXITY_MODEL",
+    "chatgpt": "OPENROUTER_CHATGPT_MODEL",
+    "claude": "OPENROUTER_CLAUDE_MODEL",
+    "deepseek": "OPENROUTER_DEEPSEEK_MODEL",
+    "gemini": "OPENROUTER_GEMINI_MODEL",
+}
+OPENROUTER_MODEL_DEFAULT = {
+    "perplexity": "perplexity/sonar",
+    "chatgpt": "~openai/gpt-latest",
+    "claude": "~anthropic/claude-sonnet-latest",
+    "deepseek": "deepseek/deepseek-chat",
+    "gemini": "google/gemini-2.5-flash",
+}
+OPENROUTER_ONLINE = {"perplexity", "chatgpt", "claude", "gemini"}
+
+def _direct_key(engine_id):
+    env = KEY_ENV.get(engine_id)
+    return bool(env and os.environ.get(env))
+
+def _openrouter_key():
+    return os.environ.get("OPENROUTER_API_KEY", "").strip()
+
+def _openrouter_model(engine_id):
+    model = os.environ.get(OPENROUTER_MODEL_ENV[engine_id], OPENROUTER_MODEL_DEFAULT[engine_id]).strip()
+    use_online = os.environ.get("OPENROUTER_WEB_SEARCH", "1").strip().lower() not in ("0", "false", "no", "off")
+    if use_online and engine_id in OPENROUTER_ONLINE and ":online" not in model:
+        model += ":online"
+    return model
+
+def ask_openrouter(engine_id, prompt):
+    key = _openrouter_key()
+    if not key:
+        raise RuntimeError("OPENROUTER_API_KEY не задан")
+    headers = {
+        "Authorization": "Bearer " + key,
+        "Content-Type": "application/json",
+        "HTTP-Referer": os.environ.get("OPENROUTER_SITE_URL", "https://annakurbatova.ru"),
+        "X-OpenRouter-Title": os.environ.get("OPENROUTER_APP_TITLE", "AI visibility report"),
+    }
+    payload = {
+        "model": _openrouter_model(engine_id),
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": int(os.environ.get("OPENROUTER_MAX_TOKENS", "900") or 900),
+        "temperature": float(os.environ.get("OPENROUTER_TEMPERATURE", "0.3") or 0.3),
+    }
+    j = _post_json(os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"),
+                   headers, payload, timeout=70)
+    return j["choices"][0]["message"]["content"]
+
 def ask_perplexity(prompt):
+    if not _direct_key("perplexity") and _openrouter_key():
+        return ask_openrouter("perplexity", prompt)
     key = os.environ["PERPLEXITY_API_KEY"]
     j = _post_json("https://api.perplexity.ai/chat/completions",
                    {"Authorization": "Bearer "+key, "Content-Type": "application/json"},
@@ -1411,6 +1465,8 @@ def ask_perplexity(prompt):
     return j["choices"][0]["message"]["content"]
 
 def ask_openai(prompt):
+    if not _direct_key("chatgpt") and _openrouter_key():
+        return ask_openrouter("chatgpt", prompt)
     key = os.environ["OPENAI_API_KEY"]
     # модель с встроенным веб-поиском (chat/completions): реально ищет в интернете и называет компании
     model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini-search-preview")
@@ -1421,6 +1477,8 @@ def ask_openai(prompt):
     return j["choices"][0]["message"]["content"]
 
 def ask_claude(prompt):
+    if not _direct_key("claude") and _openrouter_key():
+        return ask_openrouter("claude", prompt)
     key = os.environ["ANTHROPIC_API_KEY"]
     model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")   # актуальная лёгкая модель; сменить переменной
     j = _post_json("https://api.anthropic.com/v1/messages",
@@ -1430,6 +1488,8 @@ def ask_claude(prompt):
     return "".join(b.get("text", "") for b in j.get("content", []))
 
 def ask_deepseek(prompt):
+    if not _direct_key("deepseek") and _openrouter_key():
+        return ask_openrouter("deepseek", prompt)
     key = os.environ["DEEPSEEK_API_KEY"]
     j = _post_json("https://api.deepseek.com/chat/completions",
                    {"Authorization": "Bearer "+key, "Content-Type": "application/json"},
@@ -1457,6 +1517,8 @@ def _gemini_pace():
 # на квоту/ключ (429/billing) — нет смысла, выходим сразу.
 _GEMINI_CAP = re.compile(r"503|unavailable|high demand|overload|deadline|exceeded.*deadline|temporar", re.I)
 def ask_gemini(prompt):
+    if not _direct_key("gemini") and _openrouter_key():
+        return ask_openrouter("gemini", prompt)
     key = os.environ["GEMINI_API_KEY"]
     models = [m.strip() for m in os.environ.get(
         "GEMINI_MODEL", "gemini-2.5-flash,gemini-2.0-flash,gemini-2.5-flash-lite").split(",") if m.strip()]
@@ -1539,8 +1601,18 @@ REAL_ADAPTERS = {"perplexity": ask_perplexity, "chatgpt": ask_openai, "claude": 
 KEY_ENV = {"perplexity": "PERPLEXITY_API_KEY", "chatgpt": "OPENAI_API_KEY", "claude": "ANTHROPIC_API_KEY",
            "deepseek": "DEEPSEEK_API_KEY", "gemini": "GEMINI_API_KEY", "gigachat": "GIGACHAT_API_KEY", "yandex": "YANDEX_API_KEY"}
 
+def engine_source(engine_id):
+    """direct/openrouter/missing/mock — откуда берём конкретный движок."""
+    if os.environ.get("TEST_MODE") == "1":
+        return "mock"
+    if _direct_key(engine_id):
+        return "direct"
+    if engine_id in OPENROUTER_ENGINES and _openrouter_key():
+        return "openrouter"
+    return "missing"
+
 def has_key(engine_id):
-    return bool(os.environ.get(KEY_ENV[engine_id]))
+    return engine_source(engine_id) in ("direct", "openrouter")
 
 def active_engines():
     """В бою опрашиваем только нейросети с ключом. Без ключей вовсе — мок-демо по всем 7."""
@@ -2160,7 +2232,8 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
         "plan30": _plan30(site_info, niche),
         "method_note": (f"Каждой из {len(work)} рабочих нейросетей задано {len(queries)} вопросов по {RUNS} прогона — всего {len(queries)*len(work)*RUNS} ответов на дату на обложке; "
                         + (f"Нейросеть {', '.join(failed_names)} в этот раз не ответила (ошибка доступа к API) и в расчёт видимости не вошла. " if failed_names else "")
-                        + "Где нейросеть умеет искать в интернете, использовался веб-поиск. Упоминание — явное называние бренда, домена или короткого имени. "
+                        + "Проверка выполнена через API-доступ к AI-моделям; ответы в пользовательских приложениях могут отличаться из-за истории диалога, региона, версии модели и настроек поиска. "
+                        "Где нейросеть умеет искать в интернете, использовался веб-поиск. Упоминание — явное называние бренда, домена или короткого имени. "
                         "Причины отсутствия бренда отмечены как гипотезы, а не доказанные факты. Ответы нейросетей меняются со временем; "
                         "повторный замер имеет смысл после индексации обновлённых страниц."),
     }

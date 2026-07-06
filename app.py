@@ -11,6 +11,7 @@
   PRICE_RUB        = 1290
   BASE_URL         = https://service.annakurbatova.ru   (адрес этого сервиса)
   SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, MAIL_FROM  (для писем)
+  OPENROUTER_API_KEY (единый шлюз для зарубежных моделей) или прямые ключи:
   PERPLEXITY_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY,
   DEEPSEEK_API_KEY, GIGACHAT_API_KEY, YANDEX_API_KEY, YANDEX_FOLDER_ID  (по мере появления)
   TEST_MODE=1  -> движок в мок-режиме (без ключей, для проверки)
@@ -1198,7 +1199,9 @@ def report(oid):
 
 @app.get("/health")
 def health():
-    keys = {k: bool(os.environ.get(v)) for k, v in engine.KEY_ENV.items()}
+    direct_keys = {k: bool(os.environ.get(v)) for k, v in engine.KEY_ENV.items()}
+    sources = {k: engine.engine_source(k) for k in engine.KEY_ENV}
+    keys = {k: engine.has_key(k) for k in engine.KEY_ENV}
     try:
         with db() as c:
             rows = c.execute("SELECT status, COUNT(*) FROM orders GROUP BY status").fetchall()
@@ -1211,7 +1214,9 @@ def health():
         orders, last_order = {"err": str(e)}, None
     # готовность к боевому запуску — видно одним взглядом
     readiness = {
-        "engines_with_keys": sum(1 for v in keys.values() if v),     # сколько из 7 нейросетей подключено
+        "engines_with_keys": sum(1 for v in keys.values() if v),     # сколько из 7 нейросетей подключено напрямую или через шлюз
+        "openrouter_set": bool(os.environ.get("OPENROUTER_API_KEY")),
+        "openrouter_engines": sum(1 for v in sources.values() if v == "openrouter"),
         "live_terminal": "DEMO" not in (TERMINAL or "").upper(),     # False = ещё тестовый терминал
         "receipt_on": _receipt_on(),                                  # чек 54-ФЗ включён
         "taxation": os.environ.get("TBANK_TAXATION", "usn_income"),
@@ -1225,7 +1230,8 @@ def health():
     return jsonify(ok=True, version=VERSION, terminal=TERMINAL, price=PRICE, base_url=BASE_URL,
                    notify_url=f"{BASE_URL}/tbank/notify", test_mode=os.environ.get("TEST_MODE") == "1",
                    telegram=bool(tg_token()), bot=tg_bot(), admin=bool(os.environ.get("ADMIN_CHAT_ID")),
-                   readiness=readiness, orders=orders, last_order=last_order, keys=keys)
+                   readiness=readiness, orders=orders, last_order=last_order,
+                   keys=keys, direct_keys=direct_keys, engine_sources=sources)
 
 @app.get("/selftest")
 def selftest():
@@ -1238,19 +1244,21 @@ def selftest():
         abort(429)
     niche = request.args.get("niche", "мебель на заказ")
     city = request.args.get("city", "")
-    prompt = engine.generate_queries(niche, city)[0]["q"]
+    prompt = engine.generate_queries_tpl(niche, city)[0]["q"]   # без LLM-вызова до диагностики самих моделей
     out = {}
     for e in engine.active_engines():
         eid = e["id"]; t0 = time.time()
         try:
+            source = engine.engine_source(eid)
             if os.environ.get("TEST_MODE") == "1" or not engine.has_key(eid):
                 ans = engine.ask_mock(prompt, eid, 0, "тест"); mode = "mock"
             else:
-                ans = engine.REAL_ADAPTERS[eid](prompt); mode = "real"
-            out[eid] = {"ok": True, "mode": mode, "ms": int((time.time()-t0)*1000),
+                ans = engine.REAL_ADAPTERS[eid](prompt); mode = source
+            out[eid] = {"ok": True, "mode": mode, "source": source, "ms": int((time.time()-t0)*1000),
                         "len": len(ans or ""), "snippet": (ans or "")[:200]}
         except Exception as ex:
-            out[eid] = {"ok": False, "ms": int((time.time()-t0)*1000), "error": f"{type(ex).__name__}: {str(ex)[:300]}"}
+            out[eid] = {"ok": False, "source": engine.engine_source(eid),
+                        "ms": int((time.time()-t0)*1000), "error": f"{type(ex).__name__}: {str(ex)[:300]}"}
     return jsonify(prompt=prompt, test_mode=os.environ.get("TEST_MODE") == "1", engines=out)
 
 # ───────────────────────── мини-CRM (заказы и клиенты) ───────────────

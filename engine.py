@@ -1469,6 +1469,21 @@ def _post_openrouter(engine_id, headers, payload):
     return _post_json(os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"),
                       headers, payload, timeout=70)
 
+def _openrouter_content(j):
+    msg = (j.get("choices") or [{}])[0].get("message") or {}
+    content = msg.get("content", "")
+    if isinstance(content, list):
+        return "".join((part.get("text") or part.get("content") or "") if isinstance(part, dict) else str(part)
+                       for part in content).strip()
+    return (content or "").strip()
+
+def _post_openrouter_content(engine_id, headers, payload):
+    j = _post_openrouter(engine_id, headers, payload)
+    content = _openrouter_content(j)
+    if not content:
+        raise RuntimeError(f"OpenRouter вернул пустой ответ для {payload.get('model')}")
+    return content
+
 def ask_openrouter(engine_id, prompt):
     key = _openrouter_key()
     if not key:
@@ -1493,25 +1508,25 @@ def ask_openrouter(engine_id, prompt):
             if wait > 0:
                 time.sleep(wait)
             try:
-                j = _post_openrouter(engine_id, headers, payload)
+                content = _post_openrouter_content(engine_id, headers, payload)
             except Exception:
                 if engine_id == "chatgpt" and payload["model"].endswith(":online"):
                     payload = dict(payload, model=_openrouter_base_model(engine_id))
-                    j = _post_openrouter(engine_id, headers, payload)
+                    content = _post_openrouter_content(engine_id, headers, payload)
                 else:
                     raise
             if gap > 0:
                 _OPENROUTER_NEXT[engine_id] = time.time() + gap
     else:
         try:
-            j = _post_openrouter(engine_id, headers, payload)
+            content = _post_openrouter_content(engine_id, headers, payload)
         except Exception:
             if engine_id == "chatgpt" and payload["model"].endswith(":online"):
                 payload = dict(payload, model=_openrouter_base_model(engine_id))
-                j = _post_openrouter(engine_id, headers, payload)
+                content = _post_openrouter_content(engine_id, headers, payload)
             else:
                 raise
-    return j["choices"][0]["message"]["content"]
+    return content
 
 def ask_perplexity(prompt):
     if not _direct_key("perplexity") and _openrouter_key():
@@ -1755,7 +1770,10 @@ def _ask_one(prompt, eid, run, brand, test, errlog=None, errlock=None):
     max_try = 3 if eid == "gemini" else 2                   # Gemini чаще ловит «high demand» -> на попытку больше (добор — в спас.проходе)
     for attempt in range(1, max_try + 1):                   # повтор при временном сбое (503/429/обрыв и пр.)
         try:
-            return REAL_ADAPTERS[eid](prompt)
+            ans = REAL_ADAPTERS[eid](prompt)
+            if not (ans or "").strip():
+                raise RuntimeError("пустой ответ API")
+            return ans
         except Exception as e:
             msg = str(e)
             print(f"[ask] {eid} ошибка (попытка {attempt}): {type(e).__name__}: {msg[:120]}", flush=True)

@@ -1261,6 +1261,8 @@ def selftest():
                 ans = engine.ask_mock(prompt, eid, 0, "тест"); mode = "mock"
             else:
                 ans = engine.REAL_ADAPTERS[eid](prompt); mode = source
+            if not (ans or "").strip():
+                raise RuntimeError("пустой ответ API")
             out[eid] = {"ok": True, "mode": mode, "source": source, "ms": int((time.time()-t0)*1000),
                         "model": engine.engine_model(eid), "len": len(ans or ""), "snippet": (ans or "")[:200]}
         except Exception as ex:

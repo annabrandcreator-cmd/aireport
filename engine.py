@@ -16,7 +16,7 @@
 import os, re, json, time, hashlib, datetime, urllib.request, urllib.error, ssl, uuid, threading
 from concurrent.futures import ThreadPoolExecutor
 
-RUNS = max(2, int(os.environ.get("RUNS", "2") or 2))  # прогонов на каждый запрос (для стабильности можно 3-5)
+RUNS = max(2, int(os.environ.get("RUNS", "2") or 2))  # прогонов на каждый запрос (продуктовый режим: 2/2)
 
 ENGINES = [
     {"id":"perplexity","name":"Perplexity","short":"Pp","note":"ищет в интернете, цитирует источники"},
@@ -1414,7 +1414,7 @@ OPENROUTER_MODEL_ENV = {
 }
 OPENROUTER_MODEL_DEFAULT = {
     "perplexity": "perplexity/sonar",
-    "chatgpt": "openai/gpt-5-mini",
+    "chatgpt": "openai/gpt-4o-mini-search-preview",
     "claude": "~anthropic/claude-sonnet-latest",
     "deepseek": "deepseek/deepseek-chat",
     "gemini": "google/gemini-2.5-flash",
@@ -1432,8 +1432,9 @@ def _openrouter_key():
 
 def _openrouter_model(engine_id):
     model = os.environ.get(OPENROUTER_MODEL_ENV[engine_id], OPENROUTER_MODEL_DEFAULT[engine_id]).strip()
-    use_online = os.environ.get("OPENROUTER_WEB_SEARCH", "1").strip().lower() not in ("0", "false", "no", "off")
-    if use_online and engine_id in OPENROUTER_ONLINE and ":online" not in model:
+    use_online = os.environ.get(f"OPENROUTER_{engine_id.upper()}_WEB_SEARCH",
+                                os.environ.get("OPENROUTER_WEB_SEARCH", "1")).strip().lower() not in ("0", "false", "no", "off")
+    if use_online and engine_id in OPENROUTER_ONLINE and ":online" not in model and "search-preview" not in model:
         model += ":online"
     return model
 
@@ -1451,7 +1452,7 @@ def _openrouter_model_chain(engine_id):
     if engine_id == "chatgpt":
         raw = os.environ.get(
             "OPENROUTER_CHATGPT_FALLBACK_MODELS",
-            "openai/gpt-5-mini,openai/gpt-4.1-mini,openai/gpt-4o-mini-search-preview,openai/gpt-4o-mini",
+            "openai/gpt-4o-mini-search-preview,openai/gpt-4o-mini,openai/gpt-4.1-mini,openai/gpt-5-mini",
         )
         models.extend(x.strip() for x in raw.split(",") if x.strip())
     elif primary.endswith(":online"):
@@ -2217,8 +2218,10 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
     failed_names = [e["name"] for e in eng if e["id"] in failed_set]
     groups_pos = [g[0] for g in groups if g[1] > 0]
     groups_zero = [g[0] for g in groups if g[1] == 0]
-    rep_groups = sorted({q["group"] for q in queries if any(v == 2 for v in q["hits"].values())})   # 2/2 хотя бы в одной ячейке
-    n_rep_q = sum(1 for q in queries if any(v == 2 for v in q["hits"].values()))    # запросов с повторяемым (2/2) упоминанием
+    run_mark = f"{RUNS}/{RUNS}"
+    hit_once = f"{min(1, RUNS)}/{RUNS}"
+    rep_groups = sorted({q["group"] for q in queries if any(v >= RUNS for v in q["hits"].values())})
+    n_rep_q = sum(1 for q in queries if any(v >= RUNS for v in q["hits"].values()))
     fem = _brand_gender(brand_short) == "f"                                          # женский личный бренд -> женское согласование
     appeared_neg = "не появилась" if fem else "не появился"
     mentioned_neg = "не была упомянута" if fem else "не был упомянут"
@@ -2320,11 +2323,12 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
     data = {
         "brand": brand, "brand_short": brand_short, "site": _host(site),
         "niche": niche, "city": city, "date": datetime.datetime.now().strftime("%d.%m.%Y"),
+        "runs": RUNS,
         "cover_sub": ((f"В этой проверке {brand_short} {appeared_neg} в ответах нейросетей. Первые шаги: сделать ключевые страницы понятнее на сайте, "
                        "дополнить их конкретными фактами и увеличить число упоминаний бренда на внешних площадках.")
                       if zero else
-                      (f"Бренд появляется в части ответов: повторяемое упоминание (2/2) по {n_rep_q} из {len(queries)} запросов." if rep_groups
-                       else "Бренд появляется в части ответов, пока единичными упоминаниями (1/2).")),
+                      (f"Бренд появляется в части ответов: устойчивое упоминание ({run_mark}) по {n_rep_q} из {len(queries)} запросов." if rep_groups
+                       else f"Бренд появляется в части ответов, пока единичными упоминаниями ({hit_once}).")),
         "engines": [dict(e, failed=(e["id"] in failed_set)) for e in eng],
         "failed_engines": failed_names,
         "failed_engine_details": failed_details or {},
@@ -2340,17 +2344,17 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
                      if zero else "Упоминания распределены неравномерно по запросам: по части вопросов бренд не появляется."),
             "strong": ("Сначала нужно сделать понятнее существующие ключевые страницы, а затем увеличить число независимых "
                        "упоминаний компании: отзывов, публикаций, карточек и отраслевых подборок."
-                       if zero else (f"Повторяемое упоминание (2/2) уже есть по {n_rep_q} из {len(queries)} запросов — на них можно опереться и расширять охват на остальные запросы и нейросети." if rep_groups
-                                     else "Пока упоминания единичные (1/2): бренд появляется не в обоих ответах на один и тот же вопрос.")),
+                       if zero else (f"Устойчивое упоминание ({run_mark}) уже есть по {n_rep_q} из {len(queries)} запросов — на них можно опереться и расширять охват на остальные запросы и нейросети." if rep_groups
+                                     else f"Пока упоминания единичные ({hit_once}): бренд появляется не во всех проверках одного и того же вопроса.")),
             "goal": ("Добиться первых повторяемых упоминаний: чтобы нейросеть называла бренд не случайно, а в обоих повторных ответах на один и тот же вопрос."
                      if zero else
                      ("Поднять долю ответов с упоминанием в каждой нейросети и выровнять видимость между ними — "
-                      f"повторяемое упоминание (2/2) уже есть по всем {n_rep_q} запросам."
+                      f"устойчивое упоминание ({run_mark}) уже есть по всем {n_rep_q} запросам."
                       if n_rep_q >= len(queries) else
-                      (f"Увеличить число запросов с повторяемым упоминанием с {n_rep_q} до {min(len(queries), n_rep_q + 3)} из {len(queries)}"
+                      (f"Увеличить число запросов с устойчивым упоминанием с {n_rep_q} до {min(len(queries), n_rep_q + 3)} из {len(queries)}"
                        + (" и добиться появления хотя бы во второй нейросети." if len(mentioned_engines) <= 1 else " и поднять долю ответов с упоминанием в каждой нейросети.")
                        if n_rep_q >= 1 else
-                       "Добиться первых повторяемых упоминаний (2 из 2): чтобы бренд появлялся в обоих ответах на один вопрос, а не через раз."))),
+                       f"Добиться первых устойчивых упоминаний ({run_mark}): чтобы бренд появлялся в ответах на выбранные вопросы, а не случайно."))),
         },
         "examples": examples,
         "full_answers": full_answers,
@@ -2467,7 +2471,7 @@ def _positives(rates, best, zero, site_info=None, rep_groups=None):
     if not zero:
         pos.append(f"Бренд появляется в {best['name']} ({rates[best['id']]}% ответов)")
         if rep_groups:
-            pos.append("Есть повторяемые упоминания (2/2): бренд появляется в обоих ответах на часть вопросов")
+            pos.append(f"Есть устойчивые упоминания ({RUNS}/{RUNS}): бренд появляется во всех прогонах части вопросов")
     s = site_info or {}
     if s.get("ok"):                                     # реальные активы сайта (проверено)
         sm = _schema_summary(s.get("schema"))

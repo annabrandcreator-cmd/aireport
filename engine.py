@@ -1420,6 +1420,8 @@ OPENROUTER_MODEL_DEFAULT = {
     "gemini": "google/gemini-2.5-flash",
 }
 OPENROUTER_ONLINE = {"perplexity", "chatgpt", "claude", "gemini"}
+_OPENROUTER_LOCKS = {}
+_OPENROUTER_NEXT = {}
 
 def _direct_key(engine_id):
     env = KEY_ENV.get(engine_id)
@@ -1434,6 +1436,9 @@ def _openrouter_model(engine_id):
     if use_online and engine_id in OPENROUTER_ONLINE and ":online" not in model:
         model += ":online"
     return model
+
+def _openrouter_base_model(engine_id):
+    return _openrouter_model(engine_id).replace(":online", "")
 
 def engine_model(engine_id):
     """Человекочитаемая модель/режим для диагностики в /health и /selftest."""
@@ -1452,6 +1457,18 @@ def engine_model(engine_id):
         }.get(engine_id, "")
     return src
 
+def _openrouter_serial_call(engine_id):
+    """Некоторые online-модели OpenRouter (особенно ChatGPT с web-search) плохо держат пачку параллельных вызовов."""
+    return os.environ.get(f"OPENROUTER_{engine_id.upper()}_SERIAL", "1" if engine_id == "chatgpt" else "0").strip().lower() not in ("0", "false", "no", "off")
+
+def _openrouter_min_gap(engine_id):
+    default = "1.5" if engine_id == "chatgpt" else "0"
+    return float(os.environ.get(f"OPENROUTER_{engine_id.upper()}_MIN_GAP", default) or 0)
+
+def _post_openrouter(engine_id, headers, payload):
+    return _post_json(os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"),
+                      headers, payload, timeout=70)
+
 def ask_openrouter(engine_id, prompt):
     key = _openrouter_key()
     if not key:
@@ -1468,8 +1485,32 @@ def ask_openrouter(engine_id, prompt):
         "max_tokens": int(os.environ.get("OPENROUTER_MAX_TOKENS", "900") or 900),
         "temperature": float(os.environ.get("OPENROUTER_TEMPERATURE", "0.3") or 0.3),
     }
-    j = _post_json(os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"),
-                   headers, payload, timeout=70)
+    if _openrouter_serial_call(engine_id):
+        lock = _OPENROUTER_LOCKS.setdefault(engine_id, threading.Lock())
+        with lock:
+            gap = _openrouter_min_gap(engine_id)
+            wait = _OPENROUTER_NEXT.get(engine_id, 0.0) - time.time()
+            if wait > 0:
+                time.sleep(wait)
+            try:
+                j = _post_openrouter(engine_id, headers, payload)
+            except Exception:
+                if engine_id == "chatgpt" and payload["model"].endswith(":online"):
+                    payload = dict(payload, model=_openrouter_base_model(engine_id))
+                    j = _post_openrouter(engine_id, headers, payload)
+                else:
+                    raise
+            if gap > 0:
+                _OPENROUTER_NEXT[engine_id] = time.time() + gap
+    else:
+        try:
+            j = _post_openrouter(engine_id, headers, payload)
+        except Exception:
+            if engine_id == "chatgpt" and payload["model"].endswith(":online"):
+                payload = dict(payload, model=_openrouter_base_model(engine_id))
+                j = _post_openrouter(engine_id, headers, payload)
+            else:
+                raise
     return j["choices"][0]["message"]["content"]
 
 def ask_perplexity(prompt):
@@ -1558,11 +1599,30 @@ def ask_gemini(prompt):
 # GigaChat: ключ из кабинета (Authorization Key, Basic) меняется на access token на 30 минут.
 # Сертификаты Минцифры в контейнере не ставим -> отключаем проверку TLS для доменов Сбера.
 _GIGA_TOKEN = {"val": "", "exp": 0.0}
+_GIGA_LOCK = threading.Lock()
+_GIGA_NEXT = [0.0]
 def _giga_ctx():
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     return ctx
+
+def _giga_serial_call():
+    return os.environ.get("GIGACHAT_SERIAL", "1").strip().lower() not in ("0", "false", "no", "off")
+
+def _giga_min_gap():
+    return float(os.environ.get("GIGACHAT_MIN_GAP", "2.5") or 2.5)
+
+def _giga_pace():
+    if not _giga_serial_call():
+        return
+    gap = _giga_min_gap()
+    now = time.time()
+    wait = _GIGA_NEXT[0] - now
+    if wait > 0:
+        time.sleep(wait)
+        now = time.time()
+    _GIGA_NEXT[0] = now + gap
 
 def _giga_token():
     now = time.time()
@@ -1582,24 +1642,27 @@ def _giga_token():
     return _GIGA_TOKEN["val"]
 
 def ask_gigachat(prompt):
-    last = None
-    for attempt in (1, 2):                                  # GigaChat нестабилен: протухший токен/обрыв TLS -> сброс токена и повтор
-        try:
-            tok = _giga_token()
-            req = urllib.request.Request(
-                "https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
-                data=json.dumps({"model": os.environ.get("GIGACHAT_MODEL", "GigaChat"),
-                                 "messages": [{"role": "user", "content": prompt}]}).encode(),
-                method="POST",
-                headers={"Authorization": "Bearer " + tok, "Content-Type": "application/json", "Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=40, context=_giga_ctx()) as r:
-                return json.loads(r.read().decode())["choices"][0]["message"]["content"]
-        except Exception as e:
-            last = e
-            _GIGA_TOKEN["val"] = ""; _GIGA_TOKEN["exp"] = 0.0   # сбрасываем токен -> на повторе перелогинимся
-            if attempt == 1:
-                time.sleep(1.2); continue
-            raise last
+    lock = _GIGA_LOCK if _giga_serial_call() else threading.Lock()
+    with lock:
+        last = None
+        for attempt in (1, 2, 3):                              # GigaChat нестабилен: протухший токен/обрыв TLS/429 -> сброс токена и повтор
+            try:
+                _giga_pace()
+                tok = _giga_token()
+                req = urllib.request.Request(
+                    "https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
+                    data=json.dumps({"model": os.environ.get("GIGACHAT_MODEL", "GigaChat"),
+                                     "messages": [{"role": "user", "content": prompt}]}).encode(),
+                    method="POST",
+                    headers={"Authorization": "Bearer " + tok, "Content-Type": "application/json", "Accept": "application/json"})
+                with urllib.request.urlopen(req, timeout=40, context=_giga_ctx()) as r:
+                    return json.loads(r.read().decode())["choices"][0]["message"]["content"]
+            except Exception as e:
+                last = e
+                _GIGA_TOKEN["val"] = ""; _GIGA_TOKEN["exp"] = 0.0   # сбрасываем токен -> на повторе перелогинимся
+                if attempt < 3:
+                    time.sleep(8.0 if "429" in str(e) else 1.8); continue
+                raise last
 
 def ask_yandex(prompt):
     key = os.environ["YANDEX_API_KEY"]; folder = os.environ.get("YANDEX_FOLDER_ID", "").strip()
@@ -1685,7 +1748,7 @@ _RATELIMIT = re.compile(r"resource.?exhausted|rate.?limit|too many requests|high
 # только жжём время и остатки квоты. Сразу помечаем сеть как недоступную (клиент увидит честно, Анна — алерт).
 _HARDFAIL = re.compile(r"quota|billing|exceeded your current quota|api[_ ]?key not valid|invalid.{0,4}api.?key|"
                        r"permission denied|unauthor|\b401\b|\b403\b|\b404\b|not found", re.I)
-def _ask_one(prompt, eid, run, brand, test):
+def _ask_one(prompt, eid, run, brand, test, errlog=None, errlock=None):
     if test or not has_key(eid):
         try: return ask_mock(prompt, eid, run, brand)
         except Exception: return None
@@ -1696,6 +1759,13 @@ def _ask_one(prompt, eid, run, brand, test):
         except Exception as e:
             msg = str(e)
             print(f"[ask] {eid} ошибка (попытка {attempt}): {type(e).__name__}: {msg[:120]}", flush=True)
+            if errlog is not None:
+                rec = {"engine": eid, "attempt": attempt, "type": type(e).__name__, "message": msg[:500]}
+                if errlock:
+                    with errlock:
+                        errlog.append(rec)
+                else:
+                    errlog.append(rec)
             if _HARDFAIL.search(msg):
                 return None                                 # квота/биллинг/ключ -> повтор бесполезен, сразу выходим
             if attempt < max_try and _TRANSIENT.search(msg):
@@ -1869,8 +1939,9 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
     tasks = [(qi, e["id"], q["q"], run)
              for qi, q in enumerate(queries) for e in engines for run in range(RUNS)]
     workers = max(1, min(int(os.environ.get("CONCURRENCY", "8")), len(tasks) or 1))
+    errlog = []; errlock = threading.Lock()
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        answers = list(pool.map(lambda t: _ask_one(t[2], t[1], t[3], brand, test), tasks))
+        answers = list(pool.map(lambda t: _ask_one(t[2], t[1], t[3], brand, test, errlog, errlock), tasks))
     # ── «спасательный» проход ──────────────────────────────────────────
     # Если сеть в параллельной пачке провалила большинство вызовов — частая причина
     # это упор в лимит запросов в минуту (особенно Gemini на бесплатном тарифе).
@@ -1890,8 +1961,8 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
                 if time.time() > resc_deadline:  # вышли за бюджет времени -> прекращаем добор (сеть пометится недоступной)
                     print(f"[rescue] {eid}: лимит времени, останавливаю добор", flush=True); break
                 _qi, _eid, q, run = tasks[i]
-                answers[i] = _ask_one(q, eid, run, brand, test)
-                if answers[i] is None and n == 0:
+                answers[i] = _ask_one(q, eid, run, brand, test, errlog, errlock)
+                if answers[i] is None and n == 0 and eid != "chatgpt":
                     print(f"[rescue] {eid}: повтор не помог — сеть недоступна, прекращаю", flush=True)
                     break                       # стойкая ошибка -> не мучаем остальные
     all_answers = []
@@ -1905,6 +1976,13 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
         if detect_mention(ans, aliases):
             queries[qi]["hits"][eid] += 1
     failed = [eid for eid in eng_tot if eng_tot[eid] and eng_err[eid] >= (eng_tot[eid] + 1) // 2]   # большинство вызовов с ошибкой -> движок недоступен
+    failed_details = {}
+    for rec in errlog:
+        if rec["engine"] not in failed:
+            continue
+        arr = failed_details.setdefault(rec["engine"], [])
+        if len(arr) < 4:
+            arr.append({"type": rec["type"], "message": rec["message"]})
     _assign_quotes(queries, tasks, answers, engines, aliases)  # дословный фрагмент одного ответа на каждый запрос
     # ── ОСНОВНОЙ путь: реальные компании + их сайты извлекает сама нейросеть (семантически, без стоп-листов) ──
     real = None if test else _extract_real_companies(all_answers, niche, brand_short or brand, aliases)
@@ -1927,7 +2005,7 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
         # переносим сайты и на «очищенные» имена-домены (1ps.ru остаётся 1ps.ru и т.п.)
         comp_sites = {_clean_comp_name(k): v for k, v in comp_sites.items()}
         _enrich_quotes(queries, aliases, [_clean_comp_name(n) for n in names])   # бренд и компании ИМЕННО в цитате (для согласованного примера)
-        return queries, competitors, failed, comp_sites
+        return queries, competitors, failed, comp_sites, failed_details
     # ── ОТКАТ: модель недоступна -> старый способ (regex + фильтры) ──
     competitors = extract_competitors(all_answers, brand, brand_short, niche, aliases=aliases)
     corpus = "\n".join(a for a in all_answers if a)
@@ -1953,7 +2031,7 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
             cell["others"] = [o for o in cell["others"] if o.lower() in good_low]
     competitors = [(n, c) for (n, c) in competitors if n.lower() in good_low]
     _enrich_quotes(queries, aliases, [n for n in cand if n.lower() in good_low])   # бренд и компании в цитате для согласованного примера
-    return queries, competitors, failed, {}
+    return queries, competitors, failed, {}, failed_details
 
 # ───────────────────────── сборка данных отчёта ───────────────────────
 def _rates(queries):
@@ -2074,7 +2152,7 @@ def _plan30(site_info=None, niche=""):
         ]},
     ]
 
-def build_data(brand, brand_short, site, niche, city, queries, competitors, site_info=None, failed_engines=None, comp_sites=None):
+def build_data(brand, brand_short, site, niche, city, queries, competitors, site_info=None, failed_engines=None, comp_sites=None, failed_details=None):
     eng = active_engines()
     failed_set = set(failed_engines or [])
     work = [e for e in eng if e["id"] not in failed_set] or eng   # рабочие движки (без ошибок API)
@@ -2205,6 +2283,7 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
                        else "Бренд появляется в части ответов, пока единичными упоминаниями (1/2).")),
         "engines": [dict(e, failed=(e["id"] in failed_set)) for e in eng],
         "failed_engines": failed_names,
+        "failed_engine_details": failed_details or {},
         "queries": queries,
         "result_meaning": {
             "headline": ("упоминания не обнаружены" if zero else f"{level_word} видимость"),
@@ -2929,10 +3008,11 @@ def run(brand=None, site=None, niche=None, city=None, brand_short=None, out=None
         prep = prepare(site, niche, city, fallback_brand=brand_short or brand or "")
     site_info = prep.get("site_info")
     aliases = set(prep.get("aliases") or [])
-    q, competitors, failed, comp_sites = analyze(prep["brand"], prep["brand_short"], prep["site"], prep["niche"], prep.get("city"),
-                                                 site_info=site_info, aliases=aliases, queries=prep.get("queries"))
+    q, competitors, failed, comp_sites, failed_details = analyze(prep["brand"], prep["brand_short"], prep["site"], prep["niche"], prep.get("city"),
+                                                                 site_info=site_info, aliases=aliases, queries=prep.get("queries"))
     data = build_data(prep["brand"], prep["brand_short"], prep["site"], prep["niche"], prep.get("city"),
-                      q, competitors, site_info=site_info, failed_engines=failed, comp_sites=comp_sites)
+                      q, competitors, site_info=site_info, failed_engines=failed, comp_sites=comp_sites,
+                      failed_details=failed_details)
     if out:
         with open(out, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=1)
     return data

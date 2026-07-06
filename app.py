@@ -506,9 +506,15 @@ def generate(order_id):
         build_report.build(data, pdf)
         failed_nets = data.get("failed_engines") or []
         if failed_nets:                       # сеть не ответила даже после спасательного прохода -> сигнал Анне
+            details = data.get("failed_engine_details") or {}
+            detail_lines = []
+            for eid, items in details.items():
+                for it in (items or [])[:2]:
+                    detail_lines.append(f"{eid}: {it.get('type','')}: {it.get('message','')[:220]}")
             admin_notify("⚠️ В отчёте не ответили нейросети: " + ", ".join(failed_nets) + "\n"
                          f"Заказ: {order_id} · {o['site']}\n"
-                         "Клиент получил отчёт без них. Проверь /selftest и при необходимости перегенерируй заказ.")
+                         + (("Причины:\n" + "\n".join(detail_lines) + "\n") if detail_lines else "")
+                         + "Клиент получил отчёт без них. Проверь /selftest и при необходимости перегенерируй заказ.")
         with db() as c:
             c.execute("UPDATE orders SET status='done', pdf=? WHERE id=?", (pdf, order_id))
             o = c.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()

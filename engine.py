@@ -1393,6 +1393,115 @@ def extract_competitors(answers, brand, brand_short, niche="", top=3, aliases=No
     return res[:top]
 
 # ───────────────────────── адаптеры нейросетей ───────────────────────
+_OPENROUTER_ENGINES = frozenset({"perplexity", "claude", "deepseek", "gemini", "chatgpt"})
+_OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+_OPENROUTER_DEFAULT_MODEL = {
+    "perplexity": "perplexity/sonar",
+    "claude": "anthropic/claude-haiku-4.5",
+    "deepseek": "deepseek/deepseek-chat",
+    "gemini": "google/gemini-2.5-flash",
+    "chatgpt": "openai/gpt-4o-mini-search-preview",
+}
+# Имена env на Railway (несколько вариантов на движок — берём первый непустой)
+_OPENROUTER_MODEL_ENV = {
+    "perplexity": ("OPENROUTER_MODEL_PERPLEXITY", "OPENROUTER_PERPLEXITY_MODEL"),
+    "claude": ("OPENROUTER_MODEL_CLAUDE", "OPENROUTER_CLAUDE_MODEL"),
+    "deepseek": ("OPENROUTER_MODEL_DEEPSEEK", "OPENROUTER_DEEPSEEK_MODEL"),
+    "gemini": ("OPENROUTER_MODEL_GEMINI", "OPENROUTER_GEMINI_MODEL"),
+    "chatgpt": ("OPENROUTER_CHATGPT_MODEL", "OPENROUTER_MODEL_CHATGPT"),
+}
+_OPENROUTER_FALLBACK_ENV = {
+    "chatgpt": ("OPENROUTER_CHATGPT_FALLBACK_MODEL", "OPENROUTER_CHATGPT_FALLBACK_MODELS", "OPENROUTER_CHATGPT_FALLBACK"),
+}
+_OVERLOAD_CAP = re.compile(r"503|unavailable|high demand|overload|deadline|exceeded.*deadline|temporar", re.I)
+_OR_CHATGPT_LOCK = threading.Lock()
+_OR_CHATGPT_NEXT = [0.0]
+
+def _env_key(name):
+    val = (os.environ.get(name) or "").strip()
+    return val if val and val.lower() not in ("null", "none", "undefined", "-", "your_key_here") else ""
+
+def openrouter_ok():
+    return bool(_env_key("OPENROUTER_API_KEY"))
+
+def _env_truthy(name):
+    v = _env_key(name).lower()
+    return v in ("1", "true", "yes", "on", "all", "force")
+
+def _openrouter_title():
+    return _env_key("OPENROUTER_APP_TITLE") or _env_key("OPENROUTER_APP_NAME") or "AI Visibility Report"
+
+def _openrouter_models(eid):
+    names = _OPENROUTER_MODEL_ENV.get(eid, ())
+    primary = ""
+    for n in names:
+        primary = _env_key(n)
+        if primary:
+            break
+    chain = [m.strip() for m in primary.split(",") if m.strip()] if primary else []
+    for n in _OPENROUTER_FALLBACK_ENV.get(eid, ()):
+        fb = _env_key(n)
+        if fb:
+            chain.extend(m.strip() for m in fb.split(",") if m.strip())
+            break
+    if not chain and eid in _OPENROUTER_DEFAULT_MODEL:
+        chain = [_OPENROUTER_DEFAULT_MODEL[eid]]
+    return chain
+
+def _openrouter_web_on(eid):
+    """Веб-поиск через OpenRouter: для chatgpt/claude/gemini; sonar уже ищет сам."""
+    if not _env_truthy("OPENROUTER_WEB_SEARCH"):
+        return False
+    return eid in ("chatgpt", "claude", "gemini", "deepseek")
+
+def _openrouter_chatgpt_pace():
+    if not _env_truthy("OPENROUTER_CHATGPT_SERIAL"):
+        return
+    gap = float(_env_key("OPENROUTER_CHATGPT_MIN_GAP") or "0" or 0)
+    if gap <= 0:
+        return
+    with _OR_CHATGPT_LOCK:
+        now = time.time()
+        wait = _OR_CHATGPT_NEXT[0] - now
+        if wait > 0:
+            time.sleep(wait); now = time.time()
+        _OR_CHATGPT_NEXT[0] = now + gap
+
+def _openrouter_payload(model, prompt, eid):
+    p = {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 800}
+    if _openrouter_web_on(eid):
+        p["plugins"] = [{"id": "web"}]                         # как на Railway: OPENROUTER_WEB_SEARCH=1
+    return p
+
+def _ask_openrouter(eid, prompt, timeout=50):
+    key = _env_key("OPENROUTER_API_KEY")
+    if not key:
+        raise RuntimeError("OPENROUTER_API_KEY не задан")
+    if eid == "chatgpt":
+        _openrouter_chatgpt_pace()
+    headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json"}
+    site = _env_key("OPENROUTER_SITE_URL") or _env_key("BASE_URL")
+    title = _openrouter_title()
+    if site:
+        headers["HTTP-Referer"] = site
+    if title:
+        headers["X-Title"] = title
+    models = _openrouter_models(eid)
+    if eid == "chatgpt" and _env_truthy("OPENROUTER_WEB_SEARCH"):
+        timeout = max(timeout, 75)
+    last = None
+    for i, model in enumerate(models):
+        try:
+            j = _post_json(_OPENROUTER_URL, headers, _openrouter_payload(model, prompt, eid), timeout=timeout)
+            return j["choices"][0]["message"]["content"]
+        except Exception as e:
+            last = e
+            if i + 1 < len(models) and _OVERLOAD_CAP.search(str(e)):
+                print(f"[openrouter] {eid}/{model} перегружена -> следующая модель", flush=True)
+                continue
+            raise
+    raise last
+
 def _post_json(url, headers, payload, timeout=40):
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
@@ -1404,37 +1513,48 @@ def _post_json(url, headers, payload, timeout=40):
         raise RuntimeError(f"HTTP {ex.code}: {body}")
 
 def ask_perplexity(prompt):
-    key = os.environ["PERPLEXITY_API_KEY"]
-    j = _post_json("https://api.perplexity.ai/v1/chat/completions",
-                   {"Authorization": "Bearer "+key, "Content-Type": "application/json"},
-                   {"model": "sonar", "messages": [{"role": "user", "content": prompt}]})
-    return j["choices"][0]["message"]["content"]
+    if _env_key("PERPLEXITY_API_KEY"):
+        key = os.environ["PERPLEXITY_API_KEY"]
+        j = _post_json("https://api.perplexity.ai/v1/chat/completions",
+                       {"Authorization": "Bearer "+key, "Content-Type": "application/json"},
+                       {"model": os.environ.get("PERPLEXITY_MODEL", "sonar"),
+                        "messages": [{"role": "user", "content": prompt}]})
+        return j["choices"][0]["message"]["content"]
+    return _ask_openrouter("perplexity", prompt)
 
 def ask_openai(prompt):
-    key = os.environ["OPENAI_API_KEY"]
-    # модель с встроенным веб-поиском (chat/completions): реально ищет в интернете и называет компании
-    model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini-search-preview")
-    j = _post_json("https://api.openai.com/v1/chat/completions",
-                   {"Authorization": "Bearer "+key, "Content-Type": "application/json"},
-                   {"model": model, "messages": [{"role": "user", "content": prompt}]},
-                   timeout=60)   # веб-поиск дольше обычного
-    return j["choices"][0]["message"]["content"]
+    # Railway: OPENROUTER_CHATGPT_MODEL + OPENAI_API_KEY — приоритет у прямого OpenAI (веб-поиск)
+    if _env_key("OPENAI_API_KEY"):
+        model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini-search-preview")
+        j = _post_json("https://api.openai.com/v1/chat/completions",
+                       {"Authorization": "Bearer "+os.environ["OPENAI_API_KEY"], "Content-Type": "application/json"},
+                       {"model": model, "messages": [{"role": "user", "content": prompt}]},
+                       timeout=60)
+        return j["choices"][0]["message"]["content"]
+    if openrouter_ok() and _openrouter_models("chatgpt"):
+        return _ask_openrouter("chatgpt", prompt, timeout=75)
+    raise RuntimeError("OPENAI_API_KEY и OPENROUTER_CHATGPT_MODEL не заданы")
 
 def ask_claude(prompt):
-    key = os.environ["ANTHROPIC_API_KEY"]
-    model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")   # актуальная лёгкая модель; сменить переменной
-    j = _post_json("https://api.anthropic.com/v1/messages",
-                   {"x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"},
-                   {"model": model, "max_tokens": 700,
-                    "messages": [{"role": "user", "content": prompt}]})
-    return "".join(b.get("text", "") for b in j.get("content", []))
+    if _env_key("ANTHROPIC_API_KEY"):
+        key = os.environ["ANTHROPIC_API_KEY"]
+        model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
+        j = _post_json("https://api.anthropic.com/v1/messages",
+                       {"x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"},
+                       {"model": model, "max_tokens": 700,
+                        "messages": [{"role": "user", "content": prompt}]})
+        return "".join(b.get("text", "") for b in j.get("content", []))
+    return _ask_openrouter("claude", prompt)
 
 def ask_deepseek(prompt):
-    key = os.environ["DEEPSEEK_API_KEY"]
-    j = _post_json("https://api.deepseek.com/chat/completions",
-                   {"Authorization": "Bearer "+key, "Content-Type": "application/json"},
-                   {"model": "deepseek-chat", "messages": [{"role": "user", "content": prompt}]})
-    return j["choices"][0]["message"]["content"]
+    if _env_key("DEEPSEEK_API_KEY"):
+        key = os.environ["DEEPSEEK_API_KEY"]
+        j = _post_json("https://api.deepseek.com/chat/completions",
+                       {"Authorization": "Bearer "+key, "Content-Type": "application/json"},
+                       {"model": os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
+                        "messages": [{"role": "user", "content": prompt}]})
+        return j["choices"][0]["message"]["content"]
+    return _ask_openrouter("deepseek", prompt)
 
 # Gemini на бесплатном тарифе лимитирован по запросам в минуту (flash-lite ~30/мин).
 # Отчёт шлёт ~20 запросов пачкой -> равномерно разносим их во времени, чтобы не ловить 429.
@@ -1455,26 +1575,27 @@ def _gemini_pace():
 # несколько моделей: если первая перегружена — берём следующую. Список можно переопределить
 # переменной GEMINI_MODEL (через запятую). На перегрузку (503/overload) переходим к следующей,
 # на квоту/ключ (429/billing) — нет смысла, выходим сразу.
-_GEMINI_CAP = re.compile(r"503|unavailable|high demand|overload|deadline|exceeded.*deadline|temporar", re.I)
 def ask_gemini(prompt):
-    key = os.environ["GEMINI_API_KEY"]
-    models = [m.strip() for m in os.environ.get(
-        "GEMINI_MODEL", "gemini-2.5-flash,gemini-2.0-flash,gemini-2.5-flash-lite").split(",") if m.strip()]
-    _gemini_pace()
-    last = None
-    for i, model in enumerate(models):
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
-        try:
-            j = _post_json(url, {"Content-Type": "application/json"},
-                           {"contents": [{"parts": [{"text": prompt}]}]})
-            return j["candidates"][0]["content"]["parts"][0]["text"]
-        except Exception as e:
-            last = e
-            if i + 1 < len(models) and _GEMINI_CAP.search(str(e)):
-                print(f"[gemini] {model} перегружена ({str(e)[:60]}) -> пробую следующую модель", flush=True)
-                continue                                     # модель перегружена -> следующая в списке
-            raise
-    raise last
+    if _env_key("GEMINI_API_KEY"):
+        key = os.environ["GEMINI_API_KEY"]
+        models = [m.strip() for m in os.environ.get(
+            "GEMINI_MODEL", "gemini-2.5-flash,gemini-2.0-flash,gemini-2.5-flash-lite").split(",") if m.strip()]
+        _gemini_pace()
+        last = None
+        for i, model in enumerate(models):
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+            try:
+                j = _post_json(url, {"Content-Type": "application/json"},
+                               {"contents": [{"parts": [{"text": prompt}]}]})
+                return j["candidates"][0]["content"]["parts"][0]["text"]
+            except Exception as e:
+                last = e
+                if i + 1 < len(models) and _OVERLOAD_CAP.search(str(e)):
+                    print(f"[gemini] {model} перегружена ({str(e)[:60]}) -> пробую следующую модель", flush=True)
+                    continue
+                raise
+        raise last
+    return _ask_openrouter("gemini", prompt)
 
 # GigaChat: ключ из кабинета (Authorization Key, Basic) меняется на access token на 30 минут.
 # Сертификаты Минцифры в контейнере не ставим -> отключаем проверку TLS для доменов Сбера.
@@ -1540,12 +1661,15 @@ KEY_ENV = {"perplexity": "PERPLEXITY_API_KEY", "chatgpt": "OPENAI_API_KEY", "cla
            "deepseek": "DEEPSEEK_API_KEY", "gemini": "GEMINI_API_KEY", "gigachat": "GIGACHAT_API_KEY", "yandex": "YANDEX_API_KEY"}
 
 def has_key(engine_id):
-    val = (os.environ.get(KEY_ENV.get(engine_id) or "") or "").strip()
-    if not val or val.lower() in ("null", "none", "undefined", "-", "your_key_here"):
-        return False
-    if engine_id == "yandex" and not (os.environ.get("YANDEX_FOLDER_ID") or "").strip():
-        return False
-    return True
+    if engine_id == "yandex":
+        return bool(_env_key("YANDEX_API_KEY") and _env_key("YANDEX_FOLDER_ID"))
+    if _env_key(KEY_ENV.get(engine_id) or ""):
+        return True
+    if engine_id in _OPENROUTER_ENGINES and openrouter_ok():
+        if engine_id == "chatgpt":
+            return bool(_openrouter_models("chatgpt"))
+        return True
+    return False
 
 def active_engines():
     """Всегда все 7 нейросетей в отчёте и матрице."""
@@ -1843,6 +1967,8 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
             continue
         idxs = [i for i, t in enumerate(tasks) if t[1] == eid]
         ew = min(workers, _ENGINE_WORKERS.get(eid, workers), len(idxs) or 1)
+        if eid == "chatgpt" and _env_truthy("OPENROUTER_CHATGPT_SERIAL"):
+            ew = 1
         print(f"[analyze] опрос {eid}: {len(idxs)} вызовов (workers={ew})", flush=True)
         with ThreadPoolExecutor(max_workers=ew) as pool:
             for i, ans in zip(idxs, pool.map(lambda i: _ask_one(tasks[i][2], eid, tasks[i][3], brand, test), idxs)):

@@ -27,7 +27,7 @@ DB = os.environ.get("DB_PATH") or os.path.join(APP_DIR, "orders.db")
 REPORTS = os.environ.get("REPORTS_DIR") or os.path.join(APP_DIR, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
-VERSION = "v109"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
+VERSION = "v111"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
 TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO").strip()  # .strip() — от случайных пробелов/переноса при вставке
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
@@ -541,7 +541,8 @@ def generate(order_id):
         build_report.build(data, pdf)
         failed_nets = data.get("failed_engines") or []
         est = data.get("engine_status") or {}
-        no_key = [engine.KEY_ENV.get(eid, eid) for eid, st in est.items() if st.get("state") == "no_key"]
+        no_key = [engine.KEY_ENV.get(eid, eid) for eid, st in est.items()
+                  if st.get("state") == "no_key" and not (eid in engine._OPENROUTER_ENGINES and engine.openrouter_ok())]
         if failed_nets or no_key:                       # сеть не ответила -> сигнал Анне с точной причиной
             lines = []
             if no_key:
@@ -1257,7 +1258,7 @@ def report(oid):
 def health():
     keys = {k: engine.has_key(k) for k in engine.KEY_ENV}
     keyed_n = sum(1 for v in keys.values() if v)
-    missing_keys = [env for eid, env in engine.KEY_ENV.items() if not keys.get(eid)]
+    missing_keys = [env for eid, env in engine.KEY_ENV.items() if not engine.has_key(eid)]
     try:
         with db() as c:
             rows = c.execute("SELECT status, COUNT(*) FROM orders GROUP BY status").fetchall()
@@ -1285,7 +1286,7 @@ def health():
                    notify_url=f"{BASE_URL}/tbank/notify", test_mode=os.environ.get("TEST_MODE") == "1",
                    telegram=bool(tg_token()), bot=tg_bot(), admin=bool(os.environ.get("ADMIN_CHAT_ID")),
                    readiness=readiness, orders=orders, last_order=last_order, keys=keys, keyed_count=keyed_n,
-                   missing_keys=missing_keys, engines_total=len(engine.ENGINES))
+                   openrouter=engine.openrouter_ok(), missing_keys=missing_keys, engines_total=len(engine.ENGINES))
 
 @app.get("/selftest")
 def selftest():
@@ -1306,7 +1307,14 @@ def selftest():
             if os.environ.get("TEST_MODE") == "1" or not engine.has_key(eid):
                 ans = engine.ask_mock(prompt, eid, 0, "тест"); mode = "mock"
             else:
-                ans = engine.REAL_ADAPTERS[eid](prompt); mode = "real"
+                ans = engine.REAL_ADAPTERS[eid](prompt)
+                envn = engine.KEY_ENV.get(eid, "")
+                if (os.environ.get(envn) or "").strip():
+                    mode = "direct"
+                elif eid == "chatgpt" and (os.environ.get("OPENAI_API_KEY") or "").strip():
+                    mode = "direct"
+                else:
+                    mode = "openrouter"
             out[eid] = {"ok": True, "mode": mode, "has_key": engine.has_key(eid), "ms": int((time.time()-t0)*1000),
                         "len": len(ans or ""), "snippet": (ans or "")[:200]}
         except Exception as ex:

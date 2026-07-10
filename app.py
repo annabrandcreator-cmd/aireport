@@ -27,7 +27,7 @@ DB = os.environ.get("DB_PATH") or os.path.join(APP_DIR, "orders.db")
 REPORTS = os.environ.get("REPORTS_DIR") or os.path.join(APP_DIR, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
-VERSION = "v108"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
+VERSION = "v109"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
 TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO").strip()  # .strip() — от случайных пробелов/переноса при вставке
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
@@ -534,15 +534,26 @@ def generate(order_id):
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump({"engines": [e["id"] for e in data.get("engines", [])],
                            "failed": data.get("failed_engines") or [],
-                           "keyed": sorted(engine.keyed_engine_ids())}, f, ensure_ascii=False)
+                           "keyed": sorted(engine.keyed_engine_ids()),
+                           "engine_status": data.get("engine_status") or {}}, f, ensure_ascii=False)
         except Exception as e:
             print("[generate] meta json:", e, flush=True)
         build_report.build(data, pdf)
         failed_nets = data.get("failed_engines") or []
-        if failed_nets:                       # сеть не ответила даже после спасательного прохода -> сигнал Анне
-            admin_notify("⚠️ В отчёте не ответили нейросети: " + ", ".join(failed_nets) + "\n"
-                         f"Заказ: {order_id} · {o['site']}\n"
-                         "Клиент получил отчёт без них. Проверь /selftest и при необходимости перегенерируй заказ.")
+        est = data.get("engine_status") or {}
+        no_key = [engine.KEY_ENV.get(eid, eid) for eid, st in est.items() if st.get("state") == "no_key"]
+        if failed_nets or no_key:                       # сеть не ответила -> сигнал Анне с точной причиной
+            lines = []
+            if no_key:
+                lines.append("🔑 Нет ключей на сервере: " + ", ".join(no_key))
+            if failed_nets:
+                lines.append("⚠️ В отчёте не ответили: " + ", ".join(failed_nets))
+                for eid, st in est.items():
+                    if st.get("state") in ("api_failed", "preflight_failed") and st.get("error"):
+                        lines.append(f"  · {eid}: {st['error'][:160]}")
+            lines.append(f"Заказ: {order_id} · {o['site']}")
+            lines.append(f"keyed на сервере: {len(engine.keyed_engine_ids())}/7 · /health и /selftest")
+            admin_notify("\n".join(lines))
         with db() as c:
             c.execute("UPDATE orders SET status='done', pdf=? WHERE id=?", (pdf, order_id))
             o = c.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
@@ -1246,6 +1257,7 @@ def report(oid):
 def health():
     keys = {k: engine.has_key(k) for k in engine.KEY_ENV}
     keyed_n = sum(1 for v in keys.values() if v)
+    missing_keys = [env for eid, env in engine.KEY_ENV.items() if not keys.get(eid)]
     try:
         with db() as c:
             rows = c.execute("SELECT status, COUNT(*) FROM orders GROUP BY status").fetchall()
@@ -1273,7 +1285,7 @@ def health():
                    notify_url=f"{BASE_URL}/tbank/notify", test_mode=os.environ.get("TEST_MODE") == "1",
                    telegram=bool(tg_token()), bot=tg_bot(), admin=bool(os.environ.get("ADMIN_CHAT_ID")),
                    readiness=readiness, orders=orders, last_order=last_order, keys=keys, keyed_count=keyed_n,
-                   engines_total=len(engine.ENGINES))
+                   missing_keys=missing_keys, engines_total=len(engine.ENGINES))
 
 @app.get("/selftest")
 def selftest():

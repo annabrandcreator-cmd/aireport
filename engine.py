@@ -1405,7 +1405,7 @@ def _post_json(url, headers, payload, timeout=40):
 
 def ask_perplexity(prompt):
     key = os.environ["PERPLEXITY_API_KEY"]
-    j = _post_json("https://api.perplexity.ai/chat/completions",
+    j = _post_json("https://api.perplexity.ai/v1/chat/completions",
                    {"Authorization": "Bearer "+key, "Content-Type": "application/json"},
                    {"model": "sonar", "messages": [{"role": "user", "content": prompt}]})
     return j["choices"][0]["message"]["content"]
@@ -1604,6 +1604,38 @@ _RATELIMIT = re.compile(r"resource.?exhausted|rate.?limit|too many requests|high
 # только жжём время и остатки квоты. Сразу помечаем сеть как недоступную (клиент увидит честно, Анна — алерт).
 _HARDFAIL = re.compile(r"quota|billing|exceeded your current quota|api[_ ]?key not valid|invalid.{0,4}api.?key|"
                        r"permission denied|unauthor|\b401\b|\b403\b|\b404\b|not found", re.I)
+_ENGINE_ERR = {}                                              # последняя ошибка по движку (для диагностики в отчёте)
+_ENGINE_WORKERS = {"perplexity": 2, "claude": 2, "deepseek": 3, "gemini": 2, "chatgpt": 4, "gigachat": 3, "yandex": 3}
+
+def _preflight_engines(keyed):
+    """Один пробный вызов на движок — не жжём 20× платных запросов на мёртвый ключ/модель."""
+    if os.environ.get("PREFLIGHT", "1") == "0":
+        return set(keyed), {}
+    probe = "Назови одну российскую компанию одним предложением."
+    alive, errors = set(), {}
+    gap = float(os.environ.get("ENGINE_GAP", "1.5") or 0)
+    for eid in sorted(keyed):
+        ok = False
+        for attempt in range(1, 3):
+            try:
+                ans = REAL_ADAPTERS[eid](probe)
+                if ans and len(str(ans).strip()) > 4:
+                    alive.add(eid); ok = True; break
+                errors[eid] = "пустой ответ"
+            except Exception as ex:
+                msg = str(ex)
+                errors[eid] = f"{type(ex).__name__}: {msg[:220]}"
+                if _HARDFAIL.search(msg):
+                    break
+                if attempt < 2 and _TRANSIENT.search(msg):
+                    time.sleep(2.5 * attempt); continue
+                break
+        if not ok:
+            print(f"[preflight] {eid} FAIL: {errors.get(eid, '')}", flush=True)
+        if gap > 0:
+            time.sleep(gap)
+    return alive, errors
+
 def _ask_one(prompt, eid, run, brand, test, _log=True):
     if test:
         try: return ask_mock(prompt, eid, run, brand)
@@ -1616,6 +1648,7 @@ def _ask_one(prompt, eid, run, brand, test, _log=True):
             return REAL_ADAPTERS[eid](prompt)
         except Exception as e:
             msg = str(e)
+            _ENGINE_ERR[eid] = msg[:220]
             if _log:
                 print(f"[ask] {eid} ошибка (попытка {attempt}): {type(e).__name__}: {msg[:120]}", flush=True)
             if _HARDFAIL.search(msg):
@@ -1775,6 +1808,8 @@ def _extract_real_companies(answers, niche, brand="", aliases=None):
     return out
 
 def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=None, aliases=None, queries=None):
+    global _ENGINE_ERR
+    _ENGINE_ERR = {}
     test = os.environ.get("TEST_MODE") == "1"
     aliases = aliases or brand_aliases(site, site_info, brand, brand_short)
     if queries is None:                                      # набор не передали -> кэш или генерация
@@ -1786,23 +1821,30 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
     queries = [{"q": x["q"], "group": x["group"]} for x in queries]   # чистая копия, без старых hits
     engines = active_engines()
     keyed = keyed_engine_ids()
+    engine_status = {e["id"]: {"state": "no_key"} for e in engines if e["id"] not in keyed}
     print(f"[analyze] engines={len(engines)} keyed={len(keyed)}: {sorted(keyed)}", flush=True)
     for q in queries:
         q["hits"] = {e["id"]: 0 for e in engines}
+    preflight_ok, preflight_err = (keyed, {}) if test else _preflight_engines(keyed)
+    for eid in keyed - preflight_ok:
+        engine_status[eid] = {"state": "preflight_failed", "error": preflight_err.get(eid, "")}
+    poll_ids = preflight_ok if preflight_ok else keyed       # все упали на preflight — всё равно пробуем полный опрос
+    if keyed - poll_ids:
+        print(f"[analyze] preflight пропуск: {sorted(keyed - poll_ids)}", flush=True)
     # Опрашиваем ПО ОДНОЙ нейросети за раз (внутри — параллельно по запросам).
-    # Если бить сразу по всем 7 API пачкой, ловим 429/503 и «ошибка API» у половины сетей.
     tasks = [(qi, e["id"], q["q"], run)
-             for qi, q in enumerate(queries) for e in engines for run in range(RUNS)]
+             for qi, q in enumerate(queries) for e in engines if e["id"] in poll_ids for run in range(RUNS)]
     answers = [None] * len(tasks)
-    workers = max(1, min(int(os.environ.get("CONCURRENCY", "6")), 10))
-    eng_gap = float(os.environ.get("ENGINE_GAP", "1.0") or 0)
+    workers = max(1, min(int(os.environ.get("CONCURRENCY", "3")), 8))
+    eng_gap = float(os.environ.get("ENGINE_GAP", "1.5") or 0)
     for e in engines:
         eid = e["id"]
-        idxs = [i for i, t in enumerate(tasks) if t[1] == eid]
-        if eid not in keyed:
+        if eid not in poll_ids:
             continue
-        print(f"[analyze] опрос {eid}: {len(idxs)} вызовов", flush=True)
-        with ThreadPoolExecutor(max_workers=min(workers, len(idxs) or 1)) as pool:
+        idxs = [i for i, t in enumerate(tasks) if t[1] == eid]
+        ew = min(workers, _ENGINE_WORKERS.get(eid, workers), len(idxs) or 1)
+        print(f"[analyze] опрос {eid}: {len(idxs)} вызовов (workers={ew})", flush=True)
+        with ThreadPoolExecutor(max_workers=ew) as pool:
             for i, ans in zip(idxs, pool.map(lambda i: _ask_one(tasks[i][2], eid, tasks[i][3], brand, test), idxs)):
                 answers[i] = ans
         if not test and eng_gap > 0:
@@ -1813,7 +1855,7 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
         resc_gap = float(os.environ.get("RESCUE_GAP", "2.0") or 0)
         for e in engines:
             eid = e["id"]
-            if eid not in keyed:
+            if eid not in poll_ids:
                 continue
             idxs = [i for i, t in enumerate(tasks) if t[1] == eid and answers[i] is None]
             if not idxs:
@@ -1856,10 +1898,11 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
         if detect_mention(ans, aliases):
             queries[qi]["hits"][eid] += 1
     failed = [eid for eid in eng_tot if eng_tot[eid] and eng_err[eid] >= (eng_tot[eid] + 1) // 2]   # большинство вызовов с ошибкой -> движок недоступен
-    if not test:
-        for e in engines:
-            if e["id"] not in keyed and e["id"] not in failed:
-                failed.append(e["id"])              # ключа нет в env — честно «не проверено»
+    for eid in poll_ids:
+        if eid in failed:
+            engine_status[eid] = {"state": "api_failed", "error": _ENGINE_ERR.get(eid, "")}
+        elif eid not in engine_status:
+            engine_status[eid] = {"state": "ok"}
     _assign_quotes(queries, tasks, answers, engines, aliases)  # дословный фрагмент одного ответа на каждый запрос
     # ── ОСНОВНОЙ путь: реальные компании + их сайты извлекает сама нейросеть (семантически, без стоп-листов) ──
     real = None if test else _extract_real_companies(all_answers, niche, brand_short or brand, aliases)
@@ -1882,7 +1925,7 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
         # переносим сайты и на «очищенные» имена-домены (1ps.ru остаётся 1ps.ru и т.п.)
         comp_sites = {_clean_comp_name(k): v for k, v in comp_sites.items()}
         _enrich_quotes(queries, aliases, [_clean_comp_name(n) for n in names])   # бренд и компании ИМЕННО в цитате (для согласованного примера)
-        return queries, competitors, failed, comp_sites, engines
+        return queries, competitors, failed, comp_sites, engines, engine_status
     # ── ОТКАТ: модель недоступна -> старый способ (regex + фильтры) ──
     competitors = extract_competitors(all_answers, brand, brand_short, niche, aliases=aliases)
     corpus = "\n".join(a for a in all_answers if a)
@@ -1908,7 +1951,7 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
             cell["others"] = [o for o in cell["others"] if o.lower() in good_low]
     competitors = [(n, c) for (n, c) in competitors if n.lower() in good_low]
     _enrich_quotes(queries, aliases, [n for n in cand if n.lower() in good_low])   # бренд и компании в цитате для согласованного примера
-    return queries, competitors, failed, {}, engines
+    return queries, competitors, failed, {}, engines, engine_status
 
 # ───────────────────────── сборка данных отчёта ───────────────────────
 def _rates(queries):
@@ -2042,9 +2085,13 @@ def _plan30(site_info=None, niche=""):
         ]},
     ]
 
-def build_data(brand, brand_short, site, niche, city, queries, competitors, site_info=None, failed_engines=None, comp_sites=None, engines=None):
+def build_data(brand, brand_short, site, niche, city, queries, competitors, site_info=None, failed_engines=None, comp_sites=None, engines=None, engine_status=None):
     eng = list(engines) if engines else active_engines()
+    est = engine_status or {}
     failed_set = set(failed_engines or [])
+    no_key_set = {eid for eid, st in est.items() if st.get("state") == "no_key"}
+    preflight_fail = {eid for eid, st in est.items() if st.get("state") == "preflight_failed"}
+    failed_set |= preflight_fail
     work = [e for e in eng if e["id"] not in failed_set] or eng   # рабочие движки (без ошибок API)
     rates = _rates(queries)
     groups = _groups(queries)
@@ -2171,7 +2218,10 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
                       if zero else
                       (f"Бренд появляется в части ответов: повторяемое упоминание (2/2) по {n_rep_q} из {len(queries)} запросов." if rep_groups
                        else "Бренд появляется в части ответов, пока единичными упоминаниями (1/2).")),
-        "engines": [dict(e, failed=(e["id"] in failed_set)) for e in eng],
+        "engines": [dict(e, failed=(e["id"] in failed_set), no_key=(e["id"] in no_key_set),
+                         error_hint=(est.get(e["id"], {}).get("error") or "")[:140])
+                    for e in eng],
+        "engine_status": est,
         "failed_engines": failed_names,
         "queries": queries,
         "result_meaning": {
@@ -3005,10 +3055,11 @@ def run(brand=None, site=None, niche=None, city=None, brand_short=None, out=None
         prep = prepare(site, niche, city, fallback_brand=brand_short or brand or "")
     site_info = prep.get("site_info")
     aliases = set(prep.get("aliases") or [])
-    q, competitors, failed, comp_sites, engines = analyze(prep["brand"], prep["brand_short"], prep["site"], prep["niche"], prep.get("city"),
+    q, competitors, failed, comp_sites, engines, engine_status = analyze(prep["brand"], prep["brand_short"], prep["site"], prep["niche"], prep.get("city"),
                                                  site_info=site_info, aliases=aliases, queries=prep.get("queries"))
     data = build_data(prep["brand"], prep["brand_short"], prep["site"], prep["niche"], prep.get("city"),
-                      q, competitors, site_info=site_info, failed_engines=failed, comp_sites=comp_sites, engines=engines)
+                      q, competitors, site_info=site_info, failed_engines=failed, comp_sites=comp_sites, engines=engines,
+                      engine_status=engine_status)
     if out:
         with open(out, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=1)
     return data

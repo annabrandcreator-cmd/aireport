@@ -79,8 +79,8 @@ def compute(d):
     for e in eng:
         m=sum(q['hits'].get(e['id'],0) for q in qs)
         e['mentions']=m; e['answers']=len(qs)*RUNS
-        e['rate']=None if e.get('failed') else round(m/e['answers']*100)
-    work=[e for e in eng if not e.get('failed')] or eng     # рабочие движки (без ошибки API) — только по ним считаем %
+        e['rate']=None if e.get('failed') or e.get('no_key') else round(m/e['answers']*100)
+    work=[e for e in eng if not e.get('failed') and not e.get('no_key')] or eng     # рабочие движки
     tot_m=sum(e['mentions'] for e in work); tot_a=sum(e['answers'] for e in work) or 1
     d['overall']=round(tot_m/tot_a*100)
     d['level']="высокая" if d['overall']>=60 else "средняя" if d['overall']>=25 else "низкая"   # единый уровень видимости
@@ -358,13 +358,21 @@ def p_summary(d):
       <div class="box"><h4>Что дальше в отчёте</h4><p>Дальше: видимость по каждой нейросети, таблица повторяемости ответов, примеры реальных ответов, что показала проверка сайта и пошаговый план с приоритетами и ответственными.</p></div>
       {footer(d)}</div>'''
 
+def _engine_fail_sub(e):
+    if e.get('no_key'):
+        return 'ключ не задан на сервере (переменная окружения); в расчёт видимости не входит'
+    hint = (e.get('error_hint') or '').strip()
+    if hint:
+        return f'не удалось проверить: {esc(hint[:120])}; в расчёт видимости не входит'
+    return 'нейросеть не ответила (ошибка доступа к API); в расчёт видимости не входит'
+
 def _engine_bar(e):
-    if e.get('failed'):
+    if e.get('failed') or e.get('no_key'):
         return (f'<div class="bar"><div class="bar-row">'
                 f'<div class="bar-l" style="width:150px">{esc(e["name"])}</div>'
                 f'<div class="bar-track" style="background:transparent"></div>'
                 f'<div class="bar-v" style="color:{FAINT};font-weight:600;width:auto;white-space:nowrap;font-size:9pt">не удалось проверить</div></div>'
-                f'<div class="bar-sub" style="padding-left:160px">нейросеть не ответила (ошибка доступа к API); в расчёт видимости не входит</div></div>')
+                f'<div class="bar-sub" style="padding-left:160px">{_engine_fail_sub(e)}</div></div>')
     return bar(e['name'], e['rate'], f"{e['mentions']} упоминаний в {e['answers']} ответах · {esc(e['note'])}", wl="150px")
 
 def engine_chart(d):
@@ -376,7 +384,7 @@ def engine_chart(d):
             rows+=(f'<div class="ec-row"><div class="ec-name">{nm}</div>'
                    f'<div class="ec-track"><div class="ec-fill" style="width:0"></div></div>'
                    f'<div class="ec-pct" style="color:{FAINT}">—</div></div>'
-                   f'<div class="ec-sub">не удалось проверить: нейросеть не ответила (ошибка API), в расчёт видимости не входит</div>')
+                   f'<div class="ec-sub">{_engine_fail_sub(e)}</div>')
         else:
             r=e['rate']; col=lvl(r)
             rows+=(f'<div class="ec-row"><div class="ec-name">{nm}</div>'
@@ -493,8 +501,12 @@ def _qd_names(lst, lm=None, n=3):
     return ", ".join(out)+tail
 
 def _qd_row(q, e, lm=None):
+    if e.get('no_key'):
+        return f'<div class="qd-e"><b>{esc(e["short"])}:</b> ключ не задан на сервере</div>'
     if e.get('failed'):
-        return f'<div class="qd-e"><b>{esc(e["short"])}:</b> не удалось проверить (ошибка доступа к API)</div>'
+        hint = (e.get('error_hint') or '').strip()
+        extra = f' ({esc(hint[:80])})' if hint else ''
+        return f'<div class="qd-e"><b>{esc(e["short"])}:</b> не удалось проверить{extra}</div>'
     h=q['hits'].get(e['id'],0)
     ev=(q.get('evidence') or {}).get(e['id'],{})
     comps=ev.get('comps',[])                                  # подтверждённые нишевые конкуренты

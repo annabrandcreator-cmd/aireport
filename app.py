@@ -486,7 +486,7 @@ def maybe_start_review(oid):
         claimed = c.execute("UPDATE orders SET status='preparing' WHERE id=? AND status='paid'", (oid,)).rowcount
     if not claimed:
         return False
-    threading.Thread(target=_do_review, args=(oid,), daemon=True).start()
+    threading.Thread(target=_do_review, args=(oid,), daemon=False).start()
     return True
 
 def revise_queries(oid, edited):
@@ -516,7 +516,7 @@ def start_generation(oid):
         c.execute("UPDATE orders SET status='processing', q_final=? WHERE id=?", (qfin, oid))
     if o["tg_chat_id"]:
         tg_send_message(o["tg_chat_id"], "Принято! Запускаю проверку по нейросетям, пришлю готовый отчёт сюда через несколько минут.")
-    threading.Thread(target=generate, args=(oid,), daemon=True).start()
+    threading.Thread(target=generate, args=(oid,), daemon=False).start()
     return True
 
 # ───────────────────────── генерация отчёта ──────────────────────────
@@ -529,6 +529,14 @@ def generate(order_id):
         prep = json.loads(o["prep"]) if o["prep"] else None
         data = engine.run(prep=prep) if prep else engine.run(o["brand"], o["site"], o["niche"], o["city"], brand_short=o["brand_short"])
         pdf = os.path.join(REPORTS, f"{order_id}.pdf")
+        json_path = os.path.join(REPORTS, f"{order_id}.json")
+        try:
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump({"engines": [e["id"] for e in data.get("engines", [])],
+                           "failed": data.get("failed_engines") or [],
+                           "keyed": sorted(engine.keyed_engine_ids())}, f, ensure_ascii=False)
+        except Exception as e:
+            print("[generate] meta json:", e, flush=True)
         build_report.build(data, pdf)
         failed_nets = data.get("failed_engines") or []
         if failed_nets:                       # сеть не ответила даже после спасательного прохода -> сигнал Анне
@@ -1236,7 +1244,8 @@ def report(oid):
 
 @app.get("/health")
 def health():
-    keys = {k: bool(os.environ.get(v)) for k, v in engine.KEY_ENV.items()}
+    keys = {k: engine.has_key(k) for k in engine.KEY_ENV}
+    keyed_n = sum(1 for v in keys.values() if v)
     try:
         with db() as c:
             rows = c.execute("SELECT status, COUNT(*) FROM orders GROUP BY status").fetchall()
@@ -1263,7 +1272,8 @@ def health():
     return jsonify(ok=True, version=VERSION, terminal=TERMINAL, price=PRICE, base_url=BASE_URL,
                    notify_url=f"{BASE_URL}/tbank/notify", test_mode=os.environ.get("TEST_MODE") == "1",
                    telegram=bool(tg_token()), bot=tg_bot(), admin=bool(os.environ.get("ADMIN_CHAT_ID")),
-                   readiness=readiness, orders=orders, last_order=last_order, keys=keys)
+                   readiness=readiness, orders=orders, last_order=last_order, keys=keys, keyed_count=keyed_n,
+                   engines_total=len(engine.ENGINES))
 
 @app.get("/selftest")
 def selftest():
@@ -1285,11 +1295,13 @@ def selftest():
                 ans = engine.ask_mock(prompt, eid, 0, "тест"); mode = "mock"
             else:
                 ans = engine.REAL_ADAPTERS[eid](prompt); mode = "real"
-            out[eid] = {"ok": True, "mode": mode, "ms": int((time.time()-t0)*1000),
+            out[eid] = {"ok": True, "mode": mode, "has_key": engine.has_key(eid), "ms": int((time.time()-t0)*1000),
                         "len": len(ans or ""), "snippet": (ans or "")[:200]}
         except Exception as ex:
-            out[eid] = {"ok": False, "ms": int((time.time()-t0)*1000), "error": f"{type(ex).__name__}: {str(ex)[:300]}"}
-    return jsonify(prompt=prompt, test_mode=os.environ.get("TEST_MODE") == "1", engines=out)
+            out[eid] = {"ok": False, "has_key": engine.has_key(eid), "ms": int((time.time()-t0)*1000),
+                        "error": f"{type(ex).__name__}: {str(ex)[:300]}"}
+    return jsonify(prompt=prompt, test_mode=os.environ.get("TEST_MODE") == "1",
+                   keyed=sorted(engine.keyed_engine_ids()), engines=out)
 
 # ───────────────────────── мини-CRM (заказы и клиенты) ───────────────
 _ST_RU = {"new":"Новая заявка","pending":"Ожидает оплаты","paid":"Оплачено","preparing":"В работе",

@@ -60,7 +60,21 @@ def _matrix_verdict(d):
     return s
 
 # ── расчёт всех чисел из матрицы ────────────────────────────────────────────
+def _normalize_engines(d):
+    """Дополняет данные до полных 7 нейросетей — для матрицы и старых отчётов с урезанным списком."""
+    from engine import ENGINES
+    by_id = {e["id"]: e for e in (d.get("engines") or [])}
+    d["engines"] = [by_id[e["id"]] if e["id"] in by_id else {**e, "failed": True} for e in ENGINES]
+    for q in d.get("queries") or []:
+        hits = q.setdefault("hits", {})
+        for e in ENGINES:
+            hits.setdefault(e["id"], 0)
+        ev = q.setdefault("evidence", {})
+        for e in ENGINES:
+            ev.setdefault(e["id"], {"brand": False, "comps": [], "others": []})
+
 def compute(d):
+    _normalize_engines(d)
     eng=d['engines']; qs=d['queries']
     for e in eng:
         m=sum(q['hits'].get(e['id'],0) for q in qs)

@@ -1540,14 +1540,22 @@ KEY_ENV = {"perplexity": "PERPLEXITY_API_KEY", "chatgpt": "OPENAI_API_KEY", "cla
            "deepseek": "DEEPSEEK_API_KEY", "gemini": "GEMINI_API_KEY", "gigachat": "GIGACHAT_API_KEY", "yandex": "YANDEX_API_KEY"}
 
 def has_key(engine_id):
-    return bool(os.environ.get(KEY_ENV[engine_id]))
+    val = (os.environ.get(KEY_ENV.get(engine_id) or "") or "").strip()
+    if not val or val.lower() in ("null", "none", "undefined", "-", "your_key_here"):
+        return False
+    if engine_id == "yandex" and not (os.environ.get("YANDEX_FOLDER_ID") or "").strip():
+        return False
+    return True
 
 def active_engines():
-    """В бою опрашиваем только нейросети с ключом. Без ключей вовсе — мок-демо по всем 7."""
+    """Всегда все 7 нейросетей в отчёте и матрице."""
+    return list(ENGINES)
+
+def keyed_engine_ids():
+    """Движки с рабочими ключами — только их реально опрашиваем."""
     if os.environ.get("TEST_MODE") == "1":
-        return ENGINES
-    keyed = [e for e in ENGINES if has_key(e["id"])]
-    return keyed if keyed else ENGINES
+        return {e["id"] for e in ENGINES}
+    return {e["id"] for e in ENGINES if has_key(e["id"])}
 
 # мок-движок: детерминированный «ответ», где бренд то есть, то нет
 _MOCK_COMP = ["Мебель-Сити", "ЛорентМебель", "Гранд-Мебель"]
@@ -1597,9 +1605,11 @@ _RATELIMIT = re.compile(r"resource.?exhausted|rate.?limit|too many requests|high
 _HARDFAIL = re.compile(r"quota|billing|exceeded your current quota|api[_ ]?key not valid|invalid.{0,4}api.?key|"
                        r"permission denied|unauthor|\b401\b|\b403\b|\b404\b|not found", re.I)
 def _ask_one(prompt, eid, run, brand, test):
-    if test or not has_key(eid):
+    if test:
         try: return ask_mock(prompt, eid, run, brand)
         except Exception: return None
+    if not has_key(eid):
+        return None                                 # ключа нет — не опрашиваем и не подставляем мок
     max_try = 3 if eid == "gemini" else 2                   # Gemini чаще ловит «high demand» -> на попытку больше (добор — в спас.проходе)
     for attempt in range(1, max_try + 1):                   # повтор при временном сбое (503/429/обрыв и пр.)
         try:
@@ -1774,6 +1784,8 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
                 _save_query_set(site, queries)
     queries = [{"q": x["q"], "group": x["group"]} for x in queries]   # чистая копия, без старых hits
     engines = active_engines()
+    keyed = keyed_engine_ids()
+    print(f"[analyze] engines={len(engines)} keyed={len(keyed)}: {sorted(keyed)}", flush=True)
     for q in queries:
         q["hits"] = {e["id"]: 0 for e in engines}
     # все вызовы ко всем сетям считаем параллельно (пачками), а не строго по очереди
@@ -1816,6 +1828,10 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
         if detect_mention(ans, aliases):
             queries[qi]["hits"][eid] += 1
     failed = [eid for eid in eng_tot if eng_tot[eid] and eng_err[eid] >= (eng_tot[eid] + 1) // 2]   # большинство вызовов с ошибкой -> движок недоступен
+    if not test:
+        for e in engines:
+            if e["id"] not in keyed and e["id"] not in failed:
+                failed.append(e["id"])              # ключа нет в env — честно «не проверено»
     _assign_quotes(queries, tasks, answers, engines, aliases)  # дословный фрагмент одного ответа на каждый запрос
     # ── ОСНОВНОЙ путь: реальные компании + их сайты извлекает сама нейросеть (семантически, без стоп-листов) ──
     real = None if test else _extract_real_companies(all_answers, niche, brand_short or brand, aliases)
@@ -1838,7 +1854,7 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
         # переносим сайты и на «очищенные» имена-домены (1ps.ru остаётся 1ps.ru и т.п.)
         comp_sites = {_clean_comp_name(k): v for k, v in comp_sites.items()}
         _enrich_quotes(queries, aliases, [_clean_comp_name(n) for n in names])   # бренд и компании ИМЕННО в цитате (для согласованного примера)
-        return queries, competitors, failed, comp_sites
+        return queries, competitors, failed, comp_sites, engines
     # ── ОТКАТ: модель недоступна -> старый способ (regex + фильтры) ──
     competitors = extract_competitors(all_answers, brand, brand_short, niche, aliases=aliases)
     corpus = "\n".join(a for a in all_answers if a)
@@ -1864,7 +1880,7 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
             cell["others"] = [o for o in cell["others"] if o.lower() in good_low]
     competitors = [(n, c) for (n, c) in competitors if n.lower() in good_low]
     _enrich_quotes(queries, aliases, [n for n in cand if n.lower() in good_low])   # бренд и компании в цитате для согласованного примера
-    return queries, competitors, failed, {}
+    return queries, competitors, failed, {}, engines
 
 # ───────────────────────── сборка данных отчёта ───────────────────────
 def _rates(queries):
@@ -1998,8 +2014,8 @@ def _plan30(site_info=None, niche=""):
         ]},
     ]
 
-def build_data(brand, brand_short, site, niche, city, queries, competitors, site_info=None, failed_engines=None, comp_sites=None):
-    eng = active_engines()
+def build_data(brand, brand_short, site, niche, city, queries, competitors, site_info=None, failed_engines=None, comp_sites=None, engines=None):
+    eng = list(engines) if engines else active_engines()
     failed_set = set(failed_engines or [])
     work = [e for e in eng if e["id"] not in failed_set] or eng   # рабочие движки (без ошибок API)
     rates = _rates(queries)
@@ -2961,10 +2977,10 @@ def run(brand=None, site=None, niche=None, city=None, brand_short=None, out=None
         prep = prepare(site, niche, city, fallback_brand=brand_short or brand or "")
     site_info = prep.get("site_info")
     aliases = set(prep.get("aliases") or [])
-    q, competitors, failed, comp_sites = analyze(prep["brand"], prep["brand_short"], prep["site"], prep["niche"], prep.get("city"),
+    q, competitors, failed, comp_sites, engines = analyze(prep["brand"], prep["brand_short"], prep["site"], prep["niche"], prep.get("city"),
                                                  site_info=site_info, aliases=aliases, queries=prep.get("queries"))
     data = build_data(prep["brand"], prep["brand_short"], prep["site"], prep["niche"], prep.get("city"),
-                      q, competitors, site_info=site_info, failed_engines=failed, comp_sites=comp_sites)
+                      q, competitors, site_info=site_info, failed_engines=failed, comp_sites=comp_sites, engines=engines)
     if out:
         with open(out, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=1)
     return data

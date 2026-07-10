@@ -148,6 +148,18 @@ def init_db():
                 c.execute(f"ALTER TABLE orders ADD COLUMN {col} {ddl}")
 init_db()
 
+def _recover_stale_preparing():
+    """После перезаливки поток prepare мог оборваться — возвращаем зависшие заказы в paid."""
+    try:
+        with db() as c:
+            n = c.execute("UPDATE orders SET status='paid' WHERE status='preparing' AND (prep IS NULL OR prep='')").rowcount
+        if n:
+            print(f"[recovery] preparing без prep -> paid: {n}", flush=True)
+    except Exception as e:
+        print("[recovery]", e, flush=True)
+
+_recover_stale_preparing()
+
 ADDON_PRICES = {1: 190, 3: 490, 5: 790, 10: 1290}   # дозакупка: запросов -> цена, ₽
 
 def cache_hit(site):
@@ -402,11 +414,19 @@ def _do_review(oid):
     with db() as c:
         o = c.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
     if not o: return
+    chat = o["tg_chat_id"]
     try:
         prep = engine.prepare(o["site"], o["niche"], o["city"], fallback_brand=o["brand_short"] or o["brand"])
     except Exception as e:
         print("[review] ошибка prepare:", e, flush=True)
-        with db() as c: c.execute("UPDATE orders SET status='paid' WHERE id=?", (oid,))
+        traceback.print_exc()
+        with db() as c:
+            c.execute("UPDATE orders SET status='paid', err=? WHERE id=?", (str(e)[:800], oid))
+        if chat:
+            tg_send_buttons(chat,
+                "Не получилось автоматически подготовить запросы. Нажмите «Попробовать ещё раз» — я попробую снова. "
+                "Если не поможет — напишите в поддержку.",
+                _error_kb(oid))
         return
     if prep.get("niche_unknown") or not prep.get("queries"):   # нишу не определили -> спрашиваем у клиента, а не выдумываем
         with db() as c:
@@ -455,10 +475,17 @@ def _set_niche(oid, niche_text):
 def maybe_start_review(oid):
     """После оплаты: готовим запросы (статус preparing) и одним сообщением просим подтвердить. Защита от двойного старта."""
     with db() as c:
-        o = c.execute("SELECT status, tg_chat_id FROM orders WHERE id=?", (oid,)).fetchone()
-        if not o or o["status"] != "paid":
-            return False
-        c.execute("UPDATE orders SET status='preparing' WHERE id=?", (oid,))
+        o = c.execute("SELECT status, prep FROM orders WHERE id=?", (oid,)).fetchone()
+    if not o:
+        return False
+    # зависло после перезаливки или обрыва потока — можно перезапустить
+    if o["status"] == "preparing" and not (o["prep"] or "").strip():
+        with db() as c:
+            c.execute("UPDATE orders SET status='paid' WHERE id=? AND status='preparing'", (oid,))
+    with db() as c:
+        claimed = c.execute("UPDATE orders SET status='preparing' WHERE id=? AND status='paid'", (oid,)).rowcount
+    if not claimed:
+        return False
     threading.Thread(target=_do_review, args=(oid,), daemon=True).start()
     return True
 
@@ -793,7 +820,7 @@ def tbank_notify():
         _on_payment_confirmed(data.get("OrderId"), src="webhook")
     return "OK"
 
-def _on_payment_confirmed(oid, src="webhook"):
+def _on_payment_confirmed(oid, src="webhook", chat_id=None):
     """Единая реакция на подтверждённую оплату — из вебхука ИЛИ из опроса статуса. Идемпотентна:
     срабатывает один раз (только пока заказ ещё new/pending), поэтому два источника не дублируют сообщение."""
     if not oid:
@@ -812,14 +839,18 @@ def _on_payment_confirmed(oid, src="webhook"):
     if not claimed:
         return False
     print(f"[paid:{src}] order={oid} оплата подтверждена -> {'await_queries' if is_addon else 'paid'}", flush=True)
+    chat = o["tg_chat_id"] or (str(chat_id) if chat_id else "")
+    if chat and not o["tg_chat_id"]:
+        with db() as c:
+            c.execute("UPDATE orders SET tg_chat_id=? WHERE id=?", (chat, oid))
     if is_addon:                                             # дозакупка: после оплаты просим запросы, а не запускаем сразу
-        if o["tg_chat_id"]:
+        if chat:
             n = o["qn"] or 1
-            tg_send_message(o["tg_chat_id"],
+            tg_send_message(chat,
                 f"Оплата получена! Пришлите {n} {_plural_q(n)} для проверки — каждый с новой строки. "
                 "Я покажу их на подтверждение, а потом запущу проверку и пришлю отчёт.")
     else:
-        if o["tg_chat_id"]:                                   # есть чат клиента -> сразу показываем запросы на подтверждение
+        if chat:                                           # есть чат клиента -> сразу показываем запросы на подтверждение
             maybe_start_review(oid)
     return True
 
@@ -1072,12 +1103,19 @@ def tg_webhook():
                 elif st == "paid":      # оплачено -> готовим запросы; список придёт одним сообщением
                     maybe_start_review(oid)
                 elif st == "preparing":
-                    tg_send_message(chat, "Оплата получена. Готовлю запросы для проверки, пришлю их сюда в течение минуты.")
+                    if o["prep"]:
+                        _send_review(chat, oid, json.loads(o["prep"]))
+                    else:
+                        tg_send_message(chat, "Готовлю запросы для проверки, пришлю их сюда в течение минуты.")
+                        maybe_start_review(oid)
                 elif st == "reviewing":
                     if o["prep"]:
                         _send_review(chat, oid, json.loads(o["prep"]))   # повторно показываем список с кнопками
                     else:
                         tg_send_message(chat, "Готовлю запросы для проверки, пришлю их сюда через минуту.")
+                        with db() as c:
+                            c.execute("UPDATE orders SET status='paid' WHERE id=? AND status='reviewing'", (oid,))
+                        maybe_start_review(oid)
                 elif st == "await_queries":   # дозакупка оплачена -> ждём запросы клиента
                     n = o["qn"] or 1
                     tg_send_message(chat, f"Жду ваши {n} {_plural_q(n)} для проверки — каждый с новой строки.")
@@ -1094,7 +1132,7 @@ def tg_webhook():
                                         [[{"text": "✉️ Сообщить о проблеме в поддержку", "callback_data": f"problem:{oid}"}]])
                 elif st == "new" and (o["promo"] or ""):   # бесплатный заказ по промокоду -> без оплаты сразу к отчёту
                     tg_send_message(chat, "Промокод принят, проверка бесплатна. Готовлю запросы — пришлю их сюда на подтверждение.")
-                    _on_payment_confirmed(oid, src="promo")
+                    _on_payment_confirmed(oid, src="promo", chat_id=chat)
                 elif st == "new":       # создаём платёж и шлём кнопку оплаты прямо в чат
                     try:
                         res = tbank_init(oid, o["email"])

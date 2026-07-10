@@ -1604,25 +1604,26 @@ _RATELIMIT = re.compile(r"resource.?exhausted|rate.?limit|too many requests|high
 # только жжём время и остатки квоты. Сразу помечаем сеть как недоступную (клиент увидит честно, Анна — алерт).
 _HARDFAIL = re.compile(r"quota|billing|exceeded your current quota|api[_ ]?key not valid|invalid.{0,4}api.?key|"
                        r"permission denied|unauthor|\b401\b|\b403\b|\b404\b|not found", re.I)
-def _ask_one(prompt, eid, run, brand, test):
+def _ask_one(prompt, eid, run, brand, test, _log=True):
     if test:
         try: return ask_mock(prompt, eid, run, brand)
         except Exception: return None
     if not has_key(eid):
         return None                                 # ключа нет — не опрашиваем и не подставляем мок
-    max_try = 3 if eid == "gemini" else 2                   # Gemini чаще ловит «high demand» -> на попытку больше (добор — в спас.проходе)
-    for attempt in range(1, max_try + 1):                   # повтор при временном сбое (503/429/обрыв и пр.)
+    max_try = 3 if eid == "gemini" else 2
+    for attempt in range(1, max_try + 1):
         try:
             return REAL_ADAPTERS[eid](prompt)
         except Exception as e:
             msg = str(e)
-            print(f"[ask] {eid} ошибка (попытка {attempt}): {type(e).__name__}: {msg[:120]}", flush=True)
+            if _log:
+                print(f"[ask] {eid} ошибка (попытка {attempt}): {type(e).__name__}: {msg[:120]}", flush=True)
             if _HARDFAIL.search(msg):
-                return None                                 # квота/биллинг/ключ -> повтор бесполезен, сразу выходим
+                return None
             if attempt < max_try and _TRANSIENT.search(msg):
-                # перегрузка/лимит -> пауза подольше (но умеренная, чтобы отчёт не тянулся), иначе короткая
                 time.sleep((3.0 if _RATELIMIT.search(msg) else 1.2) * attempt); continue
-            return None                                     # стойкая ошибка (ключ/квота/сеть) -> не «0%», а «не удалось проверить»
+            return None
+    return None
 
 def _companies_only(names, niche, corpus="", aliases=None):
     """Единый смысловой фильтр кандидатов в конкуренты: оставить ТОЛЬКО реальные компании/бренды/сайты.
@@ -1788,35 +1789,62 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
     print(f"[analyze] engines={len(engines)} keyed={len(keyed)}: {sorted(keyed)}", flush=True)
     for q in queries:
         q["hits"] = {e["id"]: 0 for e in engines}
-    # все вызовы ко всем сетям считаем параллельно (пачками), а не строго по очереди
+    # Опрашиваем ПО ОДНОЙ нейросети за раз (внутри — параллельно по запросам).
+    # Если бить сразу по всем 7 API пачкой, ловим 429/503 и «ошибка API» у половины сетей.
     tasks = [(qi, e["id"], q["q"], run)
              for qi, q in enumerate(queries) for e in engines for run in range(RUNS)]
-    workers = max(1, min(int(os.environ.get("CONCURRENCY", "8")), len(tasks) or 1))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        answers = list(pool.map(lambda t: _ask_one(t[2], t[1], t[3], brand, test), tasks))
-    # ── «спасательный» проход ──────────────────────────────────────────
-    # Если сеть в параллельной пачке провалила большинство вызовов — частая причина
-    # это упор в лимит запросов в минуту (особенно Gemini на бесплатном тарифе).
-    # Повторяем её запросы ПОСЛЕДОВАТЕЛЬНО (с паузами) — так укладываемся в лимит и
-    # добираем ответы. Но если повтор не помогает с первой же попытки — ошибка стойкая
-    # (ключ/квота/модель), и мы не тратим время на остальные.
+    answers = [None] * len(tasks)
+    workers = max(1, min(int(os.environ.get("CONCURRENCY", "6")), 10))
+    eng_gap = float(os.environ.get("ENGINE_GAP", "1.0") or 0)
+    for e in engines:
+        eid = e["id"]
+        idxs = [i for i, t in enumerate(tasks) if t[1] == eid]
+        if eid not in keyed:
+            continue
+        print(f"[analyze] опрос {eid}: {len(idxs)} вызовов", flush=True)
+        with ThreadPoolExecutor(max_workers=min(workers, len(idxs) or 1)) as pool:
+            for i, ans in zip(idxs, pool.map(lambda i: _ask_one(tasks[i][2], eid, tasks[i][3], brand, test), idxs)):
+                answers[i] = ans
+        if not test and eng_gap > 0:
+            time.sleep(eng_gap)
+    # «Спасательный» проход: добираем пропущенные ответы последовательно, с паузами
     if not test:
-        f_tot = {}; f_err = {}
-        for (qi, eid, _q, _run), ans in zip(tasks, answers):
-            f_tot[eid] = f_tot.get(eid, 0) + 1
-            if ans is None: f_err[eid] = f_err.get(eid, 0) + 1
-        resc_deadline = time.time() + float(os.environ.get("RESCUE_BUDGET", "75"))  # потолок на спасательный проход, чтобы отчёт не тянулся
-        for eid in [e for e in f_tot if f_err.get(e, 0) >= (f_tot[e] + 1) // 2]:
+        resc_deadline = time.time() + float(os.environ.get("RESCUE_BUDGET", "180"))
+        resc_gap = float(os.environ.get("RESCUE_GAP", "2.0") or 0)
+        for e in engines:
+            eid = e["id"]
+            if eid not in keyed:
+                continue
             idxs = [i for i, t in enumerate(tasks) if t[1] == eid and answers[i] is None]
-            print(f"[rescue] {eid}: повторяю {len(idxs)} запросов последовательно", flush=True)
-            for n, i in enumerate(idxs):
-                if time.time() > resc_deadline:  # вышли за бюджет времени -> прекращаем добор (сеть пометится недоступной)
+            if not idxs:
+                continue
+            miss = [i for i in idxs if answers[i] is None]
+            if not miss:
+                continue
+            tot = len(idxs)
+            print(f"[rescue] {eid}: добираю {len(miss)} из {tot} запросов", flush=True)
+            hard_dead = False
+            for n, i in enumerate(miss):
+                if time.time() > resc_deadline:
                     print(f"[rescue] {eid}: лимит времени, останавливаю добор", flush=True); break
+                if hard_dead:
+                    break
                 _qi, _eid, q, run = tasks[i]
-                answers[i] = _ask_one(q, eid, run, brand, test)
-                if answers[i] is None and n == 0:
-                    print(f"[rescue] {eid}: повтор не помог — сеть недоступна, прекращаю", flush=True)
-                    break                       # стойкая ошибка -> не мучаем остальные
+                for attempt in range(1, 4):
+                    try:
+                        answers[i] = REAL_ADAPTERS[eid](q)
+                        if answers[i]:
+                            break
+                    except Exception as ex:
+                        msg = str(ex)
+                        print(f"[rescue] {eid} попытка {attempt}: {type(ex).__name__}: {msg[:100]}", flush=True)
+                        if _HARDFAIL.search(msg):
+                            hard_dead = True; answers[i] = None; break
+                        if attempt < 3 and _TRANSIENT.search(msg):
+                            time.sleep((4.0 if _RATELIMIT.search(msg) else 2.0) * attempt); continue
+                        answers[i] = None
+                if resc_gap > 0 and n + 1 < len(miss):
+                    time.sleep(resc_gap)
     all_answers = []
     eng_err = {e["id"]: 0 for e in engines}; eng_tot = {e["id"]: 0 for e in engines}
     for (qi, eid, _q, _run), ans in zip(tasks, answers):

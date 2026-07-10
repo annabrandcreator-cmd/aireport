@@ -1729,36 +1729,53 @@ _RATELIMIT = re.compile(r"resource.?exhausted|rate.?limit|too many requests|high
 _HARDFAIL = re.compile(r"quota|billing|exceeded your current quota|api[_ ]?key not valid|invalid.{0,4}api.?key|"
                        r"permission denied|unauthor|\b401\b|\b403\b|\b404\b|not found", re.I)
 _ENGINE_ERR = {}                                              # последняя ошибка по движку (для диагностики в отчёте)
-_ENGINE_WORKERS = {"perplexity": 2, "claude": 2, "deepseek": 3, "gemini": 2, "chatgpt": 4, "gigachat": 3, "yandex": 3}
+_ENGINE_WORKERS = {"perplexity": 4, "claude": 4, "deepseek": 4, "gemini": 4, "chatgpt": 5, "gigachat": 4, "yandex": 4}
+
+def _preflight_one(eid):
+    probe = "Назови одну российскую компанию одним предложением."
+    for attempt in range(1, 3):
+        try:
+            ans = REAL_ADAPTERS[eid](probe)
+            if ans and len(str(ans).strip()) > 4:
+                return eid, True, ""
+            err = "пустой ответ"
+        except Exception as ex:
+            msg = str(ex)
+            err = f"{type(ex).__name__}: {msg[:220]}"
+            if _HARDFAIL.search(msg):
+                return eid, False, err
+            if attempt < 2 and _TRANSIENT.search(msg):
+                time.sleep(1.5 * attempt); continue
+            return eid, False, err
+    return eid, False, err
 
 def _preflight_engines(keyed):
-    """Один пробный вызов на движок — не жжём 20× платных запросов на мёртвый ключ/модель."""
+    """Параллельный пробный вызов на движок — отсеиваем мёртвые ключи до полного опроса."""
     if os.environ.get("PREFLIGHT", "1") == "0":
         return set(keyed), {}
-    probe = "Назови одну российскую компанию одним предложением."
     alive, errors = set(), {}
-    gap = float(os.environ.get("ENGINE_GAP", "1.5") or 0)
-    for eid in sorted(keyed):
-        ok = False
-        for attempt in range(1, 3):
-            try:
-                ans = REAL_ADAPTERS[eid](probe)
-                if ans and len(str(ans).strip()) > 4:
-                    alive.add(eid); ok = True; break
-                errors[eid] = "пустой ответ"
-            except Exception as ex:
-                msg = str(ex)
-                errors[eid] = f"{type(ex).__name__}: {msg[:220]}"
-                if _HARDFAIL.search(msg):
-                    break
-                if attempt < 2 and _TRANSIENT.search(msg):
-                    time.sleep(2.5 * attempt); continue
-                break
-        if not ok:
-            print(f"[preflight] {eid} FAIL: {errors.get(eid, '')}", flush=True)
-        if gap > 0:
-            time.sleep(gap)
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=min(7, len(keyed) or 1)) as pool:
+        for eid, ok, err in pool.map(_preflight_one, sorted(keyed)):
+            if ok:
+                alive.add(eid)
+            else:
+                errors[eid] = err
+                print(f"[preflight] {eid} FAIL: {err}", flush=True)
+    print(f"[preflight] готово за {time.time()-t0:.0f}s: ok={len(alive)}/{len(keyed)}", flush=True)
     return alive, errors
+
+def _poll_one_engine(eid, idxs, tasks, brand, test, workers):
+    ew = min(workers, _ENGINE_WORKERS.get(eid, workers), len(idxs) or 1)
+    # SERIAL только если ChatGPT реально идёт через OpenRouter, а не прямой OPENAI_API_KEY
+    if eid == "chatgpt" and _env_truthy("OPENROUTER_CHATGPT_SERIAL") and not _env_key("OPENAI_API_KEY"):
+        ew = 1
+    t0 = time.time()
+    print(f"[analyze] опрос {eid}: {len(idxs)} вызовов (workers={ew})", flush=True)
+    with ThreadPoolExecutor(max_workers=ew) as pool:
+        res = list(pool.map(lambda i: _ask_one(tasks[i][2], eid, tasks[i][3], brand, test), idxs))
+    print(f"[analyze] {eid}: готово за {time.time()-t0:.0f}s", flush=True)
+    return list(zip(idxs, res))
 
 def _ask_one(prompt, eid, run, brand, test, _log=True):
     if test:
@@ -1955,41 +1972,46 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
     poll_ids = preflight_ok if preflight_ok else keyed       # все упали на preflight — всё равно пробуем полный опрос
     if keyed - poll_ids:
         print(f"[analyze] preflight пропуск: {sorted(keyed - poll_ids)}", flush=True)
-    # Опрашиваем ПО ОДНОЙ нейросети за раз (внутри — параллельно по запросам).
+    # Опрашиваем пачками по ENGINE_PARALLEL нейросетей (внутри каждой — параллельно по запросам).
     tasks = [(qi, e["id"], q["q"], run)
              for qi, q in enumerate(queries) for e in engines if e["id"] in poll_ids for run in range(RUNS)]
     answers = [None] * len(tasks)
-    workers = max(1, min(int(os.environ.get("CONCURRENCY", "3")), 8))
-    eng_gap = float(os.environ.get("ENGINE_GAP", "1.5") or 0)
-    for e in engines:
-        eid = e["id"]
-        if eid not in poll_ids:
-            continue
-        idxs = [i for i, t in enumerate(tasks) if t[1] == eid]
-        ew = min(workers, _ENGINE_WORKERS.get(eid, workers), len(idxs) or 1)
-        if eid == "chatgpt" and _env_truthy("OPENROUTER_CHATGPT_SERIAL"):
-            ew = 1
-        print(f"[analyze] опрос {eid}: {len(idxs)} вызовов (workers={ew})", flush=True)
-        with ThreadPoolExecutor(max_workers=ew) as pool:
-            for i, ans in zip(idxs, pool.map(lambda i: _ask_one(tasks[i][2], eid, tasks[i][3], brand, test), idxs)):
+    workers = max(1, min(int(os.environ.get("CONCURRENCY", "5")), 10))
+    eng_gap = float(os.environ.get("ENGINE_GAP", "0.4") or 0)
+    eng_par = max(1, min(int(os.environ.get("ENGINE_PARALLEL", "3") or 1), 4))
+    poll_engines = [e for e in engines if e["id"] in poll_ids]
+    t_analyze = time.time()
+    for bi in range(0, len(poll_engines), eng_par):
+        chunk = poll_engines[bi:bi + eng_par]
+        if len(chunk) == 1:
+            batches = [_poll_one_engine(chunk[0]["id"],
+                [i for i, t in enumerate(tasks) if t[1] == chunk[0]["id"]], tasks, brand, test, workers)]
+        else:
+            batches = []
+            with ThreadPoolExecutor(max_workers=len(chunk)) as pool:
+                futs = [pool.submit(_poll_one_engine, e["id"],
+                                    [i for i, t in enumerate(tasks) if t[1] == e["id"]],
+                                    tasks, brand, test, workers) for e in chunk]
+                for fut in futs:
+                    batches.append(fut.result())
+        for batch in batches:
+            for i, ans in batch:
                 answers[i] = ans
-        if not test and eng_gap > 0:
+        if not test and eng_gap > 0 and bi + eng_par < len(poll_engines):
             time.sleep(eng_gap)
+    print(f"[analyze] опрос завершён за {time.time()-t_analyze:.0f}s", flush=True)
     # «Спасательный» проход: добираем пропущенные ответы последовательно, с паузами
     if not test:
-        resc_deadline = time.time() + float(os.environ.get("RESCUE_BUDGET", "180"))
-        resc_gap = float(os.environ.get("RESCUE_GAP", "2.0") or 0)
+        resc_deadline = time.time() + float(os.environ.get("RESCUE_BUDGET", "60"))
+        resc_gap = float(os.environ.get("RESCUE_GAP", "0.8") or 0)
         for e in engines:
             eid = e["id"]
             if eid not in poll_ids:
                 continue
-            idxs = [i for i, t in enumerate(tasks) if t[1] == eid and answers[i] is None]
-            if not idxs:
+            miss = [i for i, t in enumerate(tasks) if t[1] == eid and answers[i] is None]
+            if len(miss) <= 2:                                 # 1–2 пропуска не стоят минут rescue
                 continue
-            miss = [i for i in idxs if answers[i] is None]
-            if not miss:
-                continue
-            tot = len(idxs)
+            tot = len([i for i, t in enumerate(tasks) if t[1] == eid])
             print(f"[rescue] {eid}: добираю {len(miss)} из {tot} запросов", flush=True)
             hard_dead = False
             for n, i in enumerate(miss):

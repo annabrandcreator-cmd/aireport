@@ -11,12 +11,11 @@
 Ключи (env), подключаются по мере появления:
   PERPLEXITY_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY,
   DEEPSEEK_API_KEY, GIGACHAT_API_KEY, YANDEX_API_KEY, YANDEX_FOLDER_ID
-  OPENROUTER_API_KEY -> единый шлюз для зарубежных моделей, если прямого ключа нет
 """
 import os, re, json, time, hashlib, datetime, urllib.request, urllib.error, ssl, uuid, threading
 from concurrent.futures import ThreadPoolExecutor
 
-RUNS = max(2, int(os.environ.get("RUNS", "2") or 2))  # прогонов на каждый запрос (продуктовый режим: 2/2)
+RUNS = max(2, int(os.environ.get("RUNS", "2") or 2))  # прогонов на каждый запрос (для стабильности можно 3-5)
 
 ENGINES = [
     {"id":"perplexity","name":"Perplexity","short":"Pp","note":"ищет в интернете, цитирует источники"},
@@ -1404,160 +1403,7 @@ def _post_json(url, headers, payload, timeout=40):
         body = ex.read().decode("utf-8", "replace")[:500]   # тело ошибки -> видно точную причину
         raise RuntimeError(f"HTTP {ex.code}: {body}")
 
-OPENROUTER_ENGINES = {"perplexity", "chatgpt", "claude", "deepseek", "gemini"}
-OPENROUTER_MODEL_ENV = {
-    "perplexity": "OPENROUTER_PERPLEXITY_MODEL",
-    "chatgpt": "OPENROUTER_CHATGPT_MODEL",
-    "claude": "OPENROUTER_CLAUDE_MODEL",
-    "deepseek": "OPENROUTER_DEEPSEEK_MODEL",
-    "gemini": "OPENROUTER_GEMINI_MODEL",
-}
-OPENROUTER_MODEL_DEFAULT = {
-    "perplexity": "perplexity/sonar",
-    "chatgpt": "openai/gpt-4o-mini-search-preview",
-    "claude": "~anthropic/claude-sonnet-latest",
-    "deepseek": "deepseek/deepseek-chat",
-    "gemini": "google/gemini-2.5-flash",
-}
-OPENROUTER_ONLINE = {"perplexity", "chatgpt", "claude", "gemini"}
-_OPENROUTER_LOCKS = {}
-_OPENROUTER_NEXT = {}
-
-def _direct_key(engine_id):
-    env = KEY_ENV.get(engine_id)
-    return bool(env and os.environ.get(env))
-
-def _openrouter_key():
-    return os.environ.get("OPENROUTER_API_KEY", "").strip()
-
-def _openrouter_model(engine_id):
-    model = os.environ.get(OPENROUTER_MODEL_ENV[engine_id], OPENROUTER_MODEL_DEFAULT[engine_id]).strip()
-    use_online = os.environ.get(f"OPENROUTER_{engine_id.upper()}_WEB_SEARCH",
-                                os.environ.get("OPENROUTER_WEB_SEARCH", "1")).strip().lower() not in ("0", "false", "no", "off")
-    if use_online and engine_id in OPENROUTER_ONLINE and ":online" not in model and "search-preview" not in model:
-        model += ":online"
-    return model
-
-def _openrouter_base_model(engine_id):
-    return _openrouter_model(engine_id).replace(":online", "")
-
-def _openrouter_model_chain(engine_id):
-    """Список моделей-кандидатов для одного движка.
-
-    У ChatGPT через OpenRouter иногда бывает валидный HTTP-ответ с пустым content.
-    Тогда нельзя выпускать отчет без ChatGPT: пробуем резервные OpenAI-модели.
-    """
-    primary = _openrouter_model(engine_id)
-    models = [primary]
-    if engine_id == "chatgpt":
-        raw = os.environ.get(
-            "OPENROUTER_CHATGPT_FALLBACK_MODELS",
-            "openai/gpt-4o-mini-search-preview,openai/gpt-4o-mini,openai/gpt-4.1-mini,openai/gpt-5-mini",
-        )
-        models.extend(x.strip() for x in raw.split(",") if x.strip())
-    elif primary.endswith(":online"):
-        models.append(primary.replace(":online", ""))
-
-    out = []
-    seen = set()
-    for model in models:
-        if model and model not in seen:
-            seen.add(model)
-            out.append(model)
-    return out
-
-def engine_model(engine_id):
-    """Человекочитаемая модель/режим для диагностики в /health и /selftest."""
-    src = engine_source(engine_id)
-    if src == "openrouter":
-        return _openrouter_model(engine_id)
-    if src == "direct":
-        return {
-            "perplexity": "sonar",
-            "chatgpt": os.environ.get("OPENAI_MODEL", "gpt-4o-mini-search-preview"),
-            "claude": os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5"),
-            "deepseek": "deepseek-chat",
-            "gemini": os.environ.get("GEMINI_MODEL", "gemini-2.5-flash,gemini-2.0-flash,gemini-2.5-flash-lite"),
-            "gigachat": os.environ.get("GIGACHAT_MODEL", "GigaChat"),
-            "yandex": os.environ.get("YANDEX_MODEL", "yandexgpt-lite"),
-        }.get(engine_id, "")
-    return src
-
-def _openrouter_serial_call(engine_id):
-    """Некоторые online-модели OpenRouter (особенно ChatGPT с web-search) плохо держат пачку параллельных вызовов."""
-    return os.environ.get(f"OPENROUTER_{engine_id.upper()}_SERIAL", "1" if engine_id == "chatgpt" else "0").strip().lower() not in ("0", "false", "no", "off")
-
-def _openrouter_min_gap(engine_id):
-    default = "1.5" if engine_id == "chatgpt" else "0"
-    return float(os.environ.get(f"OPENROUTER_{engine_id.upper()}_MIN_GAP", default) or 0)
-
-def _post_openrouter(engine_id, headers, payload):
-    return _post_json(os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"),
-                      headers, payload, timeout=70)
-
-def _openrouter_content(j):
-    msg = (j.get("choices") or [{}])[0].get("message") or {}
-    content = msg.get("content", "")
-    if isinstance(content, list):
-        return "".join((part.get("text") or part.get("content") or "") if isinstance(part, dict) else str(part)
-                       for part in content).strip()
-    return (content or "").strip()
-
-def _post_openrouter_content(engine_id, headers, payload):
-    j = _post_openrouter(engine_id, headers, payload)
-    content = _openrouter_content(j)
-    if not content:
-        raise RuntimeError(f"OpenRouter вернул пустой ответ для {payload.get('model')}")
-    return content
-
-def ask_openrouter(engine_id, prompt):
-    key = _openrouter_key()
-    if not key:
-        raise RuntimeError("OPENROUTER_API_KEY не задан")
-    headers = {
-        "Authorization": "Bearer " + key,
-        "Content-Type": "application/json",
-        "HTTP-Referer": os.environ.get("OPENROUTER_SITE_URL", "https://annakurbatova.ru"),
-        "X-OpenRouter-Title": os.environ.get("OPENROUTER_APP_TITLE", "AI visibility report"),
-    }
-    payload = {
-        "model": _openrouter_model(engine_id),
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": int(os.environ.get("OPENROUTER_MAX_TOKENS", "900") or 900),
-        "temperature": float(os.environ.get("OPENROUTER_TEMPERATURE", "0.3") or 0.3),
-    }
-    models = _openrouter_model_chain(engine_id)
-
-    def _try_models():
-        last = None
-        for model in models:
-            try:
-                return _post_openrouter_content(engine_id, headers, dict(payload, model=model))
-            except Exception as e:
-                last = e
-                if engine_id == "chatgpt":
-                    print(f"[openrouter] chatgpt model={model} не ответил: {type(e).__name__}: {str(e)[:160]}", flush=True)
-                    continue
-                raise
-        raise last or RuntimeError(f"OpenRouter не ответил для {engine_id}")
-
-    if _openrouter_serial_call(engine_id):
-        lock = _OPENROUTER_LOCKS.setdefault(engine_id, threading.Lock())
-        with lock:
-            gap = _openrouter_min_gap(engine_id)
-            wait = _OPENROUTER_NEXT.get(engine_id, 0.0) - time.time()
-            if wait > 0:
-                time.sleep(wait)
-            content = _try_models()
-            if gap > 0:
-                _OPENROUTER_NEXT[engine_id] = time.time() + gap
-    else:
-        content = _try_models()
-    return content
-
 def ask_perplexity(prompt):
-    if not _direct_key("perplexity") and _openrouter_key():
-        return ask_openrouter("perplexity", prompt)
     key = os.environ["PERPLEXITY_API_KEY"]
     j = _post_json("https://api.perplexity.ai/chat/completions",
                    {"Authorization": "Bearer "+key, "Content-Type": "application/json"},
@@ -1565,8 +1411,6 @@ def ask_perplexity(prompt):
     return j["choices"][0]["message"]["content"]
 
 def ask_openai(prompt):
-    if not _direct_key("chatgpt") and _openrouter_key():
-        return ask_openrouter("chatgpt", prompt)
     key = os.environ["OPENAI_API_KEY"]
     # модель с встроенным веб-поиском (chat/completions): реально ищет в интернете и называет компании
     model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini-search-preview")
@@ -1577,8 +1421,6 @@ def ask_openai(prompt):
     return j["choices"][0]["message"]["content"]
 
 def ask_claude(prompt):
-    if not _direct_key("claude") and _openrouter_key():
-        return ask_openrouter("claude", prompt)
     key = os.environ["ANTHROPIC_API_KEY"]
     model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")   # актуальная лёгкая модель; сменить переменной
     j = _post_json("https://api.anthropic.com/v1/messages",
@@ -1588,8 +1430,6 @@ def ask_claude(prompt):
     return "".join(b.get("text", "") for b in j.get("content", []))
 
 def ask_deepseek(prompt):
-    if not _direct_key("deepseek") and _openrouter_key():
-        return ask_openrouter("deepseek", prompt)
     key = os.environ["DEEPSEEK_API_KEY"]
     j = _post_json("https://api.deepseek.com/chat/completions",
                    {"Authorization": "Bearer "+key, "Content-Type": "application/json"},
@@ -1617,8 +1457,6 @@ def _gemini_pace():
 # на квоту/ключ (429/billing) — нет смысла, выходим сразу.
 _GEMINI_CAP = re.compile(r"503|unavailable|high demand|overload|deadline|exceeded.*deadline|temporar", re.I)
 def ask_gemini(prompt):
-    if not _direct_key("gemini") and _openrouter_key():
-        return ask_openrouter("gemini", prompt)
     key = os.environ["GEMINI_API_KEY"]
     models = [m.strip() for m in os.environ.get(
         "GEMINI_MODEL", "gemini-2.5-flash,gemini-2.0-flash,gemini-2.5-flash-lite").split(",") if m.strip()]
@@ -1641,30 +1479,11 @@ def ask_gemini(prompt):
 # GigaChat: ключ из кабинета (Authorization Key, Basic) меняется на access token на 30 минут.
 # Сертификаты Минцифры в контейнере не ставим -> отключаем проверку TLS для доменов Сбера.
 _GIGA_TOKEN = {"val": "", "exp": 0.0}
-_GIGA_LOCK = threading.Lock()
-_GIGA_NEXT = [0.0]
 def _giga_ctx():
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     return ctx
-
-def _giga_serial_call():
-    return os.environ.get("GIGACHAT_SERIAL", "1").strip().lower() not in ("0", "false", "no", "off")
-
-def _giga_min_gap():
-    return float(os.environ.get("GIGACHAT_MIN_GAP", "2.5") or 2.5)
-
-def _giga_pace():
-    if not _giga_serial_call():
-        return
-    gap = _giga_min_gap()
-    now = time.time()
-    wait = _GIGA_NEXT[0] - now
-    if wait > 0:
-        time.sleep(wait)
-        now = time.time()
-    _GIGA_NEXT[0] = now + gap
 
 def _giga_token():
     now = time.time()
@@ -1684,27 +1503,24 @@ def _giga_token():
     return _GIGA_TOKEN["val"]
 
 def ask_gigachat(prompt):
-    lock = _GIGA_LOCK if _giga_serial_call() else threading.Lock()
-    with lock:
-        last = None
-        for attempt in (1, 2, 3):                              # GigaChat нестабилен: протухший токен/обрыв TLS/429 -> сброс токена и повтор
-            try:
-                _giga_pace()
-                tok = _giga_token()
-                req = urllib.request.Request(
-                    "https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
-                    data=json.dumps({"model": os.environ.get("GIGACHAT_MODEL", "GigaChat"),
-                                     "messages": [{"role": "user", "content": prompt}]}).encode(),
-                    method="POST",
-                    headers={"Authorization": "Bearer " + tok, "Content-Type": "application/json", "Accept": "application/json"})
-                with urllib.request.urlopen(req, timeout=40, context=_giga_ctx()) as r:
-                    return json.loads(r.read().decode())["choices"][0]["message"]["content"]
-            except Exception as e:
-                last = e
-                _GIGA_TOKEN["val"] = ""; _GIGA_TOKEN["exp"] = 0.0   # сбрасываем токен -> на повторе перелогинимся
-                if attempt < 3:
-                    time.sleep(8.0 if "429" in str(e) else 1.8); continue
-                raise last
+    last = None
+    for attempt in (1, 2):                                  # GigaChat нестабилен: протухший токен/обрыв TLS -> сброс токена и повтор
+        try:
+            tok = _giga_token()
+            req = urllib.request.Request(
+                "https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
+                data=json.dumps({"model": os.environ.get("GIGACHAT_MODEL", "GigaChat"),
+                                 "messages": [{"role": "user", "content": prompt}]}).encode(),
+                method="POST",
+                headers={"Authorization": "Bearer " + tok, "Content-Type": "application/json", "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=40, context=_giga_ctx()) as r:
+                return json.loads(r.read().decode())["choices"][0]["message"]["content"]
+        except Exception as e:
+            last = e
+            _GIGA_TOKEN["val"] = ""; _GIGA_TOKEN["exp"] = 0.0   # сбрасываем токен -> на повторе перелогинимся
+            if attempt == 1:
+                time.sleep(1.2); continue
+            raise last
 
 def ask_yandex(prompt):
     key = os.environ["YANDEX_API_KEY"]; folder = os.environ.get("YANDEX_FOLDER_ID", "").strip()
@@ -1723,18 +1539,8 @@ REAL_ADAPTERS = {"perplexity": ask_perplexity, "chatgpt": ask_openai, "claude": 
 KEY_ENV = {"perplexity": "PERPLEXITY_API_KEY", "chatgpt": "OPENAI_API_KEY", "claude": "ANTHROPIC_API_KEY",
            "deepseek": "DEEPSEEK_API_KEY", "gemini": "GEMINI_API_KEY", "gigachat": "GIGACHAT_API_KEY", "yandex": "YANDEX_API_KEY"}
 
-def engine_source(engine_id):
-    """direct/openrouter/missing/mock — откуда берём конкретный движок."""
-    if os.environ.get("TEST_MODE") == "1":
-        return "mock"
-    if _direct_key(engine_id):
-        return "direct"
-    if engine_id in OPENROUTER_ENGINES and _openrouter_key():
-        return "openrouter"
-    return "missing"
-
 def has_key(engine_id):
-    return engine_source(engine_id) in ("direct", "openrouter")
+    return bool(os.environ.get(KEY_ENV[engine_id]))
 
 def active_engines():
     """В бою опрашиваем только нейросети с ключом. Без ключей вовсе — мок-демо по всем 7."""
@@ -1790,27 +1596,17 @@ _RATELIMIT = re.compile(r"resource.?exhausted|rate.?limit|too many requests|high
 # только жжём время и остатки квоты. Сразу помечаем сеть как недоступную (клиент увидит честно, Анна — алерт).
 _HARDFAIL = re.compile(r"quota|billing|exceeded your current quota|api[_ ]?key not valid|invalid.{0,4}api.?key|"
                        r"permission denied|unauthor|\b401\b|\b403\b|\b404\b|not found", re.I)
-def _ask_one(prompt, eid, run, brand, test, errlog=None, errlock=None):
+def _ask_one(prompt, eid, run, brand, test):
     if test or not has_key(eid):
         try: return ask_mock(prompt, eid, run, brand)
         except Exception: return None
     max_try = 3 if eid == "gemini" else 2                   # Gemini чаще ловит «high demand» -> на попытку больше (добор — в спас.проходе)
     for attempt in range(1, max_try + 1):                   # повтор при временном сбое (503/429/обрыв и пр.)
         try:
-            ans = REAL_ADAPTERS[eid](prompt)
-            if not (ans or "").strip():
-                raise RuntimeError("пустой ответ API")
-            return ans
+            return REAL_ADAPTERS[eid](prompt)
         except Exception as e:
             msg = str(e)
             print(f"[ask] {eid} ошибка (попытка {attempt}): {type(e).__name__}: {msg[:120]}", flush=True)
-            if errlog is not None:
-                rec = {"engine": eid, "attempt": attempt, "type": type(e).__name__, "message": msg[:500]}
-                if errlock:
-                    with errlock:
-                        errlog.append(rec)
-                else:
-                    errlog.append(rec)
             if _HARDFAIL.search(msg):
                 return None                                 # квота/биллинг/ключ -> повтор бесполезен, сразу выходим
             if attempt < max_try and _TRANSIENT.search(msg):
@@ -1984,9 +1780,8 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
     tasks = [(qi, e["id"], q["q"], run)
              for qi, q in enumerate(queries) for e in engines for run in range(RUNS)]
     workers = max(1, min(int(os.environ.get("CONCURRENCY", "8")), len(tasks) or 1))
-    errlog = []; errlock = threading.Lock()
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        answers = list(pool.map(lambda t: _ask_one(t[2], t[1], t[3], brand, test, errlog, errlock), tasks))
+        answers = list(pool.map(lambda t: _ask_one(t[2], t[1], t[3], brand, test), tasks))
     # ── «спасательный» проход ──────────────────────────────────────────
     # Если сеть в параллельной пачке провалила большинство вызовов — частая причина
     # это упор в лимит запросов в минуту (особенно Gemini на бесплатном тарифе).
@@ -2006,8 +1801,8 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
                 if time.time() > resc_deadline:  # вышли за бюджет времени -> прекращаем добор (сеть пометится недоступной)
                     print(f"[rescue] {eid}: лимит времени, останавливаю добор", flush=True); break
                 _qi, _eid, q, run = tasks[i]
-                answers[i] = _ask_one(q, eid, run, brand, test, errlog, errlock)
-                if answers[i] is None and n == 0 and eid != "chatgpt":
+                answers[i] = _ask_one(q, eid, run, brand, test)
+                if answers[i] is None and n == 0:
                     print(f"[rescue] {eid}: повтор не помог — сеть недоступна, прекращаю", flush=True)
                     break                       # стойкая ошибка -> не мучаем остальные
     all_answers = []
@@ -2021,13 +1816,6 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
         if detect_mention(ans, aliases):
             queries[qi]["hits"][eid] += 1
     failed = [eid for eid in eng_tot if eng_tot[eid] and eng_err[eid] >= (eng_tot[eid] + 1) // 2]   # большинство вызовов с ошибкой -> движок недоступен
-    failed_details = {}
-    for rec in errlog:
-        if rec["engine"] not in failed:
-            continue
-        arr = failed_details.setdefault(rec["engine"], [])
-        if len(arr) < 4:
-            arr.append({"type": rec["type"], "message": rec["message"]})
     _assign_quotes(queries, tasks, answers, engines, aliases)  # дословный фрагмент одного ответа на каждый запрос
     # ── ОСНОВНОЙ путь: реальные компании + их сайты извлекает сама нейросеть (семантически, без стоп-листов) ──
     real = None if test else _extract_real_companies(all_answers, niche, brand_short or brand, aliases)
@@ -2050,7 +1838,7 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
         # переносим сайты и на «очищенные» имена-домены (1ps.ru остаётся 1ps.ru и т.п.)
         comp_sites = {_clean_comp_name(k): v for k, v in comp_sites.items()}
         _enrich_quotes(queries, aliases, [_clean_comp_name(n) for n in names])   # бренд и компании ИМЕННО в цитате (для согласованного примера)
-        return queries, competitors, failed, comp_sites, failed_details
+        return queries, competitors, failed, comp_sites
     # ── ОТКАТ: модель недоступна -> старый способ (regex + фильтры) ──
     competitors = extract_competitors(all_answers, brand, brand_short, niche, aliases=aliases)
     corpus = "\n".join(a for a in all_answers if a)
@@ -2076,7 +1864,7 @@ def analyze(brand, brand_short, site, niche, city, on_progress=None, site_info=N
             cell["others"] = [o for o in cell["others"] if o.lower() in good_low]
     competitors = [(n, c) for (n, c) in competitors if n.lower() in good_low]
     _enrich_quotes(queries, aliases, [n for n in cand if n.lower() in good_low])   # бренд и компании в цитате для согласованного примера
-    return queries, competitors, failed, {}, failed_details
+    return queries, competitors, failed, {}
 
 # ───────────────────────── сборка данных отчёта ───────────────────────
 def _rates(queries):
@@ -2114,8 +1902,21 @@ def _plan30(site_info=None, niche=""):
     f = _tech_findings(site_info)
     role = _biz_role(site_info, niche)
     product_biz = role in ("shop", "manufacturer"); place_biz = role == "place"
+    b2b_product = product_biz and _is_b2b_product(site_info, niche)
+    retail_product = product_biz and not b2b_product
     # терминология по роли
-    if product_biz:
+    if b2b_product:
+        w2_title = "Неделя 2 · продукция и разметка"
+        w2_desc = "Добавить конкретное описание линейки или категории: для каких отраслей, характеристики, условия поставки"
+        w2_link = "Подготовить ссылки на соответствующие линейки и категории"
+        a2_link = "Разместить тексты и настроить внутренние ссылки между линейками и категориями"
+        w3 = {"week": "Неделя 3 · продукция и отзывы", "groups": [
+            {"role": "Контент-менеджер и маркетолог", "items": [
+                "Выбрать 5–7 ключевых линеек или категорий",
+                "Добавить факты: характеристики, применение, сертификация, условия поставки",
+                "Собрать отзывы корпоративных клиентов с указанием задачи и объёма"]}]}
+        w4_rev = "Собрать отзывы корпоративных клиентов о конкретных поставках"
+    elif retail_product:
         w2_title = "Неделя 2 · товары и разметка"
         w2_desc = "Добавить конкретное описание товара или категории: для кого, материал и состав, варианты, условия"
         w2_link = "Подготовить ссылки на соответствующие товары и категории"
@@ -2197,7 +1998,7 @@ def _plan30(site_info=None, niche=""):
         ]},
     ]
 
-def build_data(brand, brand_short, site, niche, city, queries, competitors, site_info=None, failed_engines=None, comp_sites=None, failed_details=None):
+def build_data(brand, brand_short, site, niche, city, queries, competitors, site_info=None, failed_engines=None, comp_sites=None):
     eng = active_engines()
     failed_set = set(failed_engines or [])
     work = [e for e in eng if e["id"] not in failed_set] or eng   # рабочие движки (без ошибок API)
@@ -2218,10 +2019,8 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
     failed_names = [e["name"] for e in eng if e["id"] in failed_set]
     groups_pos = [g[0] for g in groups if g[1] > 0]
     groups_zero = [g[0] for g in groups if g[1] == 0]
-    run_mark = f"{RUNS}/{RUNS}"
-    hit_once = f"{min(1, RUNS)}/{RUNS}"
-    rep_groups = sorted({q["group"] for q in queries if any(v >= RUNS for v in q["hits"].values())})
-    n_rep_q = sum(1 for q in queries if any(v >= RUNS for v in q["hits"].values()))
+    rep_groups = sorted({q["group"] for q in queries if any(v == 2 for v in q["hits"].values())})   # 2/2 хотя бы в одной ячейке
+    n_rep_q = sum(1 for q in queries if any(v == 2 for v in q["hits"].values()))    # запросов с повторяемым (2/2) упоминанием
     fem = _brand_gender(brand_short) == "f"                                          # женский личный бренд -> женское согласование
     appeared_neg = "не появилась" if fem else "не появился"
     mentioned_neg = "не была упомянута" if fem else "не был упомянут"
@@ -2323,15 +2122,13 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
     data = {
         "brand": brand, "brand_short": brand_short, "site": _host(site),
         "niche": niche, "city": city, "date": datetime.datetime.now().strftime("%d.%m.%Y"),
-        "runs": RUNS,
         "cover_sub": ((f"В этой проверке {brand_short} {appeared_neg} в ответах нейросетей. Первые шаги: сделать ключевые страницы понятнее на сайте, "
                        "дополнить их конкретными фактами и увеличить число упоминаний бренда на внешних площадках.")
                       if zero else
-                      (f"Бренд появляется в части ответов: устойчивое упоминание ({run_mark}) по {n_rep_q} из {len(queries)} запросов." if rep_groups
-                       else f"Бренд появляется в части ответов, пока единичными упоминаниями ({hit_once}).")),
+                      (f"Бренд появляется в части ответов: повторяемое упоминание (2/2) по {n_rep_q} из {len(queries)} запросов." if rep_groups
+                       else "Бренд появляется в части ответов, пока единичными упоминаниями (1/2).")),
         "engines": [dict(e, failed=(e["id"] in failed_set)) for e in eng],
         "failed_engines": failed_names,
-        "failed_engine_details": failed_details or {},
         "queries": queries,
         "result_meaning": {
             "headline": ("упоминания не обнаружены" if zero else f"{level_word} видимость"),
@@ -2344,17 +2141,17 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
                      if zero else "Упоминания распределены неравномерно по запросам: по части вопросов бренд не появляется."),
             "strong": ("Сначала нужно сделать понятнее существующие ключевые страницы, а затем увеличить число независимых "
                        "упоминаний компании: отзывов, публикаций, карточек и отраслевых подборок."
-                       if zero else (f"Устойчивое упоминание ({run_mark}) уже есть по {n_rep_q} из {len(queries)} запросов — на них можно опереться и расширять охват на остальные запросы и нейросети." if rep_groups
-                                     else f"Пока упоминания единичные ({hit_once}): бренд появляется не во всех проверках одного и того же вопроса.")),
+                       if zero else (f"Повторяемое упоминание (2/2) уже есть по {n_rep_q} из {len(queries)} запросов — на них можно опереться и расширять охват на остальные запросы и нейросети." if rep_groups
+                                     else "Пока упоминания единичные (1/2): бренд появляется не в обоих ответах на один и тот же вопрос.")),
             "goal": ("Добиться первых повторяемых упоминаний: чтобы нейросеть называла бренд не случайно, а в обоих повторных ответах на один и тот же вопрос."
                      if zero else
                      ("Поднять долю ответов с упоминанием в каждой нейросети и выровнять видимость между ними — "
-                      f"устойчивое упоминание ({run_mark}) уже есть по всем {n_rep_q} запросам."
+                      f"повторяемое упоминание (2/2) уже есть по всем {n_rep_q} запросам."
                       if n_rep_q >= len(queries) else
-                      (f"Увеличить число запросов с устойчивым упоминанием с {n_rep_q} до {min(len(queries), n_rep_q + 3)} из {len(queries)}"
+                      (f"Увеличить число запросов с повторяемым упоминанием с {n_rep_q} до {min(len(queries), n_rep_q + 3)} из {len(queries)}"
                        + (" и добиться появления хотя бы во второй нейросети." if len(mentioned_engines) <= 1 else " и поднять долю ответов с упоминанием в каждой нейросети.")
                        if n_rep_q >= 1 else
-                       f"Добиться первых устойчивых упоминаний ({run_mark}): чтобы бренд появлялся в ответах на выбранные вопросы, а не случайно."))),
+                       "Добиться первых повторяемых упоминаний (2 из 2): чтобы бренд появлялся в обоих ответах на один вопрос, а не через раз."))),
         },
         "examples": examples,
         "full_answers": full_answers,
@@ -2376,8 +2173,7 @@ def build_data(brand, brand_short, site, niche, city, queries, competitors, site
         "plan30": _plan30(site_info, niche),
         "method_note": (f"Каждой из {len(work)} рабочих нейросетей задано {len(queries)} вопросов по {RUNS} прогона — всего {len(queries)*len(work)*RUNS} ответов на дату на обложке; "
                         + (f"Нейросеть {', '.join(failed_names)} в этот раз не ответила (ошибка доступа к API) и в расчёт видимости не вошла. " if failed_names else "")
-                        + "Проверка выполнена через API-доступ к AI-моделям; ответы в пользовательских приложениях могут отличаться из-за истории диалога, региона, версии модели и настроек поиска. "
-                        "Где нейросеть умеет искать в интернете, использовался веб-поиск. Упоминание — явное называние бренда, домена или короткого имени. "
+                        + "Где нейросеть умеет искать в интернете, использовался веб-поиск. Упоминание — явное называние бренда, домена или короткого имени. "
                         "Причины отсутствия бренда отмечены как гипотезы, а не доказанные факты. Ответы нейросетей меняются со временем; "
                         "повторный замер имеет смысл после индексации обновлённых страниц."),
     }
@@ -2471,7 +2267,7 @@ def _positives(rates, best, zero, site_info=None, rep_groups=None):
     if not zero:
         pos.append(f"Бренд появляется в {best['name']} ({rates[best['id']]}% ответов)")
         if rep_groups:
-            pos.append(f"Есть устойчивые упоминания ({RUNS}/{RUNS}): бренд появляется во всех прогонах части вопросов")
+            pos.append("Есть повторяемые упоминания (2/2): бренд появляется в обоих ответах на часть вопросов")
     s = site_info or {}
     if s.get("ok"):                                     # реальные активы сайта (проверено)
         sm = _schema_summary(s.get("schema"))
@@ -2620,6 +2416,58 @@ def _biz_role(site_info, niche=""):
         return "shop"
     return "service"
 
+# B2B-опт/производство: товарный бизнес без розничного потребительского фокуса
+_B2B_RX = re.compile(
+    r"(?:\bb2b\b|b-to-b|wholesale|"
+    r"опт(?:ом|ов(?:ая|ые|ов)?)?|"
+    r"корпоративн|"
+    r"для\s+бизнеса|"
+    r"юридическ(?:их|им)?\s+лиц|"
+    r"минимальн(?:ая|ой)?\s+парт|"
+    r"\bmoq\b|"
+    r"дилер(?:ская|ский|ам)?|"
+    r"дистрибьютор|"
+    r"поставщик(?:\s+для)?|"
+    r"промышленн|"
+    r"производственн(?:ое|ые)?\s+оборудован|"
+    r"тендер|"
+    r"договор\s+поставк|"
+    r"контрактн(?:ая|ое)\s+закупк|"
+    r"хорека|ho\s*re\s*ca|"
+    r"для\s+предприятий|"
+    r"коммерческ(?:их|им)?\s+клиент|"
+    r"снабжени(?:е|я)|"
+    r"комплектующ)",
+    re.I)
+_B2C_ONLY_RX = re.compile(
+    r"(розниц(?:а|е|у|ы)?|"
+    r"для\s+частн(?:ых|ым)?\s+(?:лиц|покупател)|"
+    r"физическ(?:их|им)?\s+лиц|"
+    r"купить\s+в\s+подарок|"
+    r"подарочн|"
+    r"шоурум|"
+    r"для\s+дома\s+и\s+семьи)",
+    re.I)
+
+def _is_b2b_product(site_info, niche=""):
+    """Товарный бизнес (магазин/производитель) с B2B/оптовой моделью — не розница."""
+    role = _biz_role(site_info, niche)
+    if role not in ("shop", "manufacturer"):
+        return False
+    txt = " ".join(filter(None, [
+        niche,
+        (site_info or {}).get("title"),
+        (site_info or {}).get("description"),
+        (site_info or {}).get("text_excerpt"),
+    ])).lower()
+    if not _B2B_RX.search(txt):
+        return False
+    if _B2C_ONLY_RX.search(txt) and not re.search(
+            r"(?:\bb2b\b|опт(?:ом|ов)?|корпоративн|для\s+бизнеса|юридическ|минимальн\w*\s+парт|дистрибьютор|поставщик)",
+            txt, re.I):
+        return False
+    return True
+
 def _role_directive(site_info, niche=""):
     """Жёсткая инструкция: компания — сам исполнитель, а НЕ посредник/агрегатор/сервис подбора."""
     role = _biz_role(site_info, niche)
@@ -2639,6 +2487,10 @@ def _role_directive(site_info, niche=""):
                  "НЕ используй слова «проект», «кейс», «подрядчик», «объект», «монтаж» — они сюда не подходят.")
     else:
         base += " Это прямой исполнитель услуг (агентство, студия, подрядчик). Пиши от первого лица как тот, кто сам делает работу, а не подбирает подрядчиков."
+    if _is_b2b_product(site_info, niche):
+        base += (" Это B2B/ОПТ: клиенты — бизнес и закупщики, а НЕ частные покупатели. "
+                 "Категорически запрещены: шоурумы, интерьер, подарки, блогеры, возврат товара, lifestyle-медиа, маркетплейсы для частных лиц. "
+                 "Пиши про отрасли применения, условия поставки, минимальную партию, сертификацию, договор.")
     return base
 
 def _reco_review(niche, brand_short, site_info=None):
@@ -2652,7 +2504,10 @@ def _reco_review(niche, brand_short, site_info=None):
     s = site_info or {}
     desc = " ".join(filter(None, [s.get("title"), s.get("description")]))[:200]
     if role in ("shop", "manufacturer"):
-        what = "отзыв покупателя: что купил или заказал, как качество и подошло ли, доставка"
+        if _is_b2b_product(site_info, niche):
+            what = "отзыв корпоративного клиента: какая задача, объём поставки, сроки, качество и сервис"
+        else:
+            what = "отзыв покупателя: что купил или заказал, как качество и подошло ли, доставка"
     elif role == "place":
         what = "отзыв посетителя: что делал или заказывал, что понравилось, сервис"
     else:
@@ -2708,7 +2563,20 @@ def _reco_examples(niche, brand_short, queries=None, site_info=None):
         "БЕЗ полей вида «Поле: значение», без таблиц, без markdown — только живой связный текст, который можно сразу вставить на сайт.>\n"
         "REVIEW:\n"
         "<готовый отзыв покупателя: что купил, как подошёл размер и качество, доставка; неизвестное опусти, без скобок>"
-        if _biz_role(site_info, niche) in ("shop", "manufacturer") else
+        if _biz_role(site_info, niche) in ("shop", "manufacturer") and not _is_b2b_product(site_info, niche) else
+        # B2B-опт/производство: каталог/линейка, условия поставки, отзыв корпоративного клиента
+        "Ответь СТРОГО в таком формате:\n"
+        "SERVICES:\n"
+        "H1: <заголовок страницы линейки или категории для бизнеса>\n"
+        "Абзац: <первый абзац от лица поставщика/производителя: для каких отраслей и задач, чем выделяется>\n"
+        "<3–4 пункта списком, каждый с новой строки с «• », без слова «Состав»: характеристики, применение, условия поставки, сертификация>\n"
+        "PROJECT:\n"
+        "<Готовое описание линейки или категории СПЛОШНЫМ текстом, 2–4 предложения: для каких отраслей, ключевые характеристики, "
+        "условия поставки и минимальная партия. Конкретные факты, неизвестное опусти, без скобок. "
+        "БЕЗ полей вида «Поле: значение», без markdown — только живой связный текст.>\n"
+        "REVIEW:\n"
+        "<готовый отзыв корпоративного клиента: задача, объём, сроки, качество и сервис; неизвестное опусти, без скобок>"
+        if _is_b2b_product(site_info, niche) else
         # заведение/место (салон, клиника, ресторан, отель, фитнес): услуга-направление / описание услуги / отзыв посетителя
         "Ответь СТРОГО в таком формате:\n"
         "SERVICES:\n"
@@ -2754,8 +2622,9 @@ def _reco_examples(niche, brand_short, queries=None, site_info=None):
         elif cur:
             buf.append(ln.rstrip())
     if cur: sec[cur] = "\n".join(buf).strip()
-    if _biz_role(site_info, niche) in ("shop", "manufacturer", "place") and sec.get("project"):
-        sec["project"] = re.split(r"(?im)^\s*(?:H1|Абзац|Состав|PRODUCTPAGE|SERVICES)\s*:", sec["project"])[0].strip()  # карточка/описание — только связный текст
+    if _biz_role(site_info, niche) in ("shop", "manufacturer", "place") or _is_b2b_product(site_info, niche):
+        if sec.get("project"):
+            sec["project"] = re.split(r"(?im)^\s*(?:H1|Абзац|Состав|PRODUCTPAGE|SERVICES)\s*:", sec["project"])[0].strip()  # карточка/описание — только связный текст
     out = {k: v for k, v in sec.items() if v and len(v) >= 12}
     if not out.get("review"):                                # отзыв не распарсился — добираем отдельным запросом, чтобы был реальный пример
         rv = _reco_review(niche, brand_short, site_info)
@@ -2793,11 +2662,23 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
     has_products = bool(types & {"product", "offer", "aggregateoffer", "store", "onlinestore", "productgroup"})  # есть ли товары/магазин
     role = _biz_role(site_info, niche)
     product_biz = role in ("shop", "manufacturer")   # тексты карточек по РОЛИ (у отеля бывает Offer, но это не магазин)
+    b2b_product = product_biz and _is_b2b_product(site_info, niche)  # опт/B2B — отдельные тексты без розницы
+    retail_product = product_biz and not b2b_product
     place_biz = role == "place"                       # заведение/место: услуги-направления и отзывы посетителей, а не проекты
     recs = []
 
     # 1. Контент: понятные страницы товаров (магазин/производитель) или услуг
-    if product_biz:
+    if b2b_product:
+        c1_title = "Сделать каталог продукции и линейки понятнее для нейросетей и закупщиков"
+        svc_plain = (f"Главные коммерческие страницы у вас — это линейки и категории продукции. Создавать с нуля ничего не нужно. "
+                     f"Их заголовки и описания должны сразу объяснять, для каких отраслей и задач подходит продукция, тогда нейросеть назовёт именно вас. "
+                     f"По коммерческим вопросам {b} {aneg} в {miss} из {total} ответов.")
+        c1_steps = ["Собрать категории и подборки под конкретные отрасли и сценарии применения (по типу объекта, задаче, характеристикам)",
+                    "В заголовке и первом абзаце категории показать, для каких бизнес-задач и отраслей она подходит",
+                    "В карточке продукции указать технические характеристики, применение, сертификацию и отличие от аналогов",
+                    "Добавить сравнительные материалы и гиды для закупщиков: как выбрать, чем модели различаются",
+                    "Связать категории, подборки и карточки внутренними ссылками"]
+    elif retail_product:
         c1_title = "Сделать карточки товаров и категории понятнее для нейросетей и клиентов"
         svc_plain = (f"Главные коммерческие страницы у вас — это товары и категории. Создавать с нуля ничего не нужно. "
                      f"Их заголовки и описания должны сразу объяснять, что за товар, для кого он и чем хорош, тогда нейросеть назовёт именно вас. "
@@ -2835,7 +2716,19 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
         "priority": "Высокий", "term": "1–2 недели"})
 
     # 2. Контент: карточки товаров (магазин/производитель) / услуги-направления (заведение) / проекты-кейсы (услуги)
-    if product_biz:
+    if b2b_product:
+        proj_title = "Подробно раскрыть условия поставки, гарантию и работу с корпоративными клиентами"
+        proj_plain = ("Нейросеть охотнее рекомендует поставщика, у которого понятно расписаны условия поставки, гарантия, "
+                      "логистика и работа с бизнес-клиентами. Отзывы корпоративных заказчиков повышают доверие и попадают в ответы.")
+        proj_steps = ["Сделать отдельные страницы про условия поставки, гарантию, логистику и минимальную партию",
+                      "Описать порядок работы с юридическими лицами: договор, оплата, документооборот",
+                      "Собирать отзывы корпоративных клиентов: сроки, объём, качество, сервис",
+                      "Добавить ответы на частые вопросы о совместимости, сертификации и технической поддержке",
+                      "Связать карточки продукции со страницами условий поставки и гарантии"]
+        proj_ex_fb = ("Страница для бизнес-клиентов: «Условия поставки и минимальная партия. Что входит в гарантию и на какой срок. "
+                      "Как оформить договор и оплату. Как связаться с менеджером по закупкам». Конкретика повышает доверие и попадает в ответы нейросети.")
+        proj_handoff = "Контент-менеджеру — описать условия поставки и гарантию. Маркетологу — собрать отзывы корпоративных клиентов. Администратору сайта — разместить и связать ссылками."
+    elif retail_product:
         proj_title = "Подробно раскрыть сервис, гарантию, доставку и шоурумы"
         proj_plain = ("Нейросеть охотнее рекомендует бренд, у которого понятно расписаны сервис, гарантия, доставка "
                       "и где товар можно посмотреть вживую. Отзывы о сервисе, а не только о товаре, повышают доверие и попадают в ответы.")
@@ -2873,7 +2766,8 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
         proj_ex_fb = ("Структура: «Задача клиента. Что сделали: ключевые этапы. Срок. Результат: что клиент получил». "
                       "Заголовок лучше делать говорящим — с типом клиента и сутью, а не «Объект №3».")
         proj_handoff = "Менеджеру проекта — собрать факты. Маркетологу или редактору — оформить текст. Администратору сайта — разместить материал и ссылки."
-    proj_wrap = ("Готовая карточка товара для вашей ниши:" if product_biz
+    proj_wrap = ("Готовая карточка продукции для вашей ниши:" if b2b_product
+                 else "Готовая карточка товара для вашей ниши:" if retail_product
                  else "Готовое описание услуги для вашей ниши:" if place_biz
                  else "Готовая структура для вашей ниши:")
     recs.append({
@@ -2881,13 +2775,21 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
         "title": proj_title,                              # заголовок под тип бизнеса
         "plain": proj_plain,
         "steps": proj_steps,
-        "example": (proj_ex_fb if product_biz               # у товарного бренда карточка 2 про сервис/гарантию -> статичный пример под неё
+        "example": (proj_ex_fb if retail_product               # у розничного бренда карточка 2 про сервис/гарантию -> статичный пример под неё
                     else (f"{proj_wrap}\n{rex['project']}" if rex.get('project') else proj_ex_fb)),
         "handoff": proj_handoff,
         "priority": "Высокий", "term": "2–3 недели"})
 
     # 3. Продвижение: внешние упоминания
-    if product_biz:
+    if b2b_product:
+        promo_steps = ["Проверить карточки компании в отраслевых каталогах и справочниках поставщиков — единое название и описание",
+                       "Наращивать упоминания в профильных отраслевых и деловых изданиях",
+                       "Публиковать кейсы внедрения и отзывы корпоративных клиентов на отраслевых площадках",
+                       "Собирать внешние отзывы заказчиков с указанием задачи, объёма и сроков поставки",
+                       "Попадать в тематические подборки и рейтинги поставщиков вашей отрасли"]
+        promo_fb = ("Полезный отзыв вместо «Всё понравилось»: напишите, какую задачу решали, какой объём заказали, "
+                    "как прошли сроки и качество. Конкретные факты нейросеть цитирует охотнее общих слов.")
+    elif retail_product:
         promo_steps = ["Проверить карточки бренда на картах, в каталогах и на маркетплейсах — единое название и описание",
                        "Наращивать обзоры и упоминания в профильных медиа: интерьерные, технологические и lifestyle-издания",
                        "Договариваться об обзорах и тестах у блогеров и экспертов ниши",
@@ -2918,7 +2820,10 @@ def _recommendations(queries, groups, total, site_info=None, brand_short="бре
         "title": "Сделать информацию о компании заметнее за пределами сайта",
         "plain": (f"Нейросеть использует не только сайт {b}, но и карточки компании, отзывы, каталоги, маркетплейсы и обзоры. "
                   "Когда название, специализация и описание совпадают на разных площадках, системе проще связать их с одним брендом."
-                  if product_biz else
+                  if retail_product else
+                  f"Нейросеть использует не только сайт {b}, но и карточки компании, отзывы, отраслевые каталоги и деловые публикации. "
+                  "Когда название, специализация и описание совпадают на разных площадках, системе проще связать их с одним брендом."
+                  if b2b_product else
                   f"Нейросеть использует не только сайт {b}, но и карточки компании, отзывы, статьи, каталоги и отраслевые "
                   "публикации. Когда название, специализация и описание совпадают на разных площадках, системе проще связать их с одним брендом."),
         "steps": promo_steps,
@@ -3056,11 +2961,10 @@ def run(brand=None, site=None, niche=None, city=None, brand_short=None, out=None
         prep = prepare(site, niche, city, fallback_brand=brand_short or brand or "")
     site_info = prep.get("site_info")
     aliases = set(prep.get("aliases") or [])
-    q, competitors, failed, comp_sites, failed_details = analyze(prep["brand"], prep["brand_short"], prep["site"], prep["niche"], prep.get("city"),
-                                                                 site_info=site_info, aliases=aliases, queries=prep.get("queries"))
+    q, competitors, failed, comp_sites = analyze(prep["brand"], prep["brand_short"], prep["site"], prep["niche"], prep.get("city"),
+                                                 site_info=site_info, aliases=aliases, queries=prep.get("queries"))
     data = build_data(prep["brand"], prep["brand_short"], prep["site"], prep["niche"], prep.get("city"),
-                      q, competitors, site_info=site_info, failed_engines=failed, comp_sites=comp_sites,
-                      failed_details=failed_details)
+                      q, competitors, site_info=site_info, failed_engines=failed, comp_sites=comp_sites)
     if out:
         with open(out, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=1)
     return data

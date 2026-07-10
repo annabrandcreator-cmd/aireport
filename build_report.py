@@ -18,7 +18,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 FONTS = os.environ.get("FONTS_DIR") or _HERE   # шрифты и ассеты лежат рядом со скриптом (без подпапок)
 ASSETS = os.environ.get("ASSETS_DIR") or _HERE
 TG_URL = "https://t.me/annakurbatovaai"
-RUNS = 2  # прогонов на каждый запрос; в боевом отчёте переопределяется из data["runs"]
+RUNS = 2  # прогонов на каждый запрос
 
 # ── фирменные цвета (контраст серого повышен) ──────────────────────────────
 INK="#1C1813"; MUTED="#5E564A"; FAINT="#8A8073"; ACCENT="#DE4A2C"; ACCENTD="#BE3A20"
@@ -50,22 +50,17 @@ def _aneg(d):
 
 def _matrix_verdict(d):
     """Вывод под матрицей: строится из данных, без зашитых формулировок."""
-    runs = int(d.get("runs") or RUNS)
-    mark = f"{runs}/{runs}"
     if d.get('overall', 0) == 0:
         return (f"{esc(d['brand_short'])} {_aneg(d)} ни в одном из {d['total_answers']} ответов. Следующий шаг — определить "
                 "страницы сайта, которые должны отвечать на эти вопросы, и проверить, ясно ли на них описаны услуги, опыт и специализация.")
     if d.get('rep_groups'):
-        s = f"Устойчивое упоминание ({mark}) уже есть по части вопросов: бренд появляется во всех проверках одного и того же вопроса."
+        s = "Повторяемое упоминание (2 из 2) уже есть по части вопросов: бренд появляется в обоих ответах на один и тот же вопрос."
     else:
-        s = f"Устойчивого упоминания ({mark}) пока нет: бренд появляется не во всех проверках одного и того же вопроса."
+        s = "Повторяемого упоминания (2 из 2) пока нет: бренд появлялся максимум в одной из двух проверок."
     return s
 
 # ── расчёт всех чисел из матрицы ────────────────────────────────────────────
 def compute(d):
-    global RUNS
-    RUNS = max(2, int(d.get("runs") or RUNS or 2))
-    d["runs"] = RUNS
     eng=d['engines']; qs=d['queries']
     for e in eng:
         m=sum(q['hits'].get(e['id'],0) for q in qs)
@@ -83,7 +78,7 @@ def compute(d):
     d['stable_cells']=sum(1 for c in cells if c==2)
     d['partial_cells']=sum(1 for c in cells if c==1)
     d['zero_cells']=sum(1 for c in cells if c==0)
-    d['stable_q']=sum(1 for q in qs if any(q['hits'].get(e['id'],0)>=RUNS for e in work))
+    d['stable_q']=sum(1 for q in qs if any(q['hits'].get(e['id'],0)==2 for e in work))
     # группы (доли — по рабочим движкам)
     g={}
     for q in qs:
@@ -343,9 +338,9 @@ def p_summary(d):
       <div class="box cream"><h4>Ближайшая цель</h4><p>{esc(rm['goal'])}</p></div>
       <div class="grid3" style="margin-top:5mm">
         <div class="stat"><div class="n">{d['overall']}%</div><div class="l">{("нет видимости" if d['overall']==0 else d['level']+" видимость")} по {len([e for e in d['engines'] if not e.get('failed')])} {plural(len([e for e in d['engines'] if not e.get('failed')]),'рабочей нейросети','рабочим нейросетям','рабочим нейросетям')}</div></div>
-        <div class="stat"><div class="n">{d['stable_q']} из {len(d['queries'])}</div><div class="l">запросов с устойчивым упоминанием ({RUNS}/{RUNS} хотя бы в одной сети)</div></div>
+        <div class="stat"><div class="n">{d['stable_q']} из {len(d['queries'])}</div><div class="l">запросов с повторяемым упоминанием (2/2 хотя бы в одной сети)</div></div>
         <div class="stat"><div class="n">{stat3_n}</div><div class="l">{stat3_l}</div></div></div>
-      <div class="note" style="margin-top:3mm">{RUNS}/{RUNS} означает, что бренд появился во всех проверках одного и того же вопроса.</div>
+      <div class="note" style="margin-top:3mm">2/2 означает, что бренд появился в обоих ответах на один и тот же вопрос.</div>
       <div class="box"><h4>Что дальше в отчёте</h4><p>Дальше: видимость по каждой нейросети, таблица повторяемости ответов, примеры реальных ответов, что показала проверка сайта и пошаговый план с приоритетами и ответственными.</p></div>
       {footer(d)}</div>'''
 
@@ -435,16 +430,11 @@ def p_matrix(d):
                 v=q['hits'].get(e['id'],0); cells+=f'<td class="c c{v}">{v}/{RUNS}</td>'
         rows+=f'<tr><td class="q">{esc(q["q"])}</td>{cells}</tr>'
     legend=" · ".join(f'{esc(e["short"])}: {esc(e["name"])}' + (" (не проверено)" if e.get("failed") else "") for e in eng)
-    plural_check = plural(RUNS, "раз", "раза", "раз")
-    mid_note = (f"{RUNS}/{RUNS}: упоминание есть во всех проверках. " +
-                (f"1/{RUNS}: есть только в части проверок. " if RUNS > 1 else "") +
-                f"0/{RUNS}: не появился.")
-    partial_note = (f" · частично (1-{RUNS-1}/{RUNS}): <b>{d['partial_cells']}</b>" if RUNS > 1 else "")
     return f'''<div class="page"><h2><span class="num">03</span>В каких ответах бренд появляется, а в каких нет</h2>
-      <div class="sec-intro">Каждый запрос проверен {RUNS} {plural_check}. {mid_note}</div>
+      <div class="sec-intro">Каждый запрос проверен по {RUNS} раза. 2/{RUNS}: упоминание повторилось в обеих проверках. 1/{RUNS}: в одной из двух. 0/{RUNS}: не появился.</div>
       <table class="mx"><thead><tr><th class="q">Запрос</th>{head}</tr></thead><tbody>{rows}</tbody></table>
       <div class="two" style="margin-top:5mm">
-        <div class="box"><h4>Устойчивость упоминаний</h4><p>Есть во всех проверках ({RUNS}/{RUNS}): <b>{d['stable_cells']}</b>{partial_note} · не обнаружено (0/{RUNS}): <b>{d['zero_cells']}</b> из {len(d['queries'])*len(eng)} ячеек.</p></div>
+        <div class="box"><h4>Повторяемость упоминаний</h4><p>Повторилось (2/{RUNS}): <b>{d['stable_cells']}</b> · в одной из двух (1/{RUNS}): <b>{d['partial_cells']}</b> · не обнаружено (0/{RUNS}): <b>{d['zero_cells']}</b> из {len(d['queries'])*len(eng)} ячеек.</p></div>
         <div class="box"><h4>Вывод</h4><p>{_matrix_verdict(d)}</p></div></div>
       <div class="note" style="margin-top:4mm">{legend}</div>
       {footer(d)}</div>'''
@@ -496,8 +486,8 @@ def _qd_row(q, e, lm=None):
     comps=ev.get('comps',[])                                  # подтверждённые нишевые конкуренты
     others=[o for o in ev.get('others',[]) if o not in comps]  # прочие названные игроки (площадки, домены, бренды)
     # имена ниже уже HTML-экранированы и обёрнуты в ссылки внутри _qd_names -> t выводим как HTML
-    if h>=RUNS:   t=f"назвал ваш бренд во всех проверках ({RUNS}/{RUNS})" + (", рядом назвал "+_qd_names(comps+others, lm) if (comps or others) else "")
-    elif h>=1: t=f"назвал ваш бренд в части проверок ({h}/{RUNS})" + (", рядом назвал "+_qd_names(comps+others, lm) if (comps or others) else "")
+    if h>=2:   t="назвал ваш бренд в обоих ответах (2/2)" + (", рядом назвал "+_qd_names(comps+others, lm) if (comps or others) else "")
+    elif h==1: t="назвал ваш бренд в одном ответе (1/2)" + (", рядом назвал "+_qd_names(comps+others, lm) if (comps or others) else "")
     elif comps:t="назвал конкурентов: "+_qd_names(comps+others, lm)+"; вашего бренда нет"
     elif others:t="назвал других игроков: "+_qd_names(others, lm)+"; вашего бренда нет"
     else:      t="общий ответ без названий компаний"

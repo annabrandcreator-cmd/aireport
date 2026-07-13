@@ -1597,6 +1597,20 @@ def ask_gemini(prompt):
         raise last
     return _ask_openrouter("gemini", prompt)
 
+# GigaChat на PERS-тарифе ловит 429 при пачке параллельных запросов — разносим вызовы во времени.
+_GIGA_LOCK = threading.Lock()
+_GIGA_NEXT = [0.0]
+def _giga_pace():
+    gap = float(os.environ.get("GIGACHAT_MIN_GAP", "0.7") or 0)  # сек между вызовами; 0 = выкл
+    if gap <= 0:
+        return
+    with _GIGA_LOCK:
+        now = time.time()
+        wait = _GIGA_NEXT[0] - now
+        if wait > 0:
+            time.sleep(wait); now = time.time()
+        _GIGA_NEXT[0] = now + gap
+
 # GigaChat: ключ из кабинета (Authorization Key, Basic) меняется на access token на 30 минут.
 # Сертификаты Минцифры в контейнере не ставим -> отключаем проверку TLS для доменов Сбера.
 _GIGA_TOKEN = {"val": "", "exp": 0.0}
@@ -1625,8 +1639,9 @@ def _giga_token():
 
 def ask_gigachat(prompt):
     last = None
-    for attempt in (1, 2):                                  # GigaChat нестабилен: протухший токен/обрыв TLS -> сброс токена и повтор
+    for attempt in (1, 2, 3):                               # протухший токен/TLS/429 -> сброс и повтор
         try:
+            _giga_pace()
             tok = _giga_token()
             req = urllib.request.Request(
                 "https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
@@ -1638,9 +1653,14 @@ def ask_gigachat(prompt):
                 return json.loads(r.read().decode())["choices"][0]["message"]["content"]
         except Exception as e:
             last = e
+            msg = str(e)
             _GIGA_TOKEN["val"] = ""; _GIGA_TOKEN["exp"] = 0.0   # сбрасываем токен -> на повторе перелогинимся
-            if attempt == 1:
-                time.sleep(1.2); continue
+            if attempt < 3:
+                if re.search(r"429|too many requests|rate.?limit", msg, re.I):
+                    time.sleep(2.5 * attempt)                    # 2.5с, 5с — даём лимиту остыть
+                else:
+                    time.sleep(1.2)
+                continue
             raise last
 
 def ask_yandex(prompt):
@@ -1729,7 +1749,7 @@ _RATELIMIT = re.compile(r"resource.?exhausted|rate.?limit|too many requests|high
 _HARDFAIL = re.compile(r"quota|billing|exceeded your current quota|api[_ ]?key not valid|invalid.{0,4}api.?key|"
                        r"permission denied|unauthor|\b401\b|\b403\b|\b404\b|not found", re.I)
 _ENGINE_ERR = {}                                              # последняя ошибка по движку (для диагностики в отчёте)
-_ENGINE_WORKERS = {"perplexity": 4, "claude": 4, "deepseek": 4, "gemini": 4, "chatgpt": 5, "gigachat": 4, "yandex": 4}
+_ENGINE_WORKERS = {"perplexity": 4, "claude": 4, "deepseek": 4, "gemini": 4, "chatgpt": 5, "gigachat": 2, "yandex": 4}
 
 def _preflight_one(eid):
     probe = "Назови одну российскую компанию одним предложением."
@@ -1783,7 +1803,7 @@ def _ask_one(prompt, eid, run, brand, test, _log=True):
         except Exception: return None
     if not has_key(eid):
         return None                                 # ключа нет — не опрашиваем и не подставляем мок
-    max_try = 3 if eid == "gemini" else 2
+    max_try = 3 if eid in ("gemini", "gigachat") else 2
     for attempt in range(1, max_try + 1):
         try:
             return REAL_ADAPTERS[eid](prompt)
@@ -1795,7 +1815,11 @@ def _ask_one(prompt, eid, run, brand, test, _log=True):
             if _HARDFAIL.search(msg):
                 return None
             if attempt < max_try and _TRANSIENT.search(msg):
-                time.sleep((3.0 if _RATELIMIT.search(msg) else 1.2) * attempt); continue
+                if eid == "gigachat" and _RATELIMIT.search(msg):
+                    time.sleep(2.5 * attempt)
+                else:
+                    time.sleep((3.0 if _RATELIMIT.search(msg) else 1.2) * attempt)
+                continue
             return None
     return None
 

@@ -27,7 +27,7 @@ DB = os.environ.get("DB_PATH") or os.path.join(APP_DIR, "orders.db")
 REPORTS = os.environ.get("REPORTS_DIR") or os.path.join(APP_DIR, "reports")
 os.makedirs(REPORTS, exist_ok=True)
 
-VERSION = "v112"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
+VERSION = "v113"                           # маркер сборки -> видно в /health, чтобы убедиться что задеплоен свежий код
 TERMINAL = os.environ.get("TBANK_TERMINAL", "1782125233968DEMO").strip()  # .strip() — от случайных пробелов/переноса при вставке
 PRICE = int(os.environ.get("PRICE_RUB", "1290"))
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000").strip().rstrip("/")
@@ -157,6 +157,23 @@ def _recover_stale_preparing():
             print(f"[recovery] preparing без prep -> paid: {n}", flush=True)
     except Exception as e:
         print("[recovery]", e, flush=True)
+
+def _recover_stuck_paid():
+    """Оплата прошла, чат есть, но подготовка запросов не стартовала (вебхук раньше /start)."""
+    try:
+        with db() as c:
+            rows = c.execute(
+                "SELECT id FROM orders WHERE status='paid' AND tg_chat_id IS NOT NULL AND tg_chat_id<>'' "
+                "AND created > ?",
+                (time.time() - 86400,),
+            ).fetchall()
+        for r in rows:
+            try:
+                maybe_start_review(r["id"])
+            except Exception as e:
+                print("[recovery] paid restart", r["id"], e, flush=True)
+    except Exception as e:
+        print("[recovery paid]", e, flush=True)
 
 _recover_stale_preparing()
 
@@ -386,7 +403,7 @@ def _send_review(chat, oid, prep, edited=False, prefix=""):
         tg_send_buttons(chat, prefix + _review_text(prep, edited=edited), _review_kb(oid))
 
 def _menu_kb():
-    order_url = os.environ.get("ORDER_URL") or SITE
+    order_url = os.environ.get("ORDER_URL") or (SITE.rstrip("/") + "/zakaz.html")
     support_url = os.environ.get("SUPPORT_URL") or "https://t.me/annakurbatovaai"
     return [[{"text": "📊 Заказать проверку видимости", "url": order_url}],
             [{"text": "🔁 Проверить другие запросы", "callback_data": "addon_menu"}],
@@ -659,6 +676,33 @@ a{color:inherit;text-decoration:none}
 <script>(function(){var n=document.querySelector('.nav');if(!n)return;var f=function(){n.classList.toggle('solid',window.scrollY>40)};f();window.addEventListener('scroll',f,{passive:true})})();</script>
 </body></html>"""
 
+
+OPEN_BOT_PAGE = """<!doctype html><html lang=ru><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>Откройте Telegram · Анна Курбатова</title>
+<meta name=robots content="noindex">
+<link rel="icon" href="__SITE__/favicons/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="__SITE__/css/site.css">
+<meta http-equiv="refresh" content="2;url=__TGLINK__">
+<style>
+  body{background:#fff;color:#141210}
+  .ob{min-height:100vh;min-height:100svh;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    text-align:center;padding:clamp(100px,16vh,160px) 22px 70px;font-family:"Gilroy",system-ui,sans-serif}
+  .ob h1{font-weight:500;font-size:clamp(28px,4.5vw,44px);line-height:1.08;letter-spacing:-.02em;margin:0}
+  .ob p{font-size:clamp(16px,1.4vw,19px);line-height:1.55;color:#403B34;max-width:42ch;margin:16px auto 0}
+  .ob a.btn{display:inline-flex;margin-top:28px;padding:16px 28px;border-radius:30px;background:#DE4A2C;color:#fff;
+    font-weight:600;font-size:16.5px;text-decoration:none;box-shadow:0 16px 34px -14px rgba(222,74,44,.7)}
+  .ob .note{margin-top:18px;font-size:13.5px;color:#857F74;max-width:46ch}
+</style></head><body>
+<main class=ob>
+  <h1>Заявка принята</h1>
+  <p>Откройте Telegram-бота по кнопке ниже и нажмите <b>Start / Запустить</b>. Там будет оплата и отчёт.</p>
+  <a class=btn href="__TGLINK__">Открыть бота в Telegram →</a>
+  <p class=note>Если бот открылся без кнопки Start — вернитесь сюда и нажмите кнопку ещё раз. Не отправляйте пустой /start вручную.</p>
+</main>
+<script>setTimeout(function(){location.href="__TGLINK__";},900);</script>
+</body></html>"""
+
 SITE = "https://annakurbatova.ru"
 THANKS_PAGE = """<!doctype html><html lang=ru><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
@@ -821,11 +865,11 @@ def create_payment():
     bot = tg_bot()
     if not bot:
         return err_page("Сервис временно недоступен, напишите нам в Telegram.", 503)
-    # Ведём клиента в бот: там он жмёт Старт. Платный заказ -> кнопка оплаты; бесплатный по промо -> сразу к отчёту.
+    # Ведём клиента в бот через промежуточную страницу: «голый» 302 на t.me иногда теряет start=payload.
     link = f"https://t.me/{bot}?start={order_id}"
     if request.is_json:
         return jsonify(redirect=link, orderId=order_id)
-    return redirect(link, code=302)
+    return OPEN_BOT_PAGE.replace("__TGLINK__", link).replace("__SITE__", SITE)
 
 @app.post("/tbank/notify")
 def tbank_notify():
@@ -904,9 +948,19 @@ def _payment_poller():
                 rows = c.execute("SELECT id FROM orders WHERE status IN ('new','pending') "
                                  "AND tg_chat_id IS NOT NULL AND tg_chat_id<>'' AND created > ?",
                                  (time.time() - 7200,)).fetchall()
+                paid_stuck = c.execute(
+                    "SELECT id FROM orders WHERE status='paid' "
+                    "AND tg_chat_id IS NOT NULL AND tg_chat_id<>'' AND created > ?",
+                    (time.time() - 86400,),
+                ).fetchall()
             for r in rows:
                 if tbank_check_order(r["id"]):
                     _on_payment_confirmed(r["id"], src="poll")
+            for r in paid_stuck:                             # оплата есть, подготовка запросов не стартовала
+                try:
+                    maybe_start_review(r["id"])
+                except Exception as e:
+                    print("[poller] paid restart", r["id"], e, flush=True)
         except Exception as e:
             print("[poller]", e, flush=True)
 
@@ -1173,6 +1227,70 @@ def tg_webhook():
                     else:
                         tg_send_message(chat, "Кнопка оплаты выше. После оплаты отчёт придёт сюда автоматически.")
                 return "OK"
+        # Пустой /start: продолжаем активный заказ этого чата (если deep-link потерялся)
+        with db() as c:
+            active = c.execute(
+                "SELECT * FROM orders WHERE tg_chat_id=? AND status IN "
+                "('new','pending','paid','preparing','reviewing','await_niche','await_queries','processing','error') "
+                "ORDER BY created DESC LIMIT 1",
+                (str(chat),),
+            ).fetchone()
+        if active:
+            oid = active["id"]
+            st = active["status"]
+            o = active
+            if st == "done" and o["pdf"] and os.path.exists(o["pdf"]):
+                try: tg_send_report(chat, o["pdf"], o)
+                except Exception as e: print("[tg] ошибка:", e)
+            elif st == "paid":
+                tg_send_message(chat, "Продолжаю ваш заказ: готовлю запросы для проверки.")
+                maybe_start_review(oid)
+            elif st == "preparing":
+                if o["prep"]:
+                    _send_review(chat, oid, json.loads(o["prep"]))
+                else:
+                    tg_send_message(chat, "Готовлю запросы для проверки, пришлю их сюда в течение минуты.")
+                    maybe_start_review(oid)
+            elif st == "reviewing":
+                if o["prep"]:
+                    _send_review(chat, oid, json.loads(o["prep"]))
+                else:
+                    tg_send_message(chat, "Готовлю запросы для проверки, пришлю их сюда через минуту.")
+                    with db() as c:
+                        c.execute("UPDATE orders SET status='paid' WHERE id=? AND status='reviewing'", (oid,))
+                    maybe_start_review(oid)
+            elif st == "await_queries":
+                n = o["qn"] or 1
+                tg_send_message(chat, f"Жду ваши {n} {_plural_q(n)} для проверки — каждый с новой строки.")
+            elif st == "await_niche":
+                _ask_niche(chat, o["site"])
+            elif st == "processing":
+                tg_send_message(chat, "Отчёт уже формируется, пришлю его сюда через пару минут.")
+            elif st == "error":
+                if o["prep"]:
+                    tg_send_buttons(chat, "Прошлая проверка не завершилась. Запросы сохранены — нажмите «Попробовать ещё раз».",
+                                    _error_kb(oid))
+                else:
+                    tg_send_buttons(chat, "Прошлая проверка не завершилась. Отправьте проблему в поддержку.",
+                                    [[{"text": "✉️ Сообщить о проблеме в поддержку", "callback_data": f"problem:{oid}"}]])
+            elif st == "new" and (o["promo"] or ""):
+                tg_send_message(chat, "Промокод принят, проверка бесплатна. Готовлю запросы — пришлю их сюда на подтверждение.")
+                _on_payment_confirmed(oid, src="promo", chat_id=chat)
+            elif st == "new":
+                try:
+                    res = tbank_init(oid, o["email"])
+                    if res.get("Success"):
+                        with db() as c:
+                            c.execute("UPDATE orders SET status='pending', payment_id=? WHERE id=?", (res.get("PaymentId"), oid))
+                        tg_send_payment_button(chat, res["PaymentURL"], o["brand"])
+                    else:
+                        tg_send_message(chat, "Не удалось создать оплату. Напишите нам, поможем оформить.")
+                except Exception as e:
+                    print("[pay] ошибка:", e)
+                    tg_send_message(chat, "Оплата временно недоступна, попробуйте чуть позже.")
+            else:  # pending
+                tg_send_message(chat, "Кнопка оплаты выше. Если её не видно — нажмите «Заказать проверку видимости» в меню или оформите заявку на сайте ещё раз.")
+            return "OK"
         _send_menu(chat)
         return "OK"
     # свободный текст
@@ -1926,6 +2044,10 @@ def admin_new():
 if os.environ.get("TEST_MODE") != "1" and os.environ.get("DISABLE_PAYMENT_POLLER") != "1":
     threading.Thread(target=_payment_poller, daemon=True).start()
     print("[poller] фоновый опрос статуса оплаты запущен", flush=True)
+    try:
+        _recover_stuck_paid()
+    except Exception as e:
+        print("[recovery boot]", e, flush=True)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8000")))

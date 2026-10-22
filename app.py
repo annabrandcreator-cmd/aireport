@@ -50,6 +50,7 @@ app.config["SESSION_COOKIE_SECURE"] = os.environ.get("BASE_URL", "").startswith(
 # ───────────── конфиг безопасности и промокодов (всё из env, секретов в коде нет) ─────────────
 SITE_ORIGIN = "https://annakurbatova.ru"                                               # внешний домен (стили/иконки на странице «спасибо»)
 PROMO_FREE_CODE = (os.environ.get("PROMO_FREE_CODE", "ascend") or "").strip().lower()   # промокод 100% скидки (для тестов); меняется через env
+LEAD_MODE = os.environ.get("LEAD_MODE", "1").strip() == "1"   # 1 = без оплаты: заявка + уведомление админу
 PROMO_FREE_DAILY_MAX = int(os.environ.get("PROMO_FREE_DAILY_MAX", "25") or 25)          # потолок бесплатных заказов в сутки — страховка, если код утечёт
 TG_WEBHOOK_SECRET = os.environ.get("TG_WEBHOOK_SECRET", "").strip()                     # секрет телеграм-вебхука: задан -> проверяем заголовок
 RATE_LIMIT_OFF = os.environ.get("RATE_LIMIT_OFF") == "1"                                # аварийный выключатель лимитов
@@ -329,6 +330,16 @@ def admin_notify(text):
     if aid and tg_token():
         try: _tg("sendMessage", {"chat_id": aid, "text": text})
         except Exception as e: print("[admin] ", e)
+
+def _accept_lead(chat_id, o, uname="", name=""):
+    """Режим заявок: вместо оплаты принимаем заявку и уведомляем Анну."""
+    with db() as c:
+        c.execute("UPDATE orders SET status='lead' WHERE id=? AND status='new'", (o["id"],))
+    contact = ("@" + uname if uname else "") + (f" ({name})" if name else "") or f"chat_id {chat_id}"
+    admin_notify("🆕 Новая заявка с сайта\nЗаказ: " + str(o["id"]) +
+                 f"\nСайт: {o['site']}\nНиша: {o['niche']}\nГород: {o['city'] or '—'}"
+                 f"\nE-mail: {o['email']}\nКонтакт: {contact} · chat_id {chat_id}")
+    tg_send_message(chat_id, "Ваша заявка принята, в ближайшее время свяжусь с вами.")
 
 def _send_feedback_request(chat_id, oid):
     tg_send_buttons(chat_id,
@@ -1207,6 +1218,8 @@ def tg_webhook():
                 elif st == "new" and (o["promo"] or ""):   # бесплатный заказ по промокоду -> без оплаты сразу к отчёту
                     tg_send_message(chat, "Промокод принят, проверка бесплатна. Готовлю запросы — пришлю их сюда на подтверждение.")
                     _on_payment_confirmed(oid, src="promo", chat_id=chat)
+                elif st == "new" and LEAD_MODE:
+                    _accept_lead(chat, o, tg_uname, tg_nm)
                 elif st == "new":       # создаём платёж и шлём кнопку оплаты прямо в чат
                     try:
                         res = tbank_init(oid, o["email"])
@@ -1276,6 +1289,8 @@ def tg_webhook():
             elif st == "new" and (o["promo"] or ""):
                 tg_send_message(chat, "Промокод принят, проверка бесплатна. Готовлю запросы — пришлю их сюда на подтверждение.")
                 _on_payment_confirmed(oid, src="promo", chat_id=chat)
+            elif st == "new" and LEAD_MODE:
+                _accept_lead(chat, o, tg_uname, tg_nm)
             elif st == "new":
                 try:
                     res = tbank_init(oid, o["email"])

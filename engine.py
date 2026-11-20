@@ -12,7 +12,7 @@
   PERPLEXITY_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY,
   DEEPSEEK_API_KEY, GIGACHAT_API_KEY, YANDEX_API_KEY, YANDEX_FOLDER_ID
 """
-import os, re, json, time, hashlib, datetime, urllib.request, urllib.error, ssl, uuid, threading
+import os, re, json, time, hashlib, datetime, urllib.request, urllib.error, ssl, uuid, threading, base64
 from concurrent.futures import ThreadPoolExecutor
 
 RUNS = max(2, int(os.environ.get("RUNS", "2") or 2))  # прогонов на каждый запрос (для стабильности можно 3-5)
@@ -1400,7 +1400,7 @@ _OPENROUTER_DEFAULT_MODEL = {
     "claude": "anthropic/claude-haiku-4.5",
     "deepseek": "deepseek/deepseek-chat",
     "gemini": "google/gemini-2.5-flash",
-    "chatgpt": "openai/gpt-4o-mini-search-preview",
+    "chatgpt": "openai/gpt-5.6-terra",
 }
 # Имена env на Railway (несколько вариантов на движок — берём первый непустой)
 _OPENROUTER_MODEL_ENV = {
@@ -1522,15 +1522,54 @@ def ask_perplexity(prompt):
         return j["choices"][0]["message"]["content"]
     return _ask_openrouter("perplexity", prompt)
 
+# gpt-4o-mini-search-preview и gpt-4o-search-preview сняты OpenAI 23 июля 2026.
+# Для старого Chat Completions остаётся gpt-5-search-api (всегда ищет в вебе).
+_OPENAI_SEARCH_MODEL = "gpt-5-search-api"
+_OPENAI_RESPONSES_MODEL = "gpt-5.6-terra"
+_MODEL_GONE = re.compile(r"deprecat|model_not_found|does not exist|invalid model|\b404\b", re.I)
+
+def _openai_search_model():
+    model = _env_key("OPENAI_MODEL") or _OPENAI_SEARCH_MODEL
+    if "search-preview" in model.lower():
+        return _OPENAI_SEARCH_MODEL
+    return model
+
+def _responses_text(payload):
+    direct = payload.get("output_text")
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+    parts = []
+    for item in payload.get("output") or []:
+        if item.get("type") != "message":
+            continue
+        for chunk in item.get("content") or []:
+            if chunk.get("type") in ("output_text", "text") and chunk.get("text"):
+                parts.append(chunk["text"])
+    return "\n".join(parts).strip()
+
 def ask_openai(prompt):
-    # Railway: OPENROUTER_CHATGPT_MODEL + OPENAI_API_KEY — приоритет у прямого OpenAI (веб-поиск)
+    # Прямой OpenAI с веб-поиском. Если ключа нет — OpenRouter.
     if _env_key("OPENAI_API_KEY"):
-        model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini-search-preview")
-        j = _post_json("https://api.openai.com/v1/chat/completions",
-                       {"Authorization": "Bearer "+os.environ["OPENAI_API_KEY"], "Content-Type": "application/json"},
-                       {"model": model, "messages": [{"role": "user", "content": prompt}]},
-                       timeout=60)
-        return j["choices"][0]["message"]["content"]
+        headers = {"Authorization": "Bearer " + _env_key("OPENAI_API_KEY"), "Content-Type": "application/json"}
+        model = _openai_search_model()
+        try:
+            j = _post_json("https://api.openai.com/v1/chat/completions", headers,
+                           {"model": model, "web_search_options": {},
+                            "messages": [{"role": "user", "content": prompt}]},
+                           timeout=75)
+            return j["choices"][0]["message"]["content"]
+        except Exception as e:
+            if not _MODEL_GONE.search(str(e)):
+                raise
+            print(f"[openai] {model} недоступна -> Responses web_search", flush=True)
+        resp_model = _env_key("OPENAI_RESPONSES_MODEL") or _OPENAI_RESPONSES_MODEL
+        j = _post_json("https://api.openai.com/v1/responses", headers,
+                       {"model": resp_model, "tools": [{"type": "web_search"}], "input": prompt},
+                       timeout=90)
+        text = _responses_text(j)
+        if not text:
+            raise RuntimeError("пустой ответ Responses API")
+        return text
     if openrouter_ok() and _openrouter_models("chatgpt"):
         return _ask_openrouter("chatgpt", prompt, timeout=75)
     raise RuntimeError("OPENAI_API_KEY и OPENROUTER_CHATGPT_MODEL не заданы")
@@ -1620,11 +1659,22 @@ def _giga_ctx():
     ctx.verify_mode = ssl.CERT_NONE
     return ctx
 
+def _giga_auth_key():
+    """Authorization Key из кабинета. Терпит «Basic …», кавычки и пару client_id:secret."""
+    auth = _env_key("GIGACHAT_API_KEY")
+    if not auth:
+        raise RuntimeError("GIGACHAT_API_KEY не задан")
+    if auth.lower().startswith("basic "):
+        auth = auth[6:].strip()
+    if auth.count(":") == 1 and " " not in auth:
+        auth = base64.b64encode(auth.encode()).decode()
+    return auth
+
 def _giga_token():
     now = time.time()
     if _GIGA_TOKEN["val"] and now < _GIGA_TOKEN["exp"]:
         return _GIGA_TOKEN["val"]
-    auth = os.environ["GIGACHAT_API_KEY"]                       # Authorization Key из кабинета
+    auth = _giga_auth_key()
     scope = os.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")  # PERS=физлицо, B2B/CORP=юрлицо
     req = urllib.request.Request(
         "https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
@@ -1651,6 +1701,19 @@ def ask_gigachat(prompt):
                 headers={"Authorization": "Bearer " + tok, "Content-Type": "application/json", "Accept": "application/json"})
             with urllib.request.urlopen(req, timeout=40, context=_giga_ctx()) as r:
                 return json.loads(r.read().decode())["choices"][0]["message"]["content"]
+        except urllib.error.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode("utf-8", "replace")[:400]
+            except Exception:
+                pass
+            last = RuntimeError(f"HTTP {e.code}: {body or e.reason}")
+            msg = str(last)
+            _GIGA_TOKEN["val"] = ""; _GIGA_TOKEN["exp"] = 0.0
+            if attempt < 3:
+                time.sleep(1.2)
+                continue
+            raise last
         except Exception as e:
             last = e
             msg = str(e)
